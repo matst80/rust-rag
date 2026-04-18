@@ -6,7 +6,7 @@ target/
 *.tmp
 *.bak
 assets/
-*.db
+data/
 *.sqlite
 .env
 .env.*

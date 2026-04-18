@@ -22,7 +22,7 @@ interface CategoriesResponse {
 }
 
 interface ItemsResponse {
-  items: Array<Entry & { created_at?: number }>
+  items: Entry[]
 }
 
 interface RawSearchResult {
@@ -57,7 +57,7 @@ interface GraphEdgesResponse {
 
 interface GraphNeighborhoodResponse {
   center_id: string
-  nodes: Array<Entry & { created_at?: number }>
+  nodes: Entry[]
   edges: RawEdge[]
 }
 
@@ -83,6 +83,7 @@ function toSearchResult(result: RawSearchResult): SearchResult {
     text: result.text,
     metadata: result.metadata,
     source_id: result.source_id,
+    created_at: result.created_at,
     score: Math.max(0, Math.min(1, 1 - result.distance)),
   }
 }
@@ -186,6 +187,7 @@ export async function search(data: SearchRequest): Promise<SearchResult[]> {
       query: data.query,
       top_k: data.top_k ?? 10,
       ...(data.source_id && { source_id: data.source_id }),
+      ...(data.max_distance !== undefined && { max_distance: data.max_distance }),
     }),
   })
   return ensureArray(response.results, "search results").map(toSearchResult)

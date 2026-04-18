@@ -126,6 +126,12 @@ pub struct SearchRequest {
     pub query: String,
     pub top_k: usize,
     pub source_id: Option<String>,
+    #[serde(default = "default_max_distance")]
+    pub max_distance: f32,
+}
+
+fn default_max_distance() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -351,6 +357,7 @@ async fn search(
     let query = request.query;
     let top_k = request.top_k;
     let source_id = request.source_id;
+    let max_distance = request.max_distance;
 
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<SearchHit>> {
         let embedding = embedder.embed(&query)?;
@@ -361,7 +368,11 @@ async fn search(
     .map_err(ApiError::Internal)?;
 
     Ok(Json(SearchResponse {
-        results: results.into_iter().map(Into::into).collect(),
+        results: results
+            .into_iter()
+            .filter(|hit| hit.distance <= max_distance)
+            .map(Into::into)
+            .collect(),
     }))
 }
 
@@ -1246,6 +1257,73 @@ mod tests {
             .lock()
             .expect("store mutex poisoned");
         assert_eq!(search_source_ids.as_slice(), &[Some("memory".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn search_route_filters_by_max_distance() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let store = Arc::new(MockStore::with_results(vec![
+            SearchHit {
+                id: "doc-near".to_owned(),
+                text: "close".to_owned(),
+                metadata: json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 1,
+                distance: 0.3,
+            },
+            SearchHit {
+                id: "doc-far".to_owned(),
+                text: "far".to_owned(),
+                metadata: json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 2,
+                distance: 1.5,
+            },
+        ]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server
+            .post("/search")
+            .json(&json!({ "query": "hello", "top_k": 5 }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<SearchResponse>();
+        assert_eq!(body.results.len(), 1);
+        assert_eq!(body.results[0].id, "doc-near");
+    }
+
+    #[tokio::test]
+    async fn search_route_respects_custom_max_distance() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let store = Arc::new(MockStore::with_results(vec![
+            SearchHit {
+                id: "doc-near".to_owned(),
+                text: "close".to_owned(),
+                metadata: json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 1,
+                distance: 0.3,
+            },
+            SearchHit {
+                id: "doc-far".to_owned(),
+                text: "far".to_owned(),
+                metadata: json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 2,
+                distance: 1.5,
+            },
+        ]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server
+            .post("/search")
+            .json(&json!({ "query": "hello", "top_k": 5, "max_distance": 2.0 }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<SearchResponse>();
+        assert_eq!(body.results.len(), 2);
     }
 
     #[tokio::test]

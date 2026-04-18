@@ -9,6 +9,7 @@ export interface Entry {
   text: string
   metadata: EntryMetadata
   source_id: string
+  created_at: number
 }
 
 export interface Category {
@@ -22,6 +23,7 @@ export interface SearchResult {
   text: string
   metadata: EntryMetadata
   source_id: string
+  created_at: number
   score: number
 }
 
@@ -68,6 +70,7 @@ export interface SearchRequest {
   query: string
   top_k?: number
   source_id?: string
+  max_distance?: number
 }
 
 export interface UpdateItemRequest {

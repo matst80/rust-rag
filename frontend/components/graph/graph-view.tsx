@@ -18,6 +18,7 @@ import {
 import "@xyflow/react/dist/style.css"
 import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, Trash2, X, Search, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ComboButton } from "@/components/ui/combo-button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
@@ -213,17 +214,14 @@ export function GraphView() {
   
   // Search states for different fields
   const [explorerSearch, setExplorerSearch] = useState("")
-  const [sourceSearch, setSourceSearch] = useState("")
   const [targetSearch, setTargetSearch] = useState("")
   
   const debouncedExplorerSearch = useDebounce(explorerSearch, 300)
-  const debouncedSourceSearch = useDebounce(sourceSearch, 300)
   const debouncedTargetSearch = useDebounce(targetSearch, 300)
 
   // Use search endpoint for selectors
-  const { data: explorerResults } = useSearch(debouncedExplorerSearch, undefined, 5)
-  const { data: sourceResults } = useSearch(debouncedSourceSearch, undefined, 5)
-  const { data: targetResults } = useSearch(debouncedTargetSearch, undefined, 5)
+  const { data: explorerResults, isLoading: isExplorerSearching } = useSearch(debouncedExplorerSearch, undefined, 5)
+  const { data: targetResults, isLoading: isTargetSearching } = useSearch(debouncedTargetSearch, undefined, 5)
 
   const { data: entries } = useItems()
   const { trigger: createEdge, isMutating: isCreating } = useCreateEdge()
@@ -234,12 +232,9 @@ export function GraphView() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const [centerNode, setCenterNode] = useState<string | null>(focusId)
   const [depth, setDepth] = useState(1)
-  const [showEdgeForm, setShowEdgeForm] = useState(false)
   const [open, setOpen] = useState(false)
-  const [openSource, setOpenSource] = useState(false)
   const [openTarget, setOpenTarget] = useState(false)
   const [newEdge, setNewEdge] = useState({
-    source: "",
     target: "",
     relationship: "",
   })
@@ -330,10 +325,6 @@ export function GraphView() {
 
   const handleDeleteEdge = useCallback(
     async (edgeId: string) => {
-      if (!confirm("Delete this edge?")) {
-        return
-      }
-
       await deleteEdge(edgeId)
       await mutateNeighborhood()
     },
@@ -371,17 +362,16 @@ export function GraphView() {
   )
 
   const handleCreateEdge = async () => {
-    if (!newEdge.source || !newEdge.target || !newEdge.relationship) return
+    if (!selectedNode || !newEdge.target || !newEdge.relationship) return
 
     await createEdge({
-      source_id: newEdge.source,
+      source_id: selectedNode,
       target_id: newEdge.target,
       relationship: newEdge.relationship,
     })
 
     await mutateNeighborhood()
-    setShowEdgeForm(false)
-    setNewEdge({ source: "", target: "", relationship: "" })
+    setNewEdge({ target: "", relationship: "" })
   }
 
   const selectedEntry = useMemo(
@@ -490,118 +480,123 @@ export function GraphView() {
             nodeStrokeWidth={3}
             className="!bg-card !border !shadow-sm"
           />
-          <Panel position="top-center" className="w-full max-w-lg mt-8">
-            <Card className="shadow-2xl border-primary/10 rounded-[28px] bg-background/80 backdrop-blur-xl overflow-hidden animate-in fade-in slide-in-from-top-4 duration-700">
-              <CardContent className="flex flex-col gap-4 p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary/60">Neural Network Explorer</p>
-                    <p className="text-sm text-foreground font-semibold">
-                      Visualize Knowledge Connections
-                    </p>
-                  </div>
-                  <Button size="icon" variant="ghost" className="rounded-full size-10 hover:bg-primary/5 text-primary" onClick={() => setShowEdgeForm(true)}>
-                    <Plus className="size-5" />
+          <Panel position="top-center" className="w-full max-w-2xl mt-8">
+            <div className="rounded-full bg-background/60 backdrop-blur-3xl border border-primary/5 shadow-2xl p-1.5 flex items-center gap-2 animate-in fade-in slide-in-from-top-4 duration-1000">
+              <Popover open={open} onOpenChange={setOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    className="flex-1 justify-start h-10 rounded-full bg-muted/20 hover:bg-muted/40 border-none transition-all font-medium text-sm group px-4"
+                  >
+                    <Search className="size-4 mr-3 text-muted-foreground group-hover:text-primary transition-colors" />
+                    <span className={cn(
+                      "truncate",
+                      !centerNode && "text-muted-foreground opacity-50"
+                    )}>
+                      {centerNode || "Search to start exploration..."}
+                    </span>
                   </Button>
-                </div>
-
-                <div className="flex flex-col gap-3">
-                  <Popover open={open} onOpenChange={setOpen}>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="secondary"
-                        role="combobox"
-                        aria-expanded={open}
-                        className="w-full justify-between h-14 rounded-2xl bg-muted/30 border-none hover:bg-muted/50 transition-all font-medium text-base shadow-sm group"
-                      >
-                        <div className="flex items-center gap-3 truncate">
-                          <Search className="size-5 text-muted-foreground group-hover:text-primary transition-colors" />
-                          <span className={cn(
-                            "truncate",
-                            !centerNode && "text-muted-foreground opacity-50"
-                          )}>
-                            {centerNode || "Search to start exploration..."}
-                          </span>
+                </PopoverTrigger>
+                <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 rounded-2xl border-muted-foreground/10 shadow-2xl overflow-hidden" align="center">
+                  <Command className="bg-transparent" loop shouldFilter={false}>
+                    <CommandInput 
+                      placeholder="Type an entry ID or keywords..." 
+                      className="h-14 border-none ring-0 focus:ring-0 text-base"
+                      value={explorerSearch}
+                      onValueChange={setExplorerSearch}
+                    />
+                    <CommandList>
+                      {isExplorerSearching && (
+                        <div className="py-10 flex flex-col items-center gap-2 opacity-40">
+                          <LoaderCircle className="size-8 animate-spin" />
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em]">Neural Scanning...</p>
                         </div>
-                        <RotateCcw className="ml-2 h-4 w-4 shrink-0 opacity-30 group-hover:opacity-100 transition-opacity" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 rounded-2xl border-muted-foreground/10 shadow-2xl overflow-hidden" align="center">
-                      <Command className="bg-transparent" loop shouldFilter={false}>
-                        <CommandInput 
-                          placeholder="Type an entry ID or keywords..." 
-                          className="h-14 border-none ring-0 focus:ring-0 text-base"
-                          value={explorerSearch}
-                          onValueChange={setExplorerSearch}
-                        />
-                        <CommandList>
-                          <CommandEmpty className="py-10 flex flex-col items-center gap-2 opacity-60">
-                            <Search className="size-8" />
-                            <p className="text-sm font-medium">No results found on server.</p>
-                          </CommandEmpty>
-                          <CommandGroup heading="Neural Search Results">
-                            {explorerResults?.map((res) => (
-                              <CommandItem
-                                key={res.id}
-                                value={res.id}
-                                onSelect={(currentValue) => {
-                                  handleCenterNodeChange(res.id)
-                                  setOpen(false)
-                                }}
-                                className="rounded-xl m-1.5 cursor-pointer transition-all hover:bg-primary/10 aria-selected:bg-primary/10 p-3 h-auto"
-                              >
-                                <div className="flex flex-col gap-1 w-full">
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-bold text-sm text-primary">{res.id}</span>
-                                    <span className="text-[10px] font-bold uppercase text-muted-foreground/50">{res.source_id}</span>
-                                  </div>
-                                  <span className="text-[11px] text-muted-foreground leading-relaxed line-clamp-2 italic">
-                                    {res.text}
-                                  </span>
-                                </div>
-                              </CommandItem>
-                            ))}
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
-
-                  <div className="flex gap-2.5">
-                    <Button
-                      variant="ghost"
-                      className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest hover:bg-muted/50 transition-colors"
-                      onClick={handleReset}
-                      disabled={!centerNode || depth === 1 || isNeighborhoodLoading}
-                    >
-                      <RotateCcw className="size-3.5 mr-2 opacity-50" />
-                      Reset Depth
-                    </Button>
-
-                    <Button
-                      className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest shadow-xl shadow-primary/20 bg-primary hover:bg-primary/90 hover:scale-[1.02] transition-all"
-                      onClick={handleExpand}
-                      disabled={!centerNode || !canExpand || isNeighborhoodLoading}
-                    >
-                      {isNeighborhoodLoading ? (
-                        <LoaderCircle className="size-4 animate-spin mr-2" />
-                      ) : (
-                        <ChevronsRight className="size-4 mr-2" />
                       )}
-                      Expand Context
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40 px-2">
-                  <span>Depth {depth} / {MAX_DEPTH}</span>
-                  <span className="flex items-center gap-2">
-                    <div className="size-1.5 rounded-full bg-primary/20" />
-                    {graphEntries.length} Loaded Nodes
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
+                      {!isExplorerSearching && !explorerSearch && (
+                        <div className="py-10 flex flex-col items-center gap-2 opacity-40">
+                          <Search className="size-8" />
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em]">Type to Query Memories</p>
+                        </div>
+                      )}
+                      {!isExplorerSearching && explorerSearch && explorerResults?.length === 0 && (
+                        <CommandEmpty className="py-10 flex flex-col items-center gap-2 opacity-60">
+                          <Search className="size-8 mb-2" />
+                          <p className="text-sm font-medium">No intelligence fragments found.</p>
+                        </CommandEmpty>
+                      )}
+                      <CommandGroup heading="Neural Search Results">
+                        {explorerResults?.map((res) => (
+                          <CommandItem
+                            key={res.id}
+                            value={res.id}
+                            onSelect={(currentValue) => {
+                              handleCenterNodeChange(res.id)
+                              setOpen(false)
+                            }}
+                            className="rounded-xl m-1.5 cursor-pointer transition-all hover:bg-primary/10 aria-selected:bg-primary/10 p-3 h-auto"
+                          >
+                            <div className="flex flex-col gap-1 w-full">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-sm text-primary">{res.id}</span>
+                                  <Badge variant="outline" className="text-[8px] px-1.5 py-0 border-primary/20 text-primary/60">
+                                    {Math.round(res.score * 100)}% Match
+                                  </Badge>
+                                </div>
+                                <span className="text-[10px] font-bold uppercase text-muted-foreground/50">{res.source_id}</span>
+                              </div>
+                              <span className="text-[11px] text-muted-foreground leading-relaxed line-clamp-2 italic">
+                                {res.text}
+                              </span>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+ 
+              <div className="flex items-center gap-1.5 px-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-10 rounded-full hover:bg-primary/5 transition-colors"
+                  onClick={handleReset}
+                  disabled={!centerNode || depth === 1 || isNeighborhoodLoading}
+                  title="Reset Depth"
+                >
+                  <RotateCcw className="size-4 opacity-40" />
+                </Button>
+ 
+                <div className="h-4 w-px bg-muted/20 mx-1" />
+ 
+                <Button
+                  className="h-10 px-4 rounded-full font-bold uppercase text-[10px] tracking-widest text-primary hover:bg-primary/5 transition-all"
+                  variant="ghost"
+                  onClick={handleExpand}
+                  disabled={!centerNode || !canExpand || isNeighborhoodLoading}
+                >
+                  {isNeighborhoodLoading ? (
+                    <LoaderCircle className="size-3.5 animate-spin mr-2" />
+                  ) : (
+                    <ChevronsRight className="size-3.5 mr-2" />
+                  )}
+                  Expand
+                </Button>
+              </div>
+            </div>
+ 
+            <div className="flex items-center justify-center gap-6 mt-3 text-[9px] font-bold uppercase tracking-[0.2em] text-muted-foreground/30 px-2 animate-in fade-in duration-1000 delay-500 fill-mode-both">
+              <span className="flex items-center gap-1.5">
+                <div className="size-1 rounded-full bg-primary/20" />
+                Depth {depth} / {MAX_DEPTH}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <div className="size-1 rounded-full bg-primary/20" />
+                {graphEntries.length} Active Nodes
+              </span>
+            </div>
           </Panel>
         </ReactFlow>
       </div>
@@ -668,6 +663,107 @@ export function GraphView() {
               </Button>
             </div>
 
+            <div className="flex flex-col gap-6 pt-8 border-t border-primary/5">
+              <div className="flex items-center gap-2">
+                <div className="size-1.5 rounded-full bg-primary/40 shadow-[0_0_8px_rgba(var(--primary),0.5)]" />
+                <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-primary/80">Establish Link</h4>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 ml-1">Terminal Point</Label>
+                  <Popover open={openTarget} onOpenChange={setOpenTarget}>
+                    <PopoverTrigger asChild>
+                      <Button variant="secondary" role="combobox" className="w-full justify-between h-11 rounded-2xl bg-muted/5 border-muted/10 hover:bg-muted/10 transition-all text-xs font-medium px-4">
+                        <span className="truncate">{newEdge.target || "Search target..."}</span>
+                        <ChevronDown className="size-3.5 opacity-30" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 rounded-2xl border-muted-foreground/10 shadow-2xl overflow-hidden">
+                      <Command className="bg-transparent" loop shouldFilter={false}>
+                        <CommandInput 
+                          placeholder="Search destination..." 
+                          className="h-11 border-none ring-0 focus:ring-0 text-sm" 
+                          value={targetSearch}
+                          onValueChange={setTargetSearch}
+                        />
+                        <CommandList> 
+                          {isTargetSearching && (
+                            <div className="py-6 flex flex-col items-center gap-2 opacity-40">
+                              <LoaderCircle className="size-5 animate-spin" />
+                              <p className="text-[9px] font-bold uppercase tracking-widest">Scanning...</p>
+                            </div>
+                          )}
+                          {!isTargetSearching && !targetSearch && (
+                            <div className="py-6 flex flex-col items-center gap-2 opacity-40">
+                               <p className="text-[9px] font-bold uppercase tracking-widest text-center">Type node ID or<br/>text to search</p>
+                            </div>
+                          )}
+                          {!isTargetSearching && targetSearch && targetResults?.length === 0 && (
+                            <CommandEmpty className="py-6 text-sm opacity-50 text-center">No results.</CommandEmpty>
+                          )}
+                          <CommandGroup>
+                            {targetResults?.map((res) => (
+                              <CommandItem
+                                key={res.id}
+                                value={res.id}
+                                onSelect={() => {
+                                  setNewEdge((prev) => ({ ...prev, target: res.id }))
+                                  setOpenTarget(false)
+                                }}
+                                className="rounded-xl m-1 p-2 cursor-pointer transition-all hover:bg-primary/10 h-auto"
+                              >
+                                <div className="flex flex-col gap-1 w-full">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-bold text-[11px] text-primary">{res.id}</span>
+                                      <span className="text-[9px] font-bold text-primary/40">{Math.round(res.score * 100)}%</span>
+                                    </div>
+                                    <span className="text-[8px] font-bold uppercase text-muted-foreground/30">{res.source_id}</span>
+                                  </div>
+                                  <span className="text-[9px] text-muted-foreground line-clamp-1 italic">{res.text}</span>
+                                </div>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 ml-1">Relationship</Label>
+                  <Input
+                    value={newEdge.relationship}
+                    onChange={(e) =>
+                      setNewEdge((prev) => ({
+                        ...prev,
+                        relationship: e.target.value,
+                      }))
+                    }
+                    className="h-11 rounded-2xl bg-muted/5 border-muted/10 hover:border-primary/20 transition-all text-xs font-bold px-4"
+                    placeholder="e.g. references, contradicts"
+                  />
+                </div>
+
+                <Button
+                  onClick={handleCreateEdge}
+                  className="w-full h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest bg-primary hover:bg-primary/90 shadow-lg shadow-primary/20"
+                  disabled={isCreating || !newEdge.target || !newEdge.relationship}
+                >
+                  {isCreating ? (
+                    <LoaderCircle className="size-4 animate-spin text-white" />
+                  ) : (
+                    <>
+                      <Plus className="size-4 mr-2" />
+                      Synthesize Link
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
             <div className="flex flex-col gap-4">
               <h4 className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Network Relations</h4>
               {selectedEntryEdges.length === 0 ? (
@@ -694,15 +790,10 @@ export function GraphView() {
                               {edge.relationship}
                             </Badge>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-8 rounded-full opacity-0 group-hover:opacity-100 transition-opacity text-destructive hover:bg-destructive/5"
-                            onClick={() => void handleDeleteEdge(edge.id)}
-                            disabled={isDeleting}
-                          >
-                            <Trash2 className="size-4" />
-                          </Button>
+                          <ComboButton
+                            onConfirm={() => handleDeleteEdge(edge.id)}
+                            className="size-8 rounded-full opacity-0 group-hover:opacity-100"
+                          />
                         </div>
                       </div>
                     )
@@ -722,155 +813,6 @@ export function GraphView() {
         )}
       </aside>
 
-      {/* Edge Creation Modal */}
-      {showEdgeForm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/60 backdrop-blur-md animate-in fade-in duration-300">
-          <Card className="w-[400px] border-primary/10 rounded-[32px] shadow-[0_0_100px_-20px_rgba(0,0,0,0.3)] bg-background">
-            <CardHeader className="pb-4">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xl font-black uppercase tracking-widest text-primary/80">Establish Link</CardTitle>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="rounded-full size-10"
-                  onClick={() => setShowEdgeForm(false)}
-                >
-                  <X className="size-5" />
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-6 p-6 pt-0">
-              <div className="flex flex-col gap-2">
-                <Label className="text-[10px] items-center flex gap-2 font-bold uppercase tracking-widest text-muted-foreground/60 mb-1">
-                  <div className="size-1 rounded-full bg-primary" />
-                  Origin Point
-                </Label>
-                <Popover open={openSource} onOpenChange={setOpenSource}>
-                  <PopoverTrigger asChild>
-                    <Button variant="secondary" role="combobox" className="w-full justify-between h-12 rounded-xl bg-muted/30 border-none shadow-inner">
-                      <span className="truncate">{newEdge.source || "Select source node..."}</span>
-                      <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 rounded-2xl border-muted-foreground/10 shadow-2xl overflow-hidden">
-                    <Command className="bg-transparent" loop shouldFilter={false}>
-                      <CommandInput 
-                        placeholder="Search origin..." 
-                        className="h-12 border-none ring-0 focus:ring-0" 
-                        value={sourceSearch}
-                        onValueChange={setSourceSearch}
-                      />
-                      <CommandList>
-                        <CommandEmpty className="py-6 text-sm opacity-50">No origins found.</CommandEmpty>
-                        <CommandGroup>
-                          {sourceResults?.map((res) => (
-                            <CommandItem
-                              key={res.id}
-                              value={res.id}
-                              onSelect={() => {
-                                setNewEdge((prev) => ({ ...prev, source: res.id }))
-                                setOpenSource(false)
-                              }}
-                              className="rounded-lg m-1 p-2"
-                            >
-                              <div className="flex flex-col">
-                                <span className="font-bold text-xs">{res.id}</span>
-                                <span className="text-[9px] text-muted-foreground line-clamp-1">{res.text}</span>
-                              </div>
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <Label className="text-[10px] items-center flex gap-2 font-bold uppercase tracking-widest text-muted-foreground/60 mb-1">
-                   <div className="size-1 rounded-full bg-primary" />
-                   Terminal Point
-                </Label>
-                <Popover open={openTarget} onOpenChange={setOpenTarget}>
-                  <PopoverTrigger asChild>
-                    <Button variant="secondary" role="combobox" className="w-full justify-between h-12 rounded-xl bg-muted/30 border-none shadow-inner">
-                      <span className="truncate">{newEdge.target || "Select target node..."}</span>
-                      <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0 rounded-2xl border-muted-foreground/10 shadow-2xl overflow-hidden">
-                    <Command className="bg-transparent" loop shouldFilter={false}>
-                      <CommandInput 
-                        placeholder="Search terminal..." 
-                        className="h-12 border-none ring-0 focus:ring-0" 
-                        value={targetSearch}
-                        onValueChange={setTargetSearch}
-                      />
-                      <CommandList>
-                        <CommandEmpty className="py-6 text-sm opacity-50">No terminals found.</CommandEmpty>
-                        <CommandGroup>
-                          {targetResults?.map((res) => (
-                            <CommandItem
-                              key={res.id}
-                              value={res.id}
-                              onSelect={() => {
-                                setNewEdge((prev) => ({ ...prev, target: res.id }))
-                                setOpenTarget(false)
-                              }}
-                              className="rounded-lg m-1 p-2"
-                            >
-                              <div className="flex flex-col">
-                                <span className="font-bold text-xs">{res.id}</span>
-                                <span className="text-[9px] text-muted-foreground line-clamp-1">{res.text}</span>
-                              </div>
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <Label className="text-[10px] items-center flex gap-2 font-bold uppercase tracking-widest text-muted-foreground/60 mb-1">
-                   <div className="size-1 rounded-full bg-primary" />
-                   Connection Log
-                </Label>
-                <Input
-                  value={newEdge.relationship}
-                  onChange={(e) =>
-                    setNewEdge((prev) => ({
-                      ...prev,
-                      relationship: e.target.value,
-                    }))
-                  }
-                  className="h-12 rounded-xl bg-muted/30 border-none shadow-inner placeholder:text-muted-foreground/40 font-bold text-sm px-4"
-                  placeholder="e.g. references, contradicts, correlates"
-                />
-              </div>
-
-              <div className="flex justify-end gap-3 mt-4">
-                <Button variant="ghost" className="rounded-2xl font-bold uppercase text-[10px] tracking-widest px-6" onClick={() => setShowEdgeForm(false)}>
-                  Abort
-                </Button>
-                <Button
-                  onClick={handleCreateEdge}
-                  className="rounded-2xl font-bold uppercase text-[10px] tracking-widest px-6 shadow-xl shadow-primary/20"
-                  disabled={
-                    isCreating ||
-                    !newEdge.source ||
-                    !newEdge.target ||
-                    !newEdge.relationship
-                  }
-                >
-                  {isCreating ? "Synthesizing..." : "Initialize Link"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
     </div>
   )
 }

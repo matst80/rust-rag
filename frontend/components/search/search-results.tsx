@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { SearchResult } from "@/lib/api"
 
+import { EntryCard } from "../entries/entry-card"
+
 interface SearchResultsProps {
   results: SearchResult[]
   query: string
@@ -16,94 +18,51 @@ interface SearchResultsProps {
 export function SearchResults({ results, query }: SearchResultsProps) {
   if (results.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <FileText className="mb-4 size-12 text-muted-foreground" />
-        <h3 className="mb-2 text-lg font-medium">No results found</h3>
-        <p className="text-sm text-muted-foreground">
-          No entries match your search for &ldquo;{query}&rdquo;
+      <div className="flex flex-col items-center justify-center py-24 text-center animate-in fade-in slide-in-from-bottom-8 duration-1000">
+        <div className="mb-8 flex size-24 items-center justify-center rounded-[2.5rem] bg-muted/10 border border-muted/20 shadow-inner group overflow-hidden relative">
+          <div className="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors" />
+          <FileText className="size-10 text-muted-foreground/30 group-hover:scale-110 transition-transform duration-500" />
+        </div>
+        <h3 className="mb-4 text-3xl font-extrabold tracking-tight bg-gradient-to-b from-foreground to-foreground/60 bg-clip-text text-transparent"> No results match</h3>
+        <p className="text-muted-foreground max-w-sm mx-auto text-lg leading-relaxed font-medium">
+          We couldn't find any intelligence fragments matching &ldquo;<span className="text-primary">{query}</span>&rdquo;
         </p>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <p className="text-sm text-muted-foreground">
-        Found {results.length} result{results.length !== 1 ? "s" : ""} for &ldquo;{query}&rdquo;
-      </p>
-      {results.map((result) => (
-        <SearchResultCard key={result.id} result={result} />
-      ))}
+    <div className="flex flex-col gap-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      <div className="flex items-center gap-6">
+        <div className="flex items-center gap-3 px-4 py-2 rounded-2xl bg-primary/5 border border-primary/10 backdrop-blur-sm shadow-sm transition-all hover:bg-primary/10">
+          <div className="size-2 rounded-full bg-primary animate-pulse" />
+          <p className="text-[11px] font-black uppercase tracking-[0.25em] text-primary/80 whitespace-nowrap">
+            Retrieved {results.length} Memory Fragment{results.length !== 1 ? "s" : ""}
+          </p>
+        </div>
+        <div className="h-px flex-1 bg-gradient-to-r from-muted/40 to-transparent" />
+      </div>
+      
+      <div className="grid gap-8">
+        {results.map((result, index) => (
+          <EntryCard 
+            key={result.id} 
+            entry={result} 
+            index={index} 
+            showScore={true} 
+          />
+        ))}
+      </div>
+      
+      <div className="flex items-center justify-center pt-10">
+        <div className="h-px w-10 bg-muted/20" />
+        <p className="px-6 text-[10px] font-bold uppercase tracking-[0.3em] text-muted-foreground/20">
+          End of results
+        </p>
+        <div className="h-px w-10 bg-muted/20" />
+      </div>
     </div>
   )
 }
 
-function SearchResultCard({ result }: { result: SearchResult }) {
-  const scorePercent = Math.round(result.score * 100)
-  
-  const getScoreColor = (score: number) => {
-    if (score > 0.8) return 'bg-emerald-500'
-    if (score > 0.5) return 'bg-amber-500'
-    return 'bg-muted-foreground'
-  }
 
-  const getSourceVariant = (source: string) => {
-    const s = source.toLowerCase()
-    if (s.includes('manual')) return 'warning'
-    if (s.includes('auto')) return 'info'
-    if (s.includes('imported')) return 'purple'
-    return 'outline'
-  }
-
-  return (
-    <Card className="group relative overflow-hidden transition-all hover:shadow-lg border-muted/60">
-      <div className={cn("absolute top-0 left-0 h-1 transition-all duration-500", getScoreColor(result.score))} style={{ width: `${scorePercent}%` }} />
-      <CardHeader className="pb-3 pt-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex flex-col gap-1">
-            <CardTitle className="line-clamp-1 text-base font-bold tracking-tight">
-              <Link href={`/entries/${encodeURIComponent(result.id)}`} className="hover:text-primary transition-colors">
-                {result.id}
-              </Link>
-            </CardTitle>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase text-muted-foreground/70">Relevance</span>
-              <span className={cn("text-xs font-bold", result.score > 0.5 ? "text-primary" : "text-muted-foreground")}>
-                {scorePercent}%
-              </span>
-            </div>
-          </div>
-          <Badge variant={getSourceVariant(result.source_id)} className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider">
-            {result.source_id}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <p className="mb-4 line-clamp-3 text-sm text-muted-foreground leading-relaxed">
-          {result.text}
-        </p>
-        
-        {Object.keys(result.metadata).length > 0 && (
-          <div className="mb-4 flex flex-wrap gap-1.5">
-            {Object.entries(result.metadata)
-              .slice(0, 5)
-              .map(([key, value]) => (
-                <Badge key={key} variant="secondary" className="px-1.5 py-0 text-[10px] bg-secondary/50 border-none font-medium">
-                  <span className="opacity-60">{key}:</span> {String(value)}
-                </Badge>
-              ))}
-          </div>
-        )}
-        
-        <div className="flex justify-start border-t border-muted/30 pt-3">
-          <Button variant="link" size="sm" asChild className="h-auto p-0 text-primary font-semibold">
-            <Link href={`/entries/${encodeURIComponent(result.id)}`}>
-              View details
-              <ExternalLink className="ml-1.5 size-3" />
-            </Link>
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}

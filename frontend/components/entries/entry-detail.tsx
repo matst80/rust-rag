@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft, Pencil, Trash2, GitBranch, Save } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
 import { useItem, useDeleteItem, useEdgesForItem, useGraphStatus } from "@/lib/api"
 import { useSWRConfig } from "swr"
@@ -43,7 +44,6 @@ export function EntryDetail({ id }: EntryDetailProps) {
   }, [entry])
 
   const handleDelete = async () => {
-    if (!confirm("Are you sure you want to delete this entry?")) return
     await deleteItem(id)
     mutate("items")
     mutate("categories")
@@ -103,11 +103,14 @@ export function EntryDetail({ id }: EntryDetailProps) {
               <ArrowLeft className="size-4" />
             </Link>
           </Button>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold tracking-tight">{entry.id}</h1>
-            <Badge variant={getSourceVariant(entry.source_id)} className="px-2 py-0.5 text-[10px] uppercase font-bold tracking-widest">
-              {entry.source_id}
-            </Badge>
+          <div className="flex flex-col">
+            <h1 className="text-lg font-black tracking-tighter uppercase text-foreground/80 leading-none">Intelligence Fragment</h1>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-[10px] font-bold text-muted-foreground/40 tabular-nums uppercase tracking-widest">ID: {entry.id.substring(0, 8)}...</span>
+              <Badge variant={getSourceVariant(entry.source_id)} className="px-1.5 py-0 text-[8px] uppercase font-black tracking-[0.15em]">
+                {entry.source_id}
+              </Badge>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -128,9 +131,10 @@ export function EntryDetail({ id }: EntryDetailProps) {
               Cancel
             </Button>
           )}
-          <Button variant="ghost" size="icon" onClick={handleDelete} className="text-muted-foreground hover:text-destructive transition-colors">
-            <Trash2 className="size-4" />
-          </Button>
+          <ComboButton 
+            onConfirm={handleDelete}
+            className="text-muted-foreground"
+          />
         </div>
       </div>
 
