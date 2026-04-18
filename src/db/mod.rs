@@ -136,6 +136,11 @@ pub trait VectorStore: Send + Sync {
     fn list_items(&self, source_id: Option<&str>) -> Result<Vec<ItemRecord>>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
     fn delete_item(&self, id: &str) -> Result<bool>;
+    fn distances_for_ids(
+        &self,
+        query_embedding: &[f32],
+        ids: &[String],
+    ) -> Result<Vec<SearchHit>>;
     fn graph_status(&self) -> Result<GraphStatus>;
     fn graph_neighborhood(
         &self,
@@ -350,6 +355,56 @@ impl VectorStore for SqliteVectorStore {
             }
         }
 
+        Ok(results)
+    }
+
+    fn distances_for_ids(
+        &self,
+        query_embedding: &[f32],
+        ids: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query_embedding_json = embedding_to_json(query_embedding);
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        let placeholders = std::iter::repeat("?")
+            .take(ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "
+            SELECT
+                items.id,
+                items.text,
+                items.metadata,
+                items.source_id,
+                items.created_at,
+                CAST(vec_distance_L2(vec_items.embedding, vec_f32(?)) AS REAL) AS distance
+            FROM items
+            JOIN vec_items ON vec_items.id = items.id
+            WHERE items.id IN ({placeholders})
+            ORDER BY distance ASC
+            "
+        );
+
+        let mut statement = connection.prepare(&sql)?;
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() + 1);
+        params_vec.push(&query_embedding_json);
+        for id in ids {
+            params_vec.push(id);
+        }
+        let rows =
+            statement.query_map(rusqlite::params_from_iter(params_vec), map_search_row)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
         Ok(results)
     }
 

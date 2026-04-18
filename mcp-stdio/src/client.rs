@@ -103,6 +103,16 @@ impl RustRagHttpClient {
             .await
     }
 
+    pub async fn get_item(&self, id: &str) -> Result<AdminItemPayload> {
+        self.send_json::<(), (), AdminItemPayload>(
+            Method::GET,
+            &format!("admin/items/{id}"),
+            None,
+            None,
+        )
+        .await
+    }
+
     pub async fn update_item(&self, id: &str, request: &UpdateItemRequest) -> Result<AdminItemPayload> {
         self.send_json(Method::PUT, &format!("admin/items/{id}"), Some(request), None::<&()>)
             .await

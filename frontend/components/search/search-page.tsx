@@ -84,7 +84,11 @@ export function SearchPage() {
                   <p className="text-xs font-black uppercase tracking-[0.3em] text-muted-foreground animate-pulse">Scanning Intelligence Basin...</p>
                 </div>
               ) : results ? (
-                <SearchResults results={results} query={submittedQuery} />
+                <SearchResults
+                  results={results.results}
+                  related={results.related}
+                  query={submittedQuery}
+                />
               ) : null}
             </div>
           </div>

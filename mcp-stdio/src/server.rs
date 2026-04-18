@@ -1,20 +1,21 @@
-use crate::{client::RustRagHttpClient, config::ToolGroup};
+use crate::{client::RustRagHttpClient, config::{SearchFormat, ToolGroup}};
 use rmcp::{
     ServerHandler, tool,
     handler::server::{router::tool::ToolRouter, wrapper::{Json, Parameters}},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool_handler,
 };
 use rust_rag::{
     api::{
         CreateManualEdgeRequest, DeleteResponse, GraphNeighborhoodQuery, ListGraphEdgesQuery,
-        ListItemsQuery, SearchRequest, StoreRequest, UpdateItemRequest,
+        ListItemsQuery, SearchRequest, SearchResponse, SearchResultPayload, StoreRequest,
+        UpdateItemRequest,
     },
     db::GraphEdgeType,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write};
 
 #[derive(Debug, Clone)]
 pub struct BridgeServerInfo {
@@ -27,6 +28,7 @@ pub struct BridgeServerInfo {
 pub struct RustRagMcpServer {
     client: RustRagHttpClient,
     info: BridgeServerInfo,
+    search_format: SearchFormat,
     tool_router: ToolRouter<Self>,
 }
 
@@ -35,6 +37,7 @@ impl RustRagMcpServer {
         client: RustRagHttpClient,
         enabled_groups: &BTreeSet<ToolGroup>,
         info: BridgeServerInfo,
+        search_format: SearchFormat,
     ) -> Self {
         let mut tool_router = ToolRouter::<Self>::new();
         if enabled_groups.contains(&ToolGroup::Core) {
@@ -50,6 +53,7 @@ impl RustRagMcpServer {
         Self {
             client,
             info,
+            search_format,
             tool_router,
         }
     }
@@ -75,6 +79,7 @@ impl ServerHandler for RustRagMcpServer {
 pub struct UpdateItemParams {
     pub id: String,
     pub text: String,
+    #[schemars(schema_with = "rust_rag::api::metadata_schema")]
     pub metadata: serde_json::Value,
     pub source_id: String,
 }
@@ -117,12 +122,29 @@ impl RustRagMcpServer {
         self.client.store(&request).await.map(Json).map_err(stringify_error)
     }
 
-    #[tool(description = "Run semantic search against stored entries.")]
+    #[tool(
+        description = "Run semantic search against stored entries. Returns ranked vector hits plus `related` items that the user manually linked from the top hit (not just vector-similar)."
+    )]
     async fn search_entries(
         &self,
         Parameters(request): Parameters<SearchRequest>,
-    ) -> Result<Json<rust_rag::api::SearchResponse>, String> {
-        self.client.search(&request).await.map(Json).map_err(stringify_error)
+    ) -> Result<CallToolResult, String> {
+        let response = self.client.search(&request).await.map_err(stringify_error)?;
+        Ok(format_search_response(&response, &request.query, self.search_format))
+    }
+
+    #[tool(
+        description = "Fetch a single stored entry by its id. Use this to look up the full text and metadata of a specific entry returned from search_entries or graph tools."
+    )]
+    async fn get_entry(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<rust_rag::api::AdminItemPayload>, String> {
+        self.client
+            .get_item(&id)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
     }
 }
 
@@ -253,4 +275,163 @@ impl RustRagMcpServer {
 
 fn stringify_error(error: anyhow::Error) -> String {
     error.to_string()
+}
+
+fn format_search_response(
+    response: &SearchResponse,
+    query: &str,
+    format: SearchFormat,
+) -> CallToolResult {
+    match format {
+        SearchFormat::Json => {
+            let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+            CallToolResult::structured(value)
+        }
+        SearchFormat::Markdown => CallToolResult::success(vec![Content::text(
+            format_search_markdown(response, query),
+        )]),
+        SearchFormat::Both => {
+            let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+            let mut result = CallToolResult::success(vec![Content::text(format_search_markdown(
+                response, query,
+            ))]);
+            result.structured_content = Some(value);
+            result
+        }
+    }
+}
+
+fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Search: {query}");
+
+    if response.results.is_empty() {
+        let _ = writeln!(out, "\nNo matching entries.");
+        return out;
+    }
+
+    let _ = writeln!(
+        out,
+        "\nFound {} result{}.",
+        response.results.len(),
+        if response.results.len() == 1 { "" } else { "s" }
+    );
+
+    for (index, hit) in response.results.iter().enumerate() {
+        write_result_entry(&mut out, index + 1, hit, None);
+    }
+
+    if !response.related.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n## User-linked related ({})\n\nItems the user manually linked from the top hit (ids only — call `get_entry` to read the full content).",
+            response.related.len()
+        );
+        for related in &response.related {
+            let relevance = ((1.0 - related.distance).clamp(0.0, 1.0) * 100.0).round() as i64;
+            let relation = related.relation.as_deref().unwrap_or("related");
+            let _ = writeln!(
+                out,
+                "- `{id}` — {relation} — {relevance}% [{source}]",
+                id = related.id,
+                source = related.source_id,
+            );
+        }
+    }
+
+    out
+}
+
+fn write_result_entry(
+    out: &mut String,
+    index: usize,
+    hit: &SearchResultPayload,
+    relation: Option<&str>,
+) {
+    let relevance = ((1.0 - hit.distance).clamp(0.0, 1.0) * 100.0).round() as i64;
+    let suffix = match relation {
+        Some(r) => format!(" — relation: {r}"),
+        None => String::new(),
+    };
+    let _ = writeln!(
+        out,
+        "\n### {index}. `{id}` — {relevance}% [{source}]{suffix}",
+        id = hit.id,
+        source = hit.source_id,
+    );
+    let _ = writeln!(out, "\n{}", hit.text.trim());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_rag::api::RelatedResultPayload;
+
+    fn hit(id: &str, distance: f32, text: &str) -> SearchResultPayload {
+        SearchResultPayload {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            metadata: serde_json::json!({}),
+            source_id: "memory".to_owned(),
+            created_at: 1,
+            distance,
+        }
+    }
+
+    #[test]
+    fn markdown_includes_results_and_related_sections() {
+        let response = SearchResponse {
+            results: vec![hit("doc-top", 0.15, "kubernetes ingress overview")],
+            related: vec![RelatedResultPayload {
+                id: "doc-storage".to_owned(),
+                text: "persistent volumes".to_owned(),
+                metadata: serde_json::json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 2,
+                distance: 0.55,
+                relation: Some("supports".to_owned()),
+            }],
+        };
+
+        let md = format_search_markdown(&response, "kubernetes ingress");
+        assert!(md.contains("# Search: kubernetes ingress"));
+        assert!(md.contains("doc-top"));
+        assert!(md.contains("85%"));
+        assert!(md.contains("User-linked related"));
+        assert!(md.contains("doc-storage"));
+        assert!(md.contains("supports"));
+        assert!(
+            !md.contains("persistent volumes"),
+            "related body text must not be inlined to save context"
+        );
+    }
+
+    #[test]
+    fn json_format_sets_structured_content_only() {
+        let response = SearchResponse {
+            results: vec![hit("doc-1", 0.1, "hello")],
+            related: Vec::new(),
+        };
+        let result = format_search_response(&response, "query", SearchFormat::Json);
+        assert!(result.structured_content.is_some());
+    }
+
+    #[test]
+    fn both_format_sets_markdown_and_structured() {
+        let response = SearchResponse {
+            results: vec![hit("doc-1", 0.1, "hello")],
+            related: Vec::new(),
+        };
+        let result = format_search_response(&response, "query", SearchFormat::Both);
+        assert!(result.structured_content.is_some());
+        let text = result
+            .content
+            .iter()
+            .find_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .expect("text content present");
+        assert!(text.contains("# Search: query"));
+    }
 }

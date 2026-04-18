@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "mcp_stdio=info,rmcp=info".into()),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     let config = BridgeConfig::from_env()?;
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
             version: config.server_version.clone(),
             instructions: config.server_instructions.clone(),
         },
+        config.search_format,
     );
 
     info!(
@@ -44,6 +46,7 @@ async fn main() -> Result<()> {
         "starting rust-rag MCP stdio bridge"
     );
 
-    server.serve(stdio()).await?;
+    let running = server.serve(stdio()).await?;
+    running.waiting().await?;
     Ok(())
 }

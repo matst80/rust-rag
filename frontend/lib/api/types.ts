@@ -27,6 +27,15 @@ export interface SearchResult {
   score: number
 }
 
+export interface RelatedResult extends SearchResult {
+  relation: string | null
+}
+
+export interface SearchResultsBundle {
+  results: SearchResult[]
+  related: RelatedResult[]
+}
+
 export interface SearchResponse {
   results: SearchResult[]
   query: string

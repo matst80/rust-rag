@@ -2,6 +2,8 @@ import type {
   Entry,
   Category,
   SearchResult,
+  RelatedResult,
+  SearchResultsBundle,
   SearchRequest,
   StoreRequest,
   UpdateItemRequest,
@@ -34,8 +36,13 @@ interface RawSearchResult {
   distance: number
 }
 
+interface RawRelatedResult extends RawSearchResult {
+  relation: string | null
+}
+
 interface SearchResponse {
   results: RawSearchResult[]
+  related?: RawRelatedResult[]
 }
 
 interface RawEdge {
@@ -85,6 +92,13 @@ function toSearchResult(result: RawSearchResult): SearchResult {
     source_id: result.source_id,
     created_at: result.created_at,
     score: Math.max(0, Math.min(1, 1 - result.distance)),
+  }
+}
+
+function toRelatedResult(result: RawRelatedResult): RelatedResult {
+  return {
+    ...toSearchResult(result),
+    relation: result.relation,
   }
 }
 
@@ -180,7 +194,7 @@ export async function deleteItem(id: string): Promise<void> {
 }
 
 // Search API
-export async function search(data: SearchRequest): Promise<SearchResult[]> {
+export async function search(data: SearchRequest): Promise<SearchResultsBundle> {
   const response = await request<SearchResponse>("/search", {
     method: "POST",
     body: JSON.stringify({
@@ -190,7 +204,10 @@ export async function search(data: SearchRequest): Promise<SearchResult[]> {
       ...(data.max_distance !== undefined && { max_distance: data.max_distance }),
     }),
   })
-  return ensureArray(response.results, "search results").map(toSearchResult)
+  return {
+    results: ensureArray(response.results, "search results").map(toSearchResult),
+    related: (response.related ?? []).map(toRelatedResult),
+  }
 }
 
 // Edges API

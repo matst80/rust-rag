@@ -5,16 +5,42 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_API_BASE_URL: &str = "http://127.0.0.1:4001";
+const DEFAULT_API_BASE_URL: &str = "https://rag.k6n.net";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_SERVER_NAME: &str = "rust-rag-mcp";
-const DEFAULT_SERVER_INSTRUCTIONS: &str = "This server exposes the rust-rag HTTP API over MCP tools. Use core tools for storage and semantic search, admin tools for item management, and graph tools for similarity graph inspection or maintenance.";
+const DEFAULT_SERVER_INSTRUCTIONS: &str = "This server exposes the rust-rag retrieval store over MCP tools. \
+Entries are grouped by a user-defined `source_id` (a short lowercase namespace such as \"memory\", \"knowledge\", or \"notes\") — pick a stable source_id per logical bucket of content. \
+Use `search_entries` for semantic retrieval (filter by source_id when you know the bucket), `store_entry` to add content, admin tools to manage items, and graph tools to inspect or curate manual links between entries.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ToolGroup {
     Core,
     Admin,
     Graph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFormat {
+    Markdown,
+    Json,
+    Both,
+}
+
+impl SearchFormat {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "markdown" | "md" | "text" => Ok(Self::Markdown),
+            "json" | "structured" => Ok(Self::Json),
+            "both" | "all" => Ok(Self::Both),
+            other => bail!("unsupported search format {other}"),
+        }
+    }
+}
+
+impl Default for SearchFormat {
+    fn default() -> Self {
+        Self::Markdown
+    }
 }
 
 impl ToolGroup {
@@ -52,6 +78,7 @@ pub struct BridgeConfig {
     pub server_name: String,
     pub server_version: String,
     pub server_instructions: Option<String>,
+    pub search_format: SearchFormat,
 }
 
 impl BridgeConfig {
@@ -99,6 +126,11 @@ impl BridgeConfig {
             .filter(|value| !value.is_empty())
             .or_else(|| Some(DEFAULT_SERVER_INSTRUCTIONS.to_owned()));
 
+        let search_format = match values.get("RAG_MCP_SEARCH_FORMAT") {
+            Some(raw) if !raw.trim().is_empty() => SearchFormat::parse(raw)?,
+            _ => SearchFormat::default(),
+        };
+
         Ok(Self {
             api_base_url,
             request_timeout,
@@ -108,6 +140,7 @@ impl BridgeConfig {
             server_name,
             server_version,
             server_instructions,
+            search_format,
         })
     }
 }
@@ -172,7 +205,7 @@ fn non_empty(value: Option<&String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeConfig, ToolGroup};
+    use super::{BridgeConfig, SearchFormat, ToolGroup};
 
     fn vars(entries: &[(&str, &str)]) -> Vec<(String, String)> {
         entries
@@ -185,7 +218,7 @@ mod tests {
     fn parses_defaults() {
         let config = BridgeConfig::from_env_map(Vec::<(String, String)>::new()).unwrap();
 
-        assert_eq!(config.api_base_url, "http://127.0.0.1:4001");
+        assert_eq!(config.api_base_url, "https://rag.k6n.net");
         assert_eq!(config.request_timeout.as_secs(), 30);
         assert_eq!(config.enabled_groups.len(), 3);
         assert!(config.enabled_groups.contains(&ToolGroup::Core));
@@ -193,6 +226,22 @@ mod tests {
         assert!(config.enabled_groups.contains(&ToolGroup::Graph));
         assert_eq!(config.server_name, "rust-rag-mcp");
         assert!(config.server_instructions.is_some());
+        assert_eq!(config.search_format, SearchFormat::Markdown);
+    }
+
+    #[test]
+    fn parses_search_format_override() {
+        let config =
+            BridgeConfig::from_env_map(vars(&[("RAG_MCP_SEARCH_FORMAT", "both")])).unwrap();
+        assert_eq!(config.search_format, SearchFormat::Both);
+
+        let config =
+            BridgeConfig::from_env_map(vars(&[("RAG_MCP_SEARCH_FORMAT", "json")])).unwrap();
+        assert_eq!(config.search_format, SearchFormat::Json);
+
+        let error =
+            BridgeConfig::from_env_map(vars(&[("RAG_MCP_SEARCH_FORMAT", "xml")])).unwrap_err();
+        assert!(error.to_string().contains("unsupported search format"));
     }
 
     #[test]

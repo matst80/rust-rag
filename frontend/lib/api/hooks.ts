@@ -4,7 +4,7 @@ import { api } from "./client"
 import type {
   Entry,
   Category,
-  SearchResult,
+  SearchResultsBundle,
   StoreRequest,
   UpdateItemRequest,
   Edge,
@@ -56,7 +56,7 @@ export function useDeleteItem() {
 
 // Search hook
 export function useSearch(query: string, sourceId?: string, topK: number = 10) {
-  return useSWR<SearchResult[]>(
+  return useSWR<SearchResultsBundle>(
     query ? ["search", query, sourceId, topK] : null,
     () =>
       api.search({

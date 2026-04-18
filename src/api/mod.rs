@@ -11,12 +11,13 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -113,36 +114,70 @@ impl EmbedderHandle {
     }
 }
 
+pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let serde_json::Value::Object(map) = serde_json::json!({
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Free-form JSON object of string-keyed metadata.",
+    }) else {
+        unreachable!()
+    };
+    schemars::Schema::from(map)
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StoreRequest {
+    /// Optional stable identifier. If omitted, a UUIDv7 is generated.
     pub id: Option<String>,
+    /// The natural-language content to embed and store.
     pub text: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
+    /// User-defined namespace/category for this entry (e.g. "memory", "knowledge", "notes").
+    /// Entries sharing a source_id are grouped together; search and listing can filter on it.
+    /// Pick a short, lowercase, stable identifier per logical bucket of content.
     pub source_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchRequest {
+    /// Natural-language query. It is embedded and compared against stored entries by L2 distance.
     pub query: String,
+    /// Maximum number of ranked hits to return before the max_distance filter is applied.
+    /// Optional; defaults to 5.
+    #[serde(default = "default_top_k")]
     pub top_k: usize,
+    /// Restrict the search to entries with this source_id (namespace).
+    /// Omit to search across every source_id.
     pub source_id: Option<String>,
+    /// Maximum L2 distance for a result to be considered relevant.
+    /// Lower values are stricter; 0.0 is an exact match. Results at or above this threshold
+    /// are filtered out. Default 0.8 — anything above is usually noise.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
 }
 
+fn default_top_k() -> usize {
+    5
+}
+
 fn default_max_distance() -> f32 {
-    1.0
+    0.8
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateItemRequest {
+    /// New content to embed and store in place of the existing text.
     pub text: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
+    /// Namespace/category the entry belongs to. See StoreRequest.source_id.
     pub source_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListItemsQuery {
+    /// Restrict the listing to a single source_id. Omit to list across all namespaces.
     pub source_id: Option<String>,
 }
 
@@ -167,6 +202,7 @@ pub struct CreateManualEdgeRequest {
     pub weight: Option<f32>,
     pub directed: Option<bool>,
     #[serde(default = "default_metadata")]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
 }
 
@@ -187,6 +223,7 @@ pub struct DeleteResponse {
 pub struct SearchResultPayload {
     pub id: String,
     pub text: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
@@ -194,8 +231,22 @@ pub struct SearchResultPayload {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct RelatedResultPayload {
+    pub id: String,
+    pub text: String,
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Value,
+    pub source_id: String,
+    pub created_at: i64,
+    pub distance: f32,
+    pub relation: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultPayload>,
+    #[serde(default)]
+    pub related: Vec<RelatedResultPayload>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -213,6 +264,7 @@ pub struct CategoriesResponse {
 pub struct AdminItemPayload {
     pub id: String,
     pub text: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
@@ -245,6 +297,7 @@ pub struct GraphEdgePayload {
     pub relation: Option<String>,
     pub weight: f32,
     pub directed: bool,
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
     pub created_at: i64,
     pub updated_at: i64,
@@ -288,7 +341,7 @@ pub fn router(state: AppState) -> Router {
         .route("/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
-        .route("/admin/items/{id}", put(update_item).delete(delete_item))
+        .route("/admin/items/{id}", get(get_item).put(update_item).delete(delete_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
@@ -359,19 +412,74 @@ async fn search(
     let source_id = request.source_id;
     let max_distance = request.max_distance;
 
-    let results = tokio::task::spawn_blocking(move || -> Result<Vec<SearchHit>> {
-        let embedding = embedder.embed(&query)?;
-        store.search(&embedding, top_k, source_id.as_deref())
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let (results, related) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
+            let embedding = embedder.embed(&query)?;
+            let hits = store.search(&embedding, top_k, source_id.as_deref())?;
+            let filtered: Vec<SearchHit> = hits
+                .into_iter()
+                .filter(|hit| hit.distance <= max_distance)
+                .collect();
+
+            let related = if let Some(top) = filtered.first() {
+                let edges = store
+                    .list_graph_edges(Some(&top.id), Some(GraphEdgeType::Manual))
+                    .ok()
+                    .unwrap_or_default();
+                let existing: HashSet<&str> =
+                    filtered.iter().map(|hit| hit.id.as_str()).collect();
+                let mut relations: HashMap<String, Option<String>> = HashMap::new();
+                for edge in edges {
+                    let neighbor_id = if edge.from_item_id == top.id {
+                        edge.to_item_id
+                    } else {
+                        edge.from_item_id
+                    };
+                    if neighbor_id == top.id || existing.contains(neighbor_id.as_str()) {
+                        continue;
+                    }
+                    relations.entry(neighbor_id).or_insert(edge.relation);
+                }
+                if relations.is_empty() {
+                    Vec::new()
+                } else {
+                    let ids: Vec<String> = relations.keys().cloned().collect();
+                    let mut hits = store.distances_for_ids(&embedding, &ids)?;
+                    hits.sort_by(|a, b| {
+                        a.distance
+                            .partial_cmp(&b.distance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    hits.into_iter()
+                        .map(|hit| {
+                            let relation = relations.get(&hit.id).and_then(Clone::clone);
+                            (hit, relation)
+                        })
+                        .collect()
+                }
+            } else {
+                Vec::new()
+            };
+
+            Ok((filtered, related))
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
 
     Ok(Json(SearchResponse {
-        results: results
+        results: results.into_iter().map(Into::into).collect(),
+        related: related
             .into_iter()
-            .filter(|hit| hit.distance <= max_distance)
-            .map(Into::into)
+            .map(|(hit, relation)| RelatedResultPayload {
+                id: hit.id,
+                text: hit.text,
+                metadata: hit.metadata,
+                source_id: hit.source_id,
+                created_at: hit.created_at,
+                distance: hit.distance,
+                relation,
+            })
             .collect(),
     }))
 }
@@ -460,6 +568,20 @@ async fn list_items(
     Ok(Json(AdminItemsResponse {
         items: items.into_iter().map(Into::into).collect(),
     }))
+}
+
+async fn get_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AdminItemPayload>, ApiError> {
+    let store = state.store.clone();
+    let item = tokio::task::spawn_blocking(move || store.get_item(&id))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
+
+    Ok(Json(item.into()))
 }
 
 async fn update_item(
@@ -880,6 +1002,33 @@ mod tests {
                 .clone())
         }
 
+        fn distances_for_ids(
+            &self,
+            _query_embedding: &[f32],
+            ids: &[String],
+        ) -> Result<Vec<SearchHit>> {
+            let stored = self.stored.lock().expect("store mutex poisoned");
+            let results = self.search_results.lock().expect("store mutex poisoned");
+            let mut hits = Vec::new();
+            for id in ids {
+                if let Some(hit) = results.iter().find(|h| &h.id == id) {
+                    hits.push(hit.clone());
+                    continue;
+                }
+                if let Some((item, _)) = stored.iter().find(|(item, _)| &item.id == id) {
+                    hits.push(SearchHit {
+                        id: item.id.clone(),
+                        text: item.text.clone(),
+                        metadata: item.metadata.clone(),
+                        source_id: item.source_id.clone(),
+                        created_at: item.created_at,
+                        distance: 0.0,
+                    });
+                }
+            }
+            Ok(hits)
+        }
+
         fn list_categories(&self) -> Result<Vec<CategorySummary>> {
             let stored = self.stored.lock().expect("store mutex poisoned");
             let mut counts = BTreeMap::<String, i64>::new();
@@ -1249,7 +1398,8 @@ mod tests {
                 "source_id": "memory",
                 "created_at": 1234,
                 "distance": 0.0125
-            }]
+            }],
+            "related": []
         }));
 
         let search_source_ids = store
@@ -1291,6 +1441,156 @@ mod tests {
         let body = response.json::<SearchResponse>();
         assert_eq!(body.results.len(), 1);
         assert_eq!(body.results[0].id, "doc-near");
+    }
+
+    #[tokio::test]
+    async fn search_route_returns_related_manual_neighbors_of_top_hit() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let store = Arc::new(MockStore {
+            stored: Mutex::new(vec![
+                (
+                    ItemRecord {
+                        id: "doc-top".to_owned(),
+                        text: "kubernetes ingress".to_owned(),
+                        metadata: json!({}),
+                        source_id: "memory".to_owned(),
+                        created_at: 1,
+                    },
+                    Vec::new(),
+                ),
+                (
+                    ItemRecord {
+                        id: "doc-linked".to_owned(),
+                        text: "kubernetes storage".to_owned(),
+                        metadata: json!({}),
+                        source_id: "memory".to_owned(),
+                        created_at: 2,
+                    },
+                    Vec::new(),
+                ),
+                (
+                    ItemRecord {
+                        id: "doc-similar".to_owned(),
+                        text: "sim neighbor".to_owned(),
+                        metadata: json!({}),
+                        source_id: "memory".to_owned(),
+                        created_at: 3,
+                    },
+                    Vec::new(),
+                ),
+            ]),
+            search_results: Mutex::new(vec![SearchHit {
+                id: "doc-top".to_owned(),
+                text: "kubernetes ingress".to_owned(),
+                metadata: json!({}),
+                source_id: "memory".to_owned(),
+                created_at: 1,
+                distance: 0.2,
+            }]),
+            search_source_ids: Mutex::new(Vec::new()),
+            graph_enabled: true,
+            graph_edges: Mutex::new(vec![
+                manual_edge("manual-1", "doc-top", "doc-linked"),
+                similarity_edge("sim-1", "doc-top", "doc-similar"),
+            ]),
+            graph_rebuilds: Mutex::new(0),
+        });
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server
+            .post("/search")
+            .json(&json!({ "query": "kubernetes ingress", "top_k": 5 }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<SearchResponse>();
+        assert_eq!(body.results.len(), 1);
+        assert_eq!(body.results[0].id, "doc-top");
+        assert_eq!(body.related.len(), 1);
+        assert_eq!(body.related[0].id, "doc-linked");
+        assert_eq!(body.related[0].relation.as_deref(), Some("supports"));
+    }
+
+    #[tokio::test]
+    async fn search_route_defaults_top_k_when_omitted() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let store = Arc::new(MockStore::with_results(vec![SearchHit {
+            id: "doc-1".to_owned(),
+            text: "hit".to_owned(),
+            metadata: json!({}),
+            source_id: "memory".to_owned(),
+            created_at: 1,
+            distance: 0.1,
+        }]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server.post("/search").json(&json!({ "query": "hello" })).await;
+
+        response.assert_status_ok();
+        let body = response.json::<SearchResponse>();
+        assert_eq!(body.results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_route_excludes_related_already_in_results() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let store = Arc::new(MockStore {
+            stored: Mutex::new(vec![
+                (
+                    ItemRecord {
+                        id: "doc-top".to_owned(),
+                        text: "top".to_owned(),
+                        metadata: json!({}),
+                        source_id: "memory".to_owned(),
+                        created_at: 1,
+                    },
+                    Vec::new(),
+                ),
+                (
+                    ItemRecord {
+                        id: "doc-linked".to_owned(),
+                        text: "linked".to_owned(),
+                        metadata: json!({}),
+                        source_id: "memory".to_owned(),
+                        created_at: 2,
+                    },
+                    Vec::new(),
+                ),
+            ]),
+            search_results: Mutex::new(vec![
+                SearchHit {
+                    id: "doc-top".to_owned(),
+                    text: "top".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 1,
+                    distance: 0.1,
+                },
+                SearchHit {
+                    id: "doc-linked".to_owned(),
+                    text: "linked".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 2,
+                    distance: 0.4,
+                },
+            ]),
+            search_source_ids: Mutex::new(Vec::new()),
+            graph_enabled: true,
+            graph_edges: Mutex::new(vec![manual_edge("manual-1", "doc-top", "doc-linked")]),
+            graph_rebuilds: Mutex::new(0),
+        });
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server
+            .post("/search")
+            .json(&json!({ "query": "top", "top_k": 5 }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<SearchResponse>();
+        assert_eq!(body.results.len(), 2);
+        assert!(body.related.is_empty(), "doc-linked is already in results");
     }
 
     #[tokio::test]
@@ -1596,6 +1896,39 @@ mod tests {
                 "created_at": 200
             }]
         }));
+    }
+
+    #[tokio::test]
+    async fn get_item_route_returns_full_entry() {
+        let store = Arc::new(MockStore::seed(vec![ItemRecord {
+            id: "doc-1".to_owned(),
+            text: "full content".to_owned(),
+            metadata: json!({ "kind": "reference" }),
+            source_id: "knowledge".to_owned(),
+            created_at: 42,
+        }]));
+        let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server.get("/admin/items/doc-1").await;
+        response.assert_status_ok();
+        response.assert_json(&json!({
+            "id": "doc-1",
+            "text": "full content",
+            "metadata": { "kind": "reference" },
+            "source_id": "knowledge",
+            "created_at": 42
+        }));
+    }
+
+    #[tokio::test]
+    async fn get_item_route_returns_404_when_missing() {
+        let store = Arc::new(MockStore::seed(vec![]));
+        let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+
+        let response = server.get("/admin/items/nope").await;
+        assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

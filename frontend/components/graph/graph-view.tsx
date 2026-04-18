@@ -518,14 +518,14 @@ export function GraphView() {
                           <p className="text-[10px] font-black uppercase tracking-[0.2em]">Type to Query Memories</p>
                         </div>
                       )}
-                      {!isExplorerSearching && explorerSearch && explorerResults?.length === 0 && (
+                      {!isExplorerSearching && explorerSearch && explorerResults?.results.length === 0 && (
                         <CommandEmpty className="py-10 flex flex-col items-center gap-2 opacity-60">
                           <Search className="size-8 mb-2" />
                           <p className="text-sm font-medium">No intelligence fragments found.</p>
                         </CommandEmpty>
                       )}
                       <CommandGroup heading="Neural Search Results">
-                        {explorerResults?.map((res) => (
+                        {explorerResults?.results.map((res) => (
                           <CommandItem
                             key={res.id}
                             value={res.id}
@@ -699,11 +699,11 @@ export function GraphView() {
                                <p className="text-[9px] font-bold uppercase tracking-widest text-center">Type node ID or<br/>text to search</p>
                             </div>
                           )}
-                          {!isTargetSearching && targetSearch && targetResults?.length === 0 && (
+                          {!isTargetSearching && targetSearch && targetResults?.results.length === 0 && (
                             <CommandEmpty className="py-6 text-sm opacity-50 text-center">No results.</CommandEmpty>
                           )}
                           <CommandGroup>
-                            {targetResults?.map((res) => (
+                            {targetResults?.results.map((res) => (
                               <CommandItem
                                 key={res.id}
                                 value={res.id}
