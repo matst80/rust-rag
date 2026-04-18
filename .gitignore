@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+target/
+*.log
+*.tmp
+*.bak
+assets/
+*.db
+*.sqlite
+.env
+.env.*

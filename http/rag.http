@@ -1,0 +1,48 @@
+@baseUrl = http://127.0.0.1:4001
+
+### Store knowledge document
+POST {{baseUrl}}/store
+content-type: application/json
+
+{
+  "id": "doc-knowledge-1",
+  "text": "Rust is a systems programming language focused on safety and performance.",
+  "metadata": {
+    "topic": "rust",
+    "kind": "reference"
+  },
+  "source_id": "knowledge"
+}
+
+### Store memory document
+POST {{baseUrl}}/store
+content-type: application/json
+
+{
+  "id": "doc-memory-1",
+  "text": "The user prefers concise responses when reviewing API changes.",
+  "metadata": {
+    "user": "mats",
+    "kind": "preference"
+  },
+  "source_id": "memory"
+}
+
+### Search across all sources
+POST {{baseUrl}}/search
+content-type: application/json
+
+{
+  "query": "Rust performance",
+  "top_k": 5
+}
+
+### Search only knowledge
+POST {{baseUrl}}/search
+content-type: application/json
+
+{
+  "query": "Rust safety",
+  "top_k": 5,
+  "source_id": "knowledge"
+}

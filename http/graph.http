@@ -1,0 +1,31 @@
+@baseUrl = http://127.0.0.1:4001
+
+### Graph status
+GET {{baseUrl}}/graph/status
+
+### Rebuild similarity edges
+POST {{baseUrl}}/admin/graph/rebuild
+
+### List all graph edges
+GET {{baseUrl}}/graph/edges
+
+### Neighborhood around one item
+GET {{baseUrl}}/graph/neighborhood/doc-memory-1?depth=1&limit=20
+
+### Add a manual edge
+POST {{baseUrl}}/admin/graph/edges
+content-type: application/json
+
+{
+  "from_item_id": "doc-memory-1",
+  "to_item_id": "doc-knowledge-1",
+  "relation": "supports",
+  "directed": true,
+  "weight": 1.0,
+  "metadata": {
+    "reason": "user linked memory to reference knowledge"
+  }
+}
+
+### Delete a manual edge
+DELETE {{baseUrl}}/admin/graph/edges/manual:replace-me

@@ -1,0 +1,49 @@
+@baseUrl = http://127.0.0.1:4001
+
+### Store memory: user preference
+POST {{baseUrl}}/store
+content-type: application/json
+
+{
+  "id": "mem-preference-1",
+  "text": "The user prefers concise responses and short handoff notes.",
+  "metadata": {
+    "scope": "user-preference",
+    "priority": "high"
+  },
+  "source_id": "memory"
+}
+
+### Store memory: task context
+POST {{baseUrl}}/store
+content-type: application/json
+
+{
+  "id": "mem-task-1",
+  "text": "Use source scoped retrieval to separate memory documents from knowledge base content.",
+  "metadata": {
+    "scope": "task-context",
+    "project": "rust-rag"
+  },
+  "source_id": "memory"
+}
+
+### Search only memory
+POST {{baseUrl}}/search
+content-type: application/json
+
+{
+  "query": "user preference for responses",
+  "top_k": 5,
+  "source_id": "memory"
+}
+
+### Search only knowledge
+POST {{baseUrl}}/search
+content-type: application/json
+
+{
+  "query": "systems programming language",
+  "top_k": 5,
+  "source_id": "knowledge"
+}

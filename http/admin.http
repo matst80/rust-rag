@@ -1,0 +1,26 @@
+@baseUrl = http://127.0.0.1:4001
+
+### List categories
+GET {{baseUrl}}/admin/categories
+
+### List all items
+GET {{baseUrl}}/admin/items
+
+### List only memory items
+GET {{baseUrl}}/admin/items?source_id=memory
+
+### Update one item
+PUT {{baseUrl}}/admin/items/doc-memory-1
+content-type: application/json
+
+{
+  "text": "The user prefers concise responses when reviewing API or retrieval changes.",
+  "metadata": {
+    "user": "mats",
+    "kind": "preference"
+  },
+  "source_id": "memory"
+}
+
+### Delete one item
+DELETE {{baseUrl}}/admin/items/doc-memory-1
