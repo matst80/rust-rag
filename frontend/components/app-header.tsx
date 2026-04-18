@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils"
 const navigation = [
   { name: "Search", href: "/", icon: Search },
   { name: "Entries", href: "/entries", icon: FolderOpen },
-  { name: "Graph", href: "/graph", icon: GitBranch },
+  { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
 
 export function AppHeader() {

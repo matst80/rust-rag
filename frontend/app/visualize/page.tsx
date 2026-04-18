@@ -3,11 +3,11 @@ import { AppHeader } from "@/components/app-header"
 import { GraphView } from "@/components/graph/graph-view"
 
 export const metadata = {
-  title: "Graph | RAG Memory & Knowledge",
+  title: "Visualize | RAG Memory & Knowledge",
   description: "Visualize connections between knowledge entries",
 }
 
-export default function GraphPage() {
+export default function VisualizePage() {
   return (
     <>
       <AppHeader />

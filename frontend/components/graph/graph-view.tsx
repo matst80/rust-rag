@@ -281,7 +281,7 @@ export function GraphView() {
 
     const params = new URLSearchParams(searchParams.toString())
     params.set("focus", centerNode)
-    router.replace(`/graph?${params.toString()}`, { scroll: false })
+    router.replace(`/visualize?${params.toString()}`, { scroll: false })
   }, [centerNode, focusId, router, searchParams])
 
   useEffect(() => {

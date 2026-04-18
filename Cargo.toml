@@ -1,5 +1,6 @@
 [workspace]
-members = [".", "mcp-stdio"]
+members = ["."]
+exclude = ["mcp-stdio"]
 resolver = "2"
 
 [package]

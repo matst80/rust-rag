@@ -192,7 +192,7 @@ export function EntryDetail({ id }: EntryDetailProps) {
               </div>
               {graphStatus?.enabled && (
                 <Button variant="ghost" size="sm" asChild className="h-8 text-[10px] font-bold uppercase">
-                  <Link href={`/graph?focus=${encodeURIComponent(id)}`}>
+                  <Link href={`/visualize?focus=${encodeURIComponent(id)}`}>
                     Full View
                   </Link>
                 </Button>

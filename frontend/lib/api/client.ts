@@ -12,7 +12,7 @@ import type {
   GraphStatus,
 } from "./types"
 
-const API_BASE_URL = "/api"
+const API_BASE_URL = ""
 
 interface CategoriesResponse {
   categories: Array<{

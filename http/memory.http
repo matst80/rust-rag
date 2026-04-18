@@ -1,4 +1,4 @@
-@baseUrl = http://127.0.0.1:4001
+@baseUrl = https://127.0.0.1:4001
 
 ### Store memory: user preference
 POST {{baseUrl}}/store
