@@ -13,10 +13,9 @@ import {
   type Edge as FlowEdge,
   ConnectionMode,
   Panel,
-  MarkerType,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
-import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, Trash2, X, Search, ChevronDown } from "lucide-react"
+import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, X, Search, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Input } from "@/components/ui/input"
@@ -44,10 +43,9 @@ import {
   useGraphNeighborhood,
   useCreateEdge,
   useDeleteEdge,
-  type Entry,
-  type Edge,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { convertGraphEdges, layoutGraphNodes } from "./graph-layout"
 
 const nodeTypes = {
   entry: EntryNode,
@@ -69,137 +67,6 @@ function useDebounce<T>(value: T, delay: number): T {
 
 const MAX_DEPTH = 3
 const GRAPH_LIMIT = 50
-
-function createGraphNode(
-  entry: Entry,
-  position: { x: number; y: number },
-  depth: number,
-  isCenter: boolean,
-  isSelected: boolean
-): GraphNode {
-  return {
-    id: entry.id,
-    type: "entry",
-    position,
-    data: {
-      label: entry.id,
-      sourceId: entry.source_id,
-      text: entry.text,
-      depth,
-      isCenter,
-      isSelected,
-    },
-  }
-}
-
-
-function buildDepthMap(centerId: string, edges: Edge[]): Map<string, number> {
-  const adjacency = new Map<string, string[]>()
-
-  for (const edge of edges) {
-    adjacency.set(edge.source_id, [
-      ...(adjacency.get(edge.source_id) ?? []),
-      edge.target_id,
-    ])
-    adjacency.set(edge.target_id, [
-      ...(adjacency.get(edge.target_id) ?? []),
-      edge.source_id,
-    ])
-  }
-
-  const depthById = new Map<string, number>([[centerId, 0]])
-  const queue = [centerId]
-
-  while (queue.length > 0) {
-    const currentId = queue.shift()
-    if (!currentId) {
-      continue
-    }
-
-    const currentDepth = depthById.get(currentId) ?? 0
-    for (const neighborId of adjacency.get(currentId) ?? []) {
-      if (depthById.has(neighborId)) {
-        continue
-      }
-
-      depthById.set(neighborId, currentDepth + 1)
-      queue.push(neighborId)
-    }
-  }
-
-  return depthById
-}
-
-function layoutNodes(
-  entries: Entry[],
-  edges: Edge[],
-  centerId: string,
-  selectedNode: string | null
-): GraphNode[] {
-  const depthById = buildDepthMap(centerId, edges)
-  const entriesByDepth = new Map<number, Entry[]>()
-
-  for (const entry of entries) {
-    const depth = depthById.get(entry.id) ?? (entry.id === centerId ? 0 : 1)
-    entriesByDepth.set(depth, [...(entriesByDepth.get(depth) ?? []), entry])
-  }
-
-  return [...entriesByDepth.entries()]
-    .sort(([left], [right]) => left - right)
-    .flatMap(([depth, group]) => {
-      if (depth === 0) {
-        const entry = group[0]
-        if (!entry) {
-          return []
-        }
-
-        return [
-          createGraphNode(
-            entry,
-            { x: 0, y: 0 },
-            0,
-            true,
-            selectedNode === entry.id
-          ),
-        ]
-      }
-
-      const radius = depth * 240
-      return group.map((entry, index) => {
-        const angle = (2 * Math.PI * index) / group.length
-        return createGraphNode(
-          entry,
-          {
-            x: Math.cos(angle) * radius,
-            y: Math.sin(angle) * radius,
-          },
-          depth,
-          false,
-          selectedNode === entry.id
-        )
-      })
-    })
-}
-
-function convertEdges(edges: Edge[]): FlowEdge[] {
-  return edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source_id,
-    target: edge.target_id,
-    label: edge.relationship,
-    type: "default",
-    animated: false,
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      width: 18,
-      height: 18,
-      color: "var(--muted-foreground)",
-    },
-    style: { stroke: "var(--muted-foreground)" },
-    labelStyle: { fontSize: 10, fill: "var(--muted-foreground)" },
-    labelBgStyle: { fill: "var(--background)", opacity: 0.8 },
-  }))
-}
 
 export function GraphView() {
   const router = useRouter()
@@ -289,15 +156,16 @@ export function GraphView() {
         ? selectedNode
         : centerNode
 
-    const layoutedNodes = layoutNodes(
+    const layoutedNodes = layoutGraphNodes(
       neighborhood.nodes,
       neighborhood.edges,
+      neighborhood.pairwise_distances,
       centerNode,
       nextSelectedNode
     )
 
     setNodes(layoutedNodes)
-    setEdges(convertEdges(neighborhood.edges))
+    setEdges(convertGraphEdges(neighborhood.edges))
     setSelectedNode(nextSelectedNode)
   }, [centerNode, neighborhood, selectedNode, setEdges, setNodes])
 
@@ -596,6 +464,10 @@ export function GraphView() {
                 <div className="size-1 rounded-full bg-primary/20" />
                 {graphEntries.length} Active Nodes
               </span>
+              <span className="flex items-center gap-1.5">
+                <div className="size-1 rounded-full bg-primary/20" />
+                {enabledGraphStatus.similarity_edge_count} Similarity / {enabledGraphStatus.manual_edge_count} Manual
+              </span>
             </div>
           </Panel>
         </ReactFlow>
@@ -789,11 +661,18 @@ export function GraphView() {
                             <Badge variant="outline" className="text-[8px] font-black uppercase py-0 px-1 border-primary/20 text-primary/60">
                               {edge.relationship}
                             </Badge>
+                            <p className="text-[10px] text-muted-foreground/60">
+                              {edge.edge_type === "similarity"
+                                ? `semantic distance ${edge.distance?.toFixed(3) ?? "n/a"}`
+                                : `manual weight ${edge.weight.toFixed(2)}`}
+                            </p>
                           </div>
-                          <ComboButton
-                            onConfirm={() => handleDeleteEdge(edge.id)}
-                            className="size-8 rounded-full opacity-0 group-hover:opacity-100"
-                          />
+                          {edge.edge_type === "manual" ? (
+                            <ComboButton
+                              onConfirm={() => handleDeleteEdge(edge.id)}
+                              className="size-8 rounded-full opacity-0 group-hover:opacity-100"
+                            />
+                          ) : null}
                         </div>
                       </div>
                     )

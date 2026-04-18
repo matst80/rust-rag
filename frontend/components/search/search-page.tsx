@@ -1,20 +1,15 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback } from "react"
 import { Brain } from "lucide-react"
 import { SearchInput } from "./search-input"
 import { SearchResults } from "./search-results"
 import { useSearch } from "@/lib/api"
 
 export function SearchPage() {
-  const [mounted, setMounted] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
   const [submittedQuery, setSubmittedQuery] = useState("")
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
 
   const { data: results, isLoading } = useSearch(
     submittedQuery,
@@ -24,14 +19,6 @@ export function SearchPage() {
   const handleSubmit = useCallback(() => {
     setSubmittedQuery(searchQuery.trim())
   }, [searchQuery])
-
-  if (!mounted) {
-    return (
-      <div className="relative flex min-h-[calc(100vh-3.5rem)] flex-col overflow-hidden opacity-0">
-        <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col px-6" />
-      </div>
-    )
-  }
 
   return (
     <div className="relative flex min-h-[calc(100vh-3.5rem)] flex-col overflow-hidden">

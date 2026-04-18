@@ -11,6 +11,7 @@ import type {
   CreateEdgeRequest,
   EntryMetadata,
   GraphNeighborhood,
+  GraphNodeDistance,
   GraphStatus,
 } from "./types"
 
@@ -66,6 +67,7 @@ interface GraphNeighborhoodResponse {
   center_id: string
   nodes: Entry[]
   edges: RawEdge[]
+  pairwise_distances: GraphNodeDistance[]
 }
 
 function ensureArray<T>(value: T[] | undefined, label: string): T[] {
@@ -108,6 +110,10 @@ function toEdge(edge: RawEdge): Edge {
     source_id: edge.from_item_id,
     target_id: edge.to_item_id,
     relationship: edge.relation ?? edge.edge_type,
+    edge_type: edge.edge_type,
+    weight: edge.weight,
+    directed: edge.directed,
+    distance: typeof edge.metadata?.distance === "number" ? edge.metadata.distance : undefined,
     metadata: edge.metadata,
   }
 }
@@ -244,6 +250,10 @@ export async function getGraphNeighborhood(
     center_id: response.center_id,
     nodes: ensureArray(response.nodes, "graph neighborhood nodes"),
     edges: ensureArray(response.edges, "graph neighborhood edges").map(toEdge),
+    pairwise_distances: ensureArray(
+      response.pairwise_distances,
+      "graph neighborhood pairwise distances"
+    ),
   }
 }
 

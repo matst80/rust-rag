@@ -324,18 +324,19 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
     if !response.related.is_empty() {
         let _ = writeln!(
             out,
-            "\n## User-linked related ({})\n\nItems the user manually linked from the top hit (ids only — call `get_entry` to read the full content).",
+            "\n## Linked related ({})\n\nItems from the top hit. Ranked by similarity to the query.",
             response.related.len()
         );
-        for related in &response.related {
-            let relevance = ((1.0 - related.distance).clamp(0.0, 1.0) * 100.0).round() as i64;
-            let relation = related.relation.as_deref().unwrap_or("related");
-            let _ = writeln!(
-                out,
-                "- `{id}` — {relation} — {relevance}% [{source}]",
-                id = related.id,
-                source = related.source_id,
-            );
+        for (index, related) in response.related.iter().enumerate() {
+            let hit = SearchResultPayload {
+                id: related.id.clone(),
+                text: related.text.clone(),
+                metadata: related.metadata.clone(),
+                source_id: related.source_id.clone(),
+                created_at: related.created_at,
+                distance: related.distance,
+            };
+            write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
     }
 
@@ -399,10 +400,10 @@ mod tests {
         assert!(md.contains("85%"));
         assert!(md.contains("User-linked related"));
         assert!(md.contains("doc-storage"));
-        assert!(md.contains("supports"));
+        assert!(md.contains("relation: supports"));
         assert!(
-            !md.contains("persistent volumes"),
-            "related body text must not be inlined to save context"
+            md.contains("persistent volumes"),
+            "related body text should be inlined so the LLM doesn't need an extra get_entry call"
         );
     }
 

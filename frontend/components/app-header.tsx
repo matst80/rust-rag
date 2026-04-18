@@ -2,12 +2,15 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Brain, Search, FolderOpen, GitBranch } from "lucide-react"
+import { Brain, Search, FolderOpen, GitBranch, Github, BookOpen } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { cn } from "@/lib/utils"
 
+const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
+
 const navigation = [
   { name: "Search", href: "/", icon: Search },
+  { name: "Docs", href: "/start-guide", icon: BookOpen },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
@@ -47,7 +50,19 @@ export function AppHeader() {
             })}
           </nav>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <a
+            href={GITHUB_REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            aria-label="Open rust-rag on GitHub"
+          >
+            <Github className="size-4" />
+            <span className="hidden sm:inline">GitHub</span>
+          </a>
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   )

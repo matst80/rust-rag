@@ -47,13 +47,24 @@ export interface Edge {
   source_id: string
   target_id: string
   relationship: string
+  edge_type: string
+  weight: number
+  directed: boolean
+  distance?: number
   metadata?: EntryMetadata
+}
+
+export interface GraphNodeDistance {
+  from_item_id: string
+  to_item_id: string
+  distance: number
 }
 
 export interface GraphNeighborhood {
   center_id: string
   nodes: Entry[]
   edges: Edge[]
+  pairwise_distances: GraphNodeDistance[]
 }
 
 export interface GraphStatus {

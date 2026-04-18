@@ -99,6 +99,14 @@ pub struct GraphNeighborhood {
     pub center_id: String,
     pub nodes: Vec<ItemRecord>,
     pub edges: Vec<GraphEdgeRecord>,
+    pub pairwise_distances: Vec<GraphNodeDistance>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphNodeDistance {
+    pub from_item_id: String,
+    pub to_item_id: String,
+    pub distance: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -566,6 +574,7 @@ impl VectorStore for SqliteVectorStore {
             center_id: center_id.to_owned(),
             nodes,
             edges,
+            pairwise_distances: list_pairwise_distances_for_ids(connection, &ordered_node_ids)?,
         })
     }
 
@@ -839,6 +848,56 @@ fn list_graph_edges_internal(
         edges.push(row?);
     }
     Ok(edges)
+}
+
+fn list_pairwise_distances_for_ids(
+    connection: &Connection,
+    ids: &[String],
+) -> Result<Vec<GraphNodeDistance>> {
+    if ids.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "
+        SELECT
+            left_vec.id,
+            right_vec.id,
+            CAST(vec_distance_L2(left_vec.embedding, right_vec.embedding) AS REAL) AS distance
+        FROM vec_items AS left_vec
+        JOIN vec_items AS right_vec ON left_vec.id < right_vec.id
+        WHERE left_vec.id IN ({placeholders})
+          AND right_vec.id IN ({placeholders})
+        ORDER BY left_vec.id ASC, right_vec.id ASC
+        "
+    );
+
+    let mut statement = connection.prepare(&sql)?;
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() * 2);
+    for id in ids {
+        params_vec.push(id);
+    }
+    for id in ids {
+        params_vec.push(id);
+    }
+
+    let rows = statement.query_map(rusqlite::params_from_iter(params_vec), |row| {
+        Ok(GraphNodeDistance {
+            from_item_id: row.get(0)?,
+            to_item_id: row.get(1)?,
+            distance: row.get(2)?,
+        })
+    })?;
+
+    let mut distances = Vec::new();
+    for row in rows {
+        distances.push(row?);
+    }
+    Ok(distances)
 }
 
 fn rebuild_similarity_graph_locked(

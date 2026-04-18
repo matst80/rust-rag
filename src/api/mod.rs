@@ -1,6 +1,7 @@
 use crate::{
     db::{
-        CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphStatus,
+        CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
+        GraphStatus,
         ItemRecord, ManualEdgeInput, SearchHit, VectorStore,
     },
     embedding::EmbeddingService,
@@ -313,6 +314,14 @@ pub struct GraphNeighborhoodResponse {
     pub center_id: String,
     pub nodes: Vec<AdminItemPayload>,
     pub edges: Vec<GraphEdgePayload>,
+    pub pairwise_distances: Vec<GraphNodeDistancePayload>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct GraphNodeDistancePayload {
+    pub from_item_id: String,
+    pub to_item_id: String,
+    pub distance: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -796,6 +805,17 @@ impl From<GraphNeighborhood> for GraphNeighborhoodResponse {
             center_id: value.center_id,
             nodes: value.nodes.into_iter().map(Into::into).collect(),
             edges: value.edges.into_iter().map(Into::into).collect(),
+            pairwise_distances: value.pairwise_distances.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<GraphNodeDistance> for GraphNodeDistancePayload {
+    fn from(value: GraphNodeDistance) -> Self {
+        Self {
+            from_item_id: value.from_item_id,
+            to_item_id: value.to_item_id,
+            distance: value.distance,
         }
     }
 }
@@ -1168,6 +1188,7 @@ mod tests {
                 center_id: center_id.to_owned(),
                 nodes,
                 edges,
+                pairwise_distances: vec![],
             })
         }
 
@@ -1737,7 +1758,8 @@ mod tests {
                     "created_at": 1,
                     "updated_at": 1
                 }
-            ]
+            ],
+            "pairwise_distances": []
         }));
     }
 
