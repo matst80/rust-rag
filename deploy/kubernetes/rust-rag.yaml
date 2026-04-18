@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rust-rag-config
+labels:
+  app.kubernetes.io/name: rust-rag
+data:
+  RAG_HOST: "0.0.0.0"
+  RAG_PORT: "4001"
+  RAG_DB_PATH: "/app/data/rag.db"
+  RAG_MODEL_PATH: "/app/assets/bge-small-en-v1.5/model.onnx"
+  RAG_TOKENIZER_PATH: "/app/assets/bge-small-en-v1.5/tokenizer.json"
+  RAG_EMBEDDING_DIMENSION: "384"
+  RAG_INTRA_THREADS: "2"
+  RAG_GRAPH_ENABLED: "false"
+  RAG_GRAPH_BUILD_ON_STARTUP: "false"
+  RAG_GRAPH_K: "5"
+  RAG_GRAPH_MAX_DISTANCE: "0.75"
+  RAG_GRAPH_CROSS_SOURCE: "false"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rust-rag-data
+labels:
+  app.kubernetes.io/name: rust-rag
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-rag
+  labels:
+    app.kubernetes.io/name: rust-rag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rust-rag
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rust-rag
+    spec:
+      containers:
+        - name: rust-rag
+          image: matst80/rust-rag:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4001
+              name: http
+          envFrom:
+            - configMapRef:
+                name: rust-rag-config
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rust-rag-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-rag
+  labels:
+    app.kubernetes.io/name: rust-rag
+spec:
+  selector:
+    app.kubernetes.io/name: rust-rag
+  ports:
+    - name: http
+      port: 4001
+      targetPort: http
+  type: ClusterIP

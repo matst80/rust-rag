@@ -13,8 +13,11 @@ RAG_GRAPH_K ?= 5
 RAG_GRAPH_MAX_DISTANCE ?= 0.75
 RAG_GRAPH_CROSS_SOURCE ?= false
 API_URL ?= http://127.0.0.1:$(RAG_PORT)
+IMAGE_NAME ?= rust-rag:latest
+K8S_MANIFEST ?= deploy/kubernetes/rust-rag.yaml
+MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets print-env fmt test verify check-env run store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets print-env fmt test verify check-env run run-mcp docker-build docker-run k8s-apply k8s-delete tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -26,6 +29,12 @@ help:
 		'  make verify           Run formatting check and tests' \
 		'  make check-env        Verify required runtime env vars are set' \
 		'  make run              Start the service locally' \
+		'  make run-mcp          Start the stdio MCP bridge locally' \
+		'  make docker-build     Build the server container image' \
+		'  make docker-run       Run the server container with the local data directory mounted' \
+		'  make k8s-apply        Apply the Kubernetes manifest in deploy/kubernetes' \
+		'  make k8s-delete       Delete the Kubernetes manifest in deploy/kubernetes' \
+		'  make tag-mcp-stdio    Create an annotated release tag (set VERSION=0.1.0)' \
 		'  make store-knowledge  POST a sample knowledge document' \
 		'  make store-memory     POST a sample memory document' \
 		'  make search-knowledge Search with source_id=knowledge' \
@@ -82,6 +91,35 @@ run: check-env
 	RAG_GRAPH_MAX_DISTANCE="$(RAG_GRAPH_MAX_DISTANCE)" \
 	RAG_GRAPH_CROSS_SOURCE="$(RAG_GRAPH_CROSS_SOURCE)" \
 	cargo run
+
+run-mcp:
+	RAG_MCP_API_BASE_URL="$(API_URL)" \
+	cargo run -p mcp-stdio
+
+docker-build:
+	docker build -t "$(IMAGE_NAME)" .
+
+docker-run:
+	mkdir -p "$(CURDIR)/data"
+	docker run --rm \
+		-p "$(RAG_PORT):4001" \
+		-v "$(CURDIR)/data:/app/data" \
+		"$(IMAGE_NAME)"
+
+k8s-apply:
+	kubectl apply -f "$(K8S_MANIFEST)"
+
+k8s-delete:
+	kubectl delete -f "$(K8S_MANIFEST)"
+
+tag-mcp-stdio:
+	@test -n "$(VERSION)" || { echo "usage: make tag-mcp-stdio VERSION=0.1.0"; exit 1; }
+	@git diff --quiet || { echo "working tree has unstaged changes"; exit 1; }
+	@git diff --cached --quiet || { echo "working tree has staged but uncommitted changes"; exit 1; }
+	@git rev-parse "$(MCP_STDIO_TAG_PREFIX)$(VERSION)" >/dev/null 2>&1 && { echo "tag $(MCP_STDIO_TAG_PREFIX)$(VERSION) already exists"; exit 1; } || true
+	git tag -a "$(MCP_STDIO_TAG_PREFIX)$(VERSION)" -m "mcp-stdio $(VERSION)"
+	@printf '%s\n' "created tag $(MCP_STDIO_TAG_PREFIX)$(VERSION)"
+	@printf '%s\n' "push it with: git push origin $(MCP_STDIO_TAG_PREFIX)$(VERSION)"
 
 store-knowledge:
 	curl -sS -X POST "$(API_URL)/store" \

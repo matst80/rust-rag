@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlite_vec::sqlite3_vec_init;
@@ -55,7 +56,7 @@ impl Default for GraphConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum GraphEdgeType {
     Similarity,

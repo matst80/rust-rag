@@ -1,0 +1,8 @@
+.git
+.gitignore
+.vscode
+target
+frontend/node_modules
+frontend/.next
+data
+deploy

@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -90,21 +91,21 @@ impl EmbedderHandle {
             EmbedderState::Loading => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(HealthResponse {
-                    status: "loading",
+                    status: "loading".to_owned(),
                     error: None,
                 }),
             ),
             EmbedderState::Ready(_) => (
                 StatusCode::OK,
                 Json(HealthResponse {
-                    status: "ready",
+                    status: "ready".to_owned(),
                     error: None,
                 }),
             ),
             EmbedderState::Failed(error) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(HealthResponse {
-                    status: "failed",
+                    status: "failed".to_owned(),
                     error: Some(error.clone()),
                 }),
             ),
@@ -112,7 +113,7 @@ impl EmbedderHandle {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StoreRequest {
     pub id: Option<String>,
     pub text: String,
@@ -120,39 +121,39 @@ pub struct StoreRequest {
     pub source_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchRequest {
     pub query: String,
     pub top_k: usize,
     pub source_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateItemRequest {
     pub text: String,
     pub metadata: Value,
     pub source_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListItemsQuery {
     pub source_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GraphNeighborhoodQuery {
     pub depth: Option<usize>,
     pub limit: Option<usize>,
     pub edge_type: Option<GraphEdgeType>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ListGraphEdgesQuery {
     pub item_id: Option<String>,
     pub edge_type: Option<GraphEdgeType>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct CreateManualEdgeRequest {
     pub from_item_id: String,
     pub to_item_id: String,
@@ -163,20 +164,20 @@ pub struct CreateManualEdgeRequest {
     pub metadata: Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StoreResponse {
     pub id: String,
     pub source_id: String,
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DeleteResponse {
     pub id: String,
     pub deleted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SearchResultPayload {
     pub id: String,
     pub text: String,
@@ -186,23 +187,23 @@ pub struct SearchResultPayload {
     pub distance: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultPayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AdminCategoryPayload {
     pub source_id: String,
     pub item_count: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct CategoriesResponse {
     pub categories: Vec<AdminCategoryPayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AdminItemPayload {
     pub id: String,
     pub text: String,
@@ -211,12 +212,12 @@ pub struct AdminItemPayload {
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AdminItemsResponse {
     pub items: Vec<AdminItemPayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GraphStatusResponse {
     pub enabled: bool,
     pub build_on_startup: bool,
@@ -229,7 +230,7 @@ pub struct GraphStatusResponse {
     pub manual_edge_count: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GraphEdgePayload {
     pub id: String,
     pub from_item_id: String,
@@ -243,26 +244,26 @@ pub struct GraphEdgePayload {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GraphEdgesResponse {
     pub edges: Vec<GraphEdgePayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GraphNeighborhoodResponse {
     pub center_id: String,
     pub nodes: Vec<AdminItemPayload>,
     pub edges: Vec<GraphEdgePayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GraphRebuildResponse {
     pub rebuilt_edges: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct HealthResponse {
-    pub status: &'static str,
+    pub status: String,
     pub error: Option<String>,
 }
 

@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "mcp-stdio"]
+resolver = "2"
+
 [package]
 name = "rust-rag"
 version = "0.1.0"
@@ -10,6 +14,7 @@ bytemuck = "1.25.0"
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.12", features = ["ndarray", "download-binaries", "tracing"] }
 rusqlite = { version = "0.39.0", features = ["bundled", "load_extension"] }
+schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sqlite-vec = "0.1.9"
