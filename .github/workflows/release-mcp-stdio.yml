@@ -41,17 +41,19 @@ jobs:
           tool: cross
 
       - name: Build release binary
-        run: cross build --locked --release --manifest-path mcp-stdio/Cargo.toml --bin mcp-stdio --target ${{ matrix.target }}
+        working-directory: mcp-stdio
+        run: cross build --locked --release --bin mcp-stdio --target ${{ matrix.target }}
 
       - name: Package release artifact
+        working-directory: mcp-stdio
         env:
           TAG: ${{ github.ref_name }}
         run: |
           mkdir -p dist
           staging_dir="${BINARY_NAME}-${TAG}-${{ matrix.archive_suffix }}"
           mkdir -p "$staging_dir"
-          cp "mcp-stdio/target/${{ matrix.target }}/release/${BINARY_NAME}" "$staging_dir/${BINARY_NAME}"
-          cp "mcp-stdio/README.md" "$staging_dir/README.md"
+          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "$staging_dir/${BINARY_NAME}"
+          cp "README.md" "$staging_dir/README.md"
           tar -czf "dist/${staging_dir}.tar.gz" "$staging_dir"
           sha256sum "dist/${staging_dir}.tar.gz" > "dist/${staging_dir}.tar.gz.sha256"
 
@@ -60,8 +62,8 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: |
-            dist/*.tar.gz
-            dist/*.sha256
+            mcp-stdio/dist/*.tar.gz
+            mcp-stdio/dist/*.sha256
           if-no-files-found: error
 
   release:
