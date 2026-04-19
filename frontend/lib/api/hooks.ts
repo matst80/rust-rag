@@ -11,6 +11,8 @@ import type {
   CreateEdgeRequest,
   GraphNeighborhood,
   GraphStatus,
+  ListItemsRequest,
+  PagedItems,
 } from "./types"
 
 // Categories hooks
@@ -19,10 +21,10 @@ export function useCategories() {
 }
 
 // Items hooks
-export function useItems(sourceId?: string) {
-  return useSWR<Entry[]>(
-    sourceId ? ["items", sourceId] : "items",
-    () => api.items.list(sourceId)
+export function useItems(options: ListItemsRequest = {}) {
+  return useSWR<PagedItems>(
+    ["items", options],
+    () => api.items.list(options)
   )
 }
 

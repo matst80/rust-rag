@@ -13,6 +13,8 @@ import type {
   GraphNeighborhood,
   GraphNodeDistance,
   GraphStatus,
+  ListItemsRequest,
+  PagedItems,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -26,6 +28,7 @@ interface CategoriesResponse {
 
 interface ItemsResponse {
   items: Entry[]
+  total_count: number
 }
 
 interface RawSearchResult {
@@ -159,14 +162,26 @@ export async function getCategories(): Promise<Category[]> {
 }
 
 // Items/Entries API
-export async function getItems(sourceId?: string): Promise<Entry[]> {
-  const params = sourceId ? `?source_id=${encodeURIComponent(sourceId)}` : ""
-  const response = await request<ItemsResponse>(`/admin/items${params}`)
-  return ensureArray(response.items, "items")
+export async function getItems(
+  options: ListItemsRequest = {}
+): Promise<PagedItems> {
+  const params = new URLSearchParams()
+  if (options.source_id) params.append("source_id", options.source_id)
+  if (options.limit !== undefined) params.append("limit", options.limit.toString())
+  if (options.offset !== undefined)
+    params.append("offset", options.offset.toString())
+  if (options.sort_order) params.append("sort_order", options.sort_order)
+
+  const queryString = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<ItemsResponse>(`/admin/items${queryString}`)
+  return {
+    items: ensureArray(response.items, "items"),
+    total_count: response.total_count,
+  }
 }
 
 export async function getItem(id: string): Promise<Entry> {
-  const items = await getItems()
+  const { items } = await getItems({ limit: 1000 }) // Hacky for now as it was before
   const item = items.find((entry) => entry.id === id)
 
   if (!item) {

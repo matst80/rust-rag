@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import Link from "next/link"
 import {
   FileText,
@@ -12,13 +12,15 @@ import {
   Share2,
   ExternalLink,
   ChevronRight,
+  ChevronLeft,
   Database,
-  Filter
+  Filter,
+  ArrowUpDown,
 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardAction } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { useItems, useDeleteItem } from "@/lib/api"
+import { useItems, useDeleteItem, type SortOrder } from "@/lib/api"
 import { useSWRConfig } from "swr"
 import { cn } from "@/lib/utils"
 import type { Entry } from "@/lib/api"
@@ -37,7 +39,24 @@ interface EntriesListProps {
 
 export function EntriesList({ selectedCategory }: EntriesListProps) {
   const [localSearch, setLocalSearch] = useState("")
-  const { data: entries, isLoading } = useItems(selectedCategory ?? undefined)
+  const [page, setPage] = useState(1)
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc")
+  const PAGE_SIZE = 20
+
+  useEffect(() => {
+    setPage(1)
+  }, [selectedCategory, sortOrder])
+
+  const { data: pagedData, isLoading } = useItems({
+    source_id: selectedCategory ?? undefined,
+    limit: PAGE_SIZE,
+    offset: (page - 1) * PAGE_SIZE,
+    sort_order: sortOrder,
+  })
+
+  const entries = pagedData?.items
+  const totalCount = pagedData?.total_count ?? 0
+
   const { trigger: deleteItem } = useDeleteItem()
   const { mutate } = useSWRConfig()
 
@@ -52,6 +71,8 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
         entry.source_id.toLowerCase().includes(search)
     )
   }, [entries, localSearch])
+
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE)
 
   const handleDelete = async (id: string) => {
     await deleteItem(id)
@@ -130,12 +151,38 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
             <Search className="absolute left-4 top-1/2 mt-0.5 size-4 -translate-y-1/2 text-muted-foreground/60 transition-colors group-focus-within:text-primary" />
             <input
               type="text"
-              placeholder="Search through intelligence records..."
+              placeholder="Search page content..."
               className="w-full h-12 bg-muted/20 border-muted/40 rounded-2xl pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all hover:bg-muted/30"
               value={localSearch}
               onChange={(e) => setLocalSearch(e.target.value)}
             />
           </div>
+          
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="h-12 rounded-2xl border-muted px-5">
+                <ArrowUpDown className="mr-2 size-4 opacity-60" />
+                <span className="font-semibold text-xs uppercase tracking-wider">
+                  {sortOrder === "desc" ? "Newest First" : "Oldest First"}
+                </span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48 rounded-xl p-1">
+              <DropdownMenuItem 
+                onClick={() => setSortOrder("desc")}
+                className={cn("rounded-lg", sortOrder === "desc" && "bg-primary/10 text-primary")}
+              >
+                Newest First
+              </DropdownMenuItem>
+              <DropdownMenuItem 
+                onClick={() => setSortOrder("asc")}
+                className={cn("rounded-lg", sortOrder === "asc" && "bg-primary/10 text-primary")}
+              >
+                Oldest First
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <Button variant="outline" className="h-12 rounded-2xl border-muted px-5">
             <Filter className="mr-2 size-4 opacity-60" />
             <span className="font-semibold text-xs uppercase tracking-wider">Filters</span>
@@ -160,9 +207,37 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
         )}
       </div>
 
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between pt-6 border-t border-muted/20">
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
+            Page {page} of {totalPages} — {totalCount} total records
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-10 rounded-xl"
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-10 rounded-xl"
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page === totalPages}
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-center pt-10">
         <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
-          End of intelligence pool — {filteredEntries.length} records retrieved
+          Neural manifold view — {filteredEntries.length} records shown
         </p>
       </div>
     </div>

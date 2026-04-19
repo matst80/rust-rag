@@ -99,6 +99,20 @@ export interface UpdateItemRequest {
   source_id: string
 }
 
+export type SortOrder = "asc" | "desc"
+
+export interface ListItemsRequest {
+  source_id?: string
+  limit?: number
+  offset?: number
+  sort_order?: SortOrder
+}
+
+export interface PagedItems {
+  items: Entry[]
+  total_count: number
+}
+
 export interface CreateEdgeRequest {
   source_id: string
   target_id: string

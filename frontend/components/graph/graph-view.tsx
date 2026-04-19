@@ -130,7 +130,7 @@ function GraphViewContent() {
 
   // Fetch semantic neighbors for the center node to ensure they are visible 
   // even if they aren't explicitly connected in the graph DB.
-  const centerEntry = useMemo(() => entries?.find(e => e.id === centerNode), [entries, centerNode])
+  const centerEntry = useMemo(() => entries?.items.find(e => e.id === centerNode), [entries, centerNode])
   const { data: centerSemanticResults } = useSearch(
     centerEntry?.text ? centerEntry.text : "", 
     undefined, 
@@ -164,19 +164,19 @@ function GraphViewContent() {
   const graphEdges = neighborhood?.edges ?? []
 
   useEffect(() => {
-    if (!entries || entries.length === 0) {
+    if (!entries || entries.items.length === 0) {
       return
     }
 
-    if (focusId && entries.some((entry) => entry.id === focusId)) {
+    if (focusId && entries.items.some((entry) => entry.id === focusId)) {
       setCenterNode(focusId)
       setSelectedNode(focusId)
       setDepth(1)
       return
     }
 
-    setCenterNode((currentCenter) => currentCenter ?? entries[0].id)
-    setSelectedNode((currentSelected) => currentSelected ?? focusId ?? entries[0].id)
+    setCenterNode((currentCenter) => currentCenter ?? entries.items[0].id)
+    setSelectedNode((currentSelected) => currentSelected ?? focusId ?? entries.items[0].id)
   }, [entries, focusId])
 
   useEffect(() => {
@@ -303,7 +303,7 @@ function GraphViewContent() {
 
   const entryOptions = useMemo(
     () =>
-      entries
+      entries?.items
         ?.filter((entry) => entry.id.trim().length > 0)
         .map((entry) => ({ value: entry.id, label: entry.id })) ?? [],
     [entries]

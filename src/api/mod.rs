@@ -2,7 +2,7 @@ use crate::{
     db::{
         CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
         GraphStatus,
-        ItemRecord, ManualEdgeInput, SearchHit, VectorStore,
+        ItemRecord, ListItemsRequest, ManualEdgeInput, SearchHit, SortOrder, VectorStore,
     },
     embedding::EmbeddingService,
 };
@@ -142,20 +142,25 @@ pub struct StoreRequest {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SearchRequest {
-    /// Natural-language query. It is embedded and compared against stored entries by L2 distance.
+    /// Natural-language query. It is embedded and compared against stored entries.
     pub query: String,
-    /// Maximum number of ranked hits to return before the max_distance filter is applied.
+    /// Maximum number of ranked hits to return.
     /// Optional; defaults to 5.
     #[serde(default = "default_top_k")]
     pub top_k: usize,
     /// Restrict the search to entries with this source_id (namespace).
     /// Omit to search across every source_id.
     pub source_id: Option<String>,
-    /// Maximum L2 distance for a result to be considered relevant.
-    /// Lower values are stricter; 0.0 is an exact match. Results at or above this threshold
-    /// are filtered out. Default 0.8 — anything above is usually noise.
+    /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
+    #[serde(default = "default_hybrid")]
+    pub hybrid: bool,
+    /// Maximum distance threshold for results. Default 0.8.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
+}
+
+fn default_hybrid() -> bool {
+    true
 }
 
 fn default_top_k() -> usize {
@@ -180,6 +185,9 @@ pub struct UpdateItemRequest {
 pub struct ListItemsQuery {
     /// Restrict the listing to a single source_id. Omit to list across all namespaces.
     pub source_id: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub sort_order: Option<SortOrder>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -274,6 +282,7 @@ pub struct AdminItemPayload {
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AdminItemsResponse {
     pub items: Vec<AdminItemPayload>,
+    pub total_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -424,7 +433,11 @@ async fn search(
     let (results, related) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
             let embedding = embedder.embed(&query)?;
-            let hits = store.search(&embedding, top_k, source_id.as_deref())?;
+            let hits = if request.hybrid {
+                store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
+            } else {
+                store.search(&embedding, top_k, source_id.as_deref())?
+            };
             let filtered: Vec<SearchHit> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
@@ -568,14 +581,21 @@ async fn list_items(
     }
 
     let store = state.store.clone();
-    let source_id = query.source_id;
-    let items = tokio::task::spawn_blocking(move || store.list_items(source_id.as_deref()))
+    let request = ListItemsRequest {
+        source_id: query.source_id,
+        limit: query.limit,
+        offset: query.offset,
+        sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+    };
+
+    let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?;
 
     Ok(Json(AdminItemsResponse {
         items: items.into_iter().map(Into::into).collect(),
+        total_count,
     }))
 }
 
@@ -1022,6 +1042,16 @@ mod tests {
                 .clone())
         }
 
+        fn search_hybrid(
+            &self,
+            _query_text: &str,
+            query_embedding: &[f32],
+            top_k: usize,
+            source_id: Option<&str>,
+        ) -> Result<Vec<SearchHit>> {
+            self.search(query_embedding, top_k, source_id)
+        }
+
         fn distances_for_ids(
             &self,
             _query_embedding: &[f32],
@@ -1064,19 +1094,38 @@ mod tests {
                 .collect())
         }
 
-        fn list_items(&self, source_id: Option<&str>) -> Result<Vec<ItemRecord>> {
+        fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {
             let stored = self.stored.lock().expect("store mutex poisoned");
             let mut items = stored
                 .iter()
-                .filter(|(item, _)| source_id.is_none_or(|source| item.source_id == source))
+                .filter(|(item, _)| {
+                    request
+                        .source_id
+                        .as_ref()
+                        .is_none_or(|source| &item.source_id == source)
+                })
                 .map(|(item, _)| item.clone())
                 .collect::<Vec<_>>();
+
+            let total_count = items.len() as i64;
+
             items.sort_by(|a, b| {
-                b.created_at
-                    .cmp(&a.created_at)
-                    .then_with(|| a.id.cmp(&b.id))
+                let ordering = b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id));
+                match request.sort_order {
+                    SortOrder::Asc => ordering.reverse(),
+                    SortOrder::Desc => ordering,
+                }
             });
-            Ok(items)
+
+            let offset = request.offset.unwrap_or(0);
+            let limit = request.limit.unwrap_or(100);
+            let paged_items = items
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect();
+
+            Ok((paged_items, total_count))
         }
 
         fn get_item(&self, id: &str) -> Result<Option<ItemRecord>> {
@@ -1916,7 +1965,8 @@ mod tests {
                 "metadata": {"kind":"b"},
                 "source_id": "memory",
                 "created_at": 200
-            }]
+            }],
+            "total_count": 1
         }));
     }
 

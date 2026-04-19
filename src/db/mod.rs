@@ -122,6 +122,27 @@ pub struct GraphStatus {
     pub manual_edge_count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self {
+        Self::Desc
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ListItemsRequest {
+    pub source_id: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub sort_order: SortOrder,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManualEdgeInput {
     pub from_item_id: String,
@@ -140,8 +161,15 @@ pub trait VectorStore: Send + Sync {
         top_k: usize,
         source_id: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
+    fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+        source_id: Option<&str>,
+    ) -> Result<Vec<SearchHit>>;
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
-    fn list_items(&self, source_id: Option<&str>) -> Result<Vec<ItemRecord>>;
+    fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
     fn delete_item(&self, id: &str) -> Result<bool>;
     fn distances_for_ids(
@@ -366,6 +394,110 @@ impl VectorStore for SqliteVectorStore {
         Ok(results)
     }
 
+    fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+        source_id: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        if top_k == 0 {
+            anyhow::bail!("top_k must be greater than zero");
+        }
+
+        // 1. Vector Search
+        let vector_hits = self.search(query_embedding, top_k * 2, source_id)?;
+
+        // 2. Keyword Search (FTS5)
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        // FTS5 MATCH syntax preparation
+        let fts_query = query_text
+            .split_whitespace()
+            .map(|w| format!("{}*", w.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut keyword_hits = Vec::new();
+        if !fts_query.is_empty() {
+            let mut fts_stmt = connection.prepare(
+                "
+                SELECT
+                    items.id,
+                    items.text,
+                    items.metadata,
+                    items.source_id,
+                    items.created_at,
+                    bm25(items_fts) as score
+                FROM items
+                JOIN items_fts ON items_fts.id = items.id
+                WHERE items_fts MATCH ?1
+                  AND (?2 IS NULL OR items.source_id = ?2)
+                ORDER BY score ASC
+                LIMIT ?3
+                ",
+            )?;
+
+            let rows = fts_stmt.query_map(
+                params![fts_query, source_id, (top_k * 2) as i64],
+                |row| {
+                    Ok(SearchHit {
+                        id: row.get(0)?,
+                        text: row.get(1)?,
+                        metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
+                        source_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                        distance: row.get::<_, f32>(5)?,
+                    })
+                },
+            )?;
+
+            for row in rows {
+                keyword_hits.push(row?);
+            }
+        }
+
+        // 3. Reciprocal Rank Fusion (RRF)
+        // score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)
+        let k = 60.0;
+        let mut rrf_scores: HashMap<String, f32> = HashMap::new();
+        let mut hit_map: HashMap<String, SearchHit> = HashMap::new();
+
+        for (rank, hit) in vector_hits.into_iter().enumerate() {
+            let score = 1.0 / (k + (rank + 1) as f32);
+            rrf_scores.insert(hit.id.clone(), score);
+            hit_map.insert(hit.id.clone(), hit);
+        }
+
+        for (rank, hit) in keyword_hits.into_iter().enumerate() {
+            let score = 1.0 / (k + (rank + 1) as f32);
+            *rrf_scores.entry(hit.id.clone()).or_insert(0.0) += score;
+            hit_map.entry(hit.id.clone()).or_insert(hit);
+        }
+
+        let mut results: Vec<SearchHit> = rrf_scores
+            .into_iter()
+            .map(|(id, score)| {
+                let mut hit = hit_map.remove(&id).unwrap();
+                // We normalize RRF score back to a 'pseudo-distance' for UI compatibility.
+                // The max possible RRF score is (1/k + 1/k) = 2/60 = 0.0333...
+                // We want the result to be well within the default 0.8 filter.
+                // Distance = 1.0 - (score / max_possible_score)
+                let max_score = 2.0 / k;
+                hit.distance = (1.0 - (score / max_score)).clamp(0.0, 1.0);
+                hit
+            })
+            .collect();
+
+        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        results.truncate(top_k);
+
+        Ok(results)
+    }
+
     fn distances_for_ids(
         &self,
         query_embedding: &[f32],
@@ -443,13 +575,13 @@ impl VectorStore for SqliteVectorStore {
         Ok(categories)
     }
 
-    fn list_items(&self, source_id: Option<&str>) -> Result<Vec<ItemRecord>> {
+    fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
             .context("sqlite connection has already been closed")?;
 
-        list_items_internal(connection, source_id)
+        list_items_internal(connection, request)
     }
 
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>> {
@@ -718,6 +850,30 @@ fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Res
         CREATE INDEX IF NOT EXISTS idx_items_source_id ON items(source_id);
         CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at DESC);
 
+        -- FTS5 virtual table for keyword search
+        CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+            id UNINDEXED,
+            text,
+            content='items',
+            content_rowid='rowid'
+        );
+
+        -- Triggers to keep FTS in sync with items table
+        CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
+            INSERT INTO items_fts(rowid, id, text) VALUES (new.rowid, new.id, new.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, id, text) VALUES('delete', old.rowid, old.id, old.text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, id, text) VALUES('delete', old.rowid, old.id, old.text);
+            INSERT INTO items_fts(rowid, id, text) VALUES (new.rowid, new.id, new.text);
+        END;
+
+        -- Backfill FTS if it's empty but items has data
+        INSERT OR IGNORE INTO items_fts(rowid, id, text)
+        SELECT rowid, id, text FROM items WHERE rowid NOT IN (SELECT rowid FROM items_fts);
+
         CREATE TABLE IF NOT EXISTS graph_edges (
             id TEXT PRIMARY KEY,
             from_item_id TEXT NOT NULL,
@@ -768,37 +924,43 @@ fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Res
 
 fn list_items_internal(
     connection: &Connection,
-    source_id: Option<&str>,
-) -> Result<Vec<ItemRecord>> {
+    request: ListItemsRequest,
+) -> Result<(Vec<ItemRecord>, i64)> {
     let mut items = Vec::new();
-    if let Some(source_id) = source_id {
-        let mut statement = connection.prepare(
-            "
-            SELECT id, text, metadata, source_id, created_at
-            FROM items
-            WHERE source_id = ?1
-            ORDER BY created_at DESC, id ASC
-            ",
-        )?;
-        let rows = statement.query_map(params![source_id], map_item_row)?;
-        for row in rows {
-            items.push(row?);
-        }
+    let limit = request.limit.unwrap_or(100) as i64;
+    let offset = request.offset.unwrap_or(0) as i64;
+    let sort_order = match request.sort_order {
+        SortOrder::Asc => "ASC",
+        SortOrder::Desc => "DESC",
+    };
+
+    let total_count: i64 = if let Some(source_id) = &request.source_id {
+        connection.query_row(
+            "SELECT COUNT(*) FROM items WHERE source_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?
     } else {
-        let mut statement = connection.prepare(
-            "
-            SELECT id, text, metadata, source_id, created_at
-            FROM items
-            ORDER BY created_at DESC, id ASC
-            ",
-        )?;
-        let rows = statement.query_map([], map_item_row)?;
-        for row in rows {
-            items.push(row?);
-        }
+        connection.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?
+    };
+
+    let sql = format!(
+        "
+        SELECT id, text, metadata, source_id, created_at
+        FROM items
+        WHERE (?1 IS NULL OR source_id = ?1)
+        ORDER BY created_at {sort_order}, id ASC
+        LIMIT ?2 OFFSET ?3
+        "
+    );
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params![request.source_id, limit, offset], map_item_row)?;
+    for row in rows {
+        items.push(row?);
     }
 
-    Ok(items)
+    Ok((items, total_count))
 }
 
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
@@ -1304,8 +1466,16 @@ mod tests {
             ]
         );
 
-        let knowledge_items = store.list_items(Some("knowledge")).unwrap();
+        let (knowledge_items, total) = store
+            .list_items(ListItemsRequest {
+                source_id: Some("knowledge".to_owned()),
+                limit: None,
+                offset: None,
+                sort_order: SortOrder::Desc,
+            })
+            .unwrap();
         assert_eq!(knowledge_items.len(), 1);
+        assert_eq!(total, 1);
         assert_eq!(knowledge_items[0].id, "doc-2");
 
         let fetched = store.get_item("doc-1").unwrap().unwrap();
