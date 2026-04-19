@@ -2,6 +2,12 @@
 
 `rust-rag` is a local retrieval backend with an Axum HTTP API, SQLite/sqlite-vec storage, and an ONNX embedding pipeline.
 
+## Documentation
+
+- [Start Guide](docs/setup-guide.md) - Product overview and search workflow.
+- [MCP Setup](docs/mcp-setup.md) - Agent integration and bridge configuration.
+
+
 ## HTTP server
 
 Start the main API server with the existing environment variables described in `src/config/mod.rs`:

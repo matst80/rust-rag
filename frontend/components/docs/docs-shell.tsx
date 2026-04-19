@@ -131,7 +131,7 @@ export function DocsShell({
               <div className="pt-10">
                 <MarkdownView
                   content={markdown}
-                  className="prose prose-slate max-w-none prose-headings:scroll-mt-24 prose-headings:font-semibold prose-h1:text-4xl prose-h2:mt-12 prose-h2:border-t prose-h2:pt-8 prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-pre:rounded-2xl prose-pre:border prose-pre:border-border/60 prose-pre:bg-[#111827] prose-pre:px-5 prose-pre:py-4 dark:prose-invert"
+                  className="prose prose-slate max-w-none prose-headings:scroll-mt-24 prose-headings:font-semibold prose-h1:text-4xl prose-h2:mt-12 prose-h2:border-t prose-h2:pt-8 dark:prose-invert"
                 />
               </div>
             </div>
