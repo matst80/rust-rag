@@ -18,28 +18,36 @@ function EntryNodeComponent({ data }: NodeProps<Node<EntryNodeData>>) {
   return (
     <div
       className={cn(
-        "rounded-lg border bg-card px-3 py-2 shadow-sm transition-all",
-        nodeData.isCenter && "border-primary/60 bg-primary/5",
-        nodeData.isSelected && "ring-2 ring-primary"
+        "rounded-xl border bg-card/80 backdrop-blur-md px-4 py-3 shadow-lg transition-all duration-500",
+        "hover:shadow-primary/5 hover:border-primary/30 group",
+        nodeData.isCenter && "border-primary/40 bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.1)] ring-1 ring-primary/20",
+        nodeData.isSelected && "ring-2 ring-primary border-transparent shadow-primary/20"
       )}
     >
       <Handle
         type="target"
         position={Position.Left}
-        className="!size-2 !border-none !bg-muted-foreground"
+        className="!size-1.5 !border-none !bg-primary/40 group-hover:!bg-primary transition-colors"
       />
-      <div className="max-w-40">
-        <p className="truncate text-xs font-medium">{nodeData.label}</p>
-        <p className="truncate text-xs text-muted-foreground">
+      <div className="min-w-32 max-w-48 space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-[11px] font-black uppercase tracking-wider text-primary/80">
+            {nodeData.label}
+          </p>
+          {nodeData.isCenter && (
+            <div className="size-1.5 rounded-full bg-primary animate-pulse" />
+          )}
+        </div>
+        <p className="truncate text-[10px] font-medium text-muted-foreground/60 italic">
           {nodeData.isCenter
-            ? `${nodeData.sourceId} · root`
-            : `${nodeData.sourceId}${nodeData.depth ? ` · depth ${nodeData.depth}` : ""}`}
+            ? `${nodeData.sourceId} • root`
+            : `${nodeData.sourceId}${nodeData.depth ? ` • depth ${nodeData.depth}` : ""}`}
         </p>
       </div>
       <Handle
         type="source"
         position={Position.Right}
-        className="!size-2 !border-none !bg-muted-foreground"
+        className="!size-1.5 !border-none !bg-primary/40 group-hover:!bg-primary transition-colors"
       />
     </div>
   )

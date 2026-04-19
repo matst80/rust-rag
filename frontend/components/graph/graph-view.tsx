@@ -13,6 +13,8 @@ import {
   type Edge as FlowEdge,
   ConnectionMode,
   Panel,
+  ReactFlowProvider,
+  useReactFlow,
 } from "@xyflow/react"
 import "@xyflow/react/dist/style.css"
 import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, X, Search, ChevronDown } from "lucide-react"
@@ -69,9 +71,18 @@ const MAX_DEPTH = 3
 const GRAPH_LIMIT = 50
 
 export function GraphView() {
+  return (
+    <ReactFlowProvider>
+      <GraphViewContent />
+    </ReactFlowProvider>
+  )
+}
+
+function GraphViewContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const focusId = searchParams.get("focus")
+  const { fitView } = useReactFlow()
 
   const {
     data: graphStatus,
@@ -117,7 +128,39 @@ export function GraphView() {
     GRAPH_LIMIT
   )
 
-  const graphEntries = neighborhood?.nodes ?? []
+  // Fetch semantic neighbors for the center node to ensure they are visible 
+  // even if they aren't explicitly connected in the graph DB.
+  const centerEntry = useMemo(() => entries?.find(e => e.id === centerNode), [entries, centerNode])
+  const { data: centerSemanticResults } = useSearch(
+    centerEntry?.text ? centerEntry.text : "", 
+    undefined, 
+    8
+  )
+
+  const combinedEntries = useMemo(() => {
+    const base = neighborhood?.nodes ?? []
+    if (!centerSemanticResults) return base
+
+    const semantic = centerSemanticResults.results.map(r => ({
+      id: r.id,
+      text: r.text,
+      metadata: r.metadata,
+      source_id: r.source_id,
+      created_at: r.created_at
+    }))
+    
+    const seen = new Set(base.map(e => e.id))
+    const merged = [...base]
+    for (const s of semantic) {
+      if (!seen.has(s.id)) {
+        merged.push(s)
+        seen.add(s.id)
+      }
+    }
+    return merged
+  }, [neighborhood?.nodes, centerSemanticResults])
+
+  const graphEntries = combinedEntries
   const graphEdges = neighborhood?.edges ?? []
 
   useEffect(() => {
@@ -152,12 +195,12 @@ export function GraphView() {
     }
 
     const nextSelectedNode =
-      selectedNode && neighborhood.nodes.some((entry) => entry.id === selectedNode)
+      selectedNode && combinedEntries.some((entry) => entry.id === selectedNode)
         ? selectedNode
         : centerNode
 
     const layoutedNodes = layoutGraphNodes(
-      neighborhood.nodes,
+      combinedEntries,
       neighborhood.edges,
       neighborhood.pairwise_distances,
       centerNode,
@@ -165,9 +208,20 @@ export function GraphView() {
     )
 
     setNodes(layoutedNodes)
-    setEdges(convertGraphEdges(neighborhood.edges))
+    setEdges(convertGraphEdges(
+      neighborhood.edges, 
+      neighborhood.pairwise_distances,
+      centerSemanticResults?.results.map(r => r.id),
+      centerNode
+    ))
     setSelectedNode(nextSelectedNode)
-  }, [centerNode, neighborhood, selectedNode, setEdges, setNodes])
+    
+    // Fit view after layout update
+    // We use a small timeout to ensure React Flow has processed the new nodes
+    setTimeout(() => {
+      fitView({ duration: 800, padding: 0.2 })
+    }, 50)
+  }, [centerNode, neighborhood, combinedEntries, selectedNode, setEdges, setNodes, fitView])
 
   const handleCenterNodeChange = useCallback((nodeId: string) => {
     setCenterNode(nodeId)

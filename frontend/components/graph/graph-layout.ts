@@ -182,131 +182,178 @@ function principalEigenpair(matrix: number[][], basis: number[][]): {
   return { value, vector }
 }
 
-function buildDistanceMatrix(
+function computeRadialSeed(
   entries: Entry[],
-  pairwiseDistances: GraphNodeDistance[]
-): number[][] | null {
-  if (entries.length < 2 || pairwiseDistances.length === 0) {
-    return null
+  edges: Edge[],
+  centerId: string
+): Map<string, { x: number; y: number }> {
+  const depthById = buildDepthMap(centerId, edges)
+  const entriesByDepth = new Map<number, Entry[]>()
+
+  for (const entry of entries) {
+    const depth = depthById.get(entry.id) ?? (entry.id === centerId ? 0 : 1)
+    entriesByDepth.set(depth, [...(entriesByDepth.get(depth) ?? []), entry])
   }
 
-  const ids = entries.map((entry) => entry.id)
-  const indexById = new Map(ids.map((id, index) => [id, index]))
-  const matrix = Array.from({ length: ids.length }, () =>
-    Array.from({ length: ids.length }, () => 0)
-  )
-  const observedDistances: number[] = []
-
-  for (const pair of pairwiseDistances) {
-    const left = indexById.get(pair.from_item_id)
-    const right = indexById.get(pair.to_item_id)
-    if (left === undefined || right === undefined) {
+  const positions = new Map<string, { x: number; y: number }>()
+  
+  const sortedDepths = [...entriesByDepth.entries()].sort(([left], [right]) => left - right)
+  
+  for (const [depth, group] of sortedDepths) {
+    if (depth === 0) {
+      const entry = group[0]
+      if (entry) positions.set(entry.id, { x: 0, y: 0 })
       continue
     }
 
-    matrix[left][right] = pair.distance
-    matrix[right][left] = pair.distance
-    observedDistances.push(pair.distance)
+    const radius = depth * 500
+    group.forEach((entry, index) => {
+      const angle = (2 * Math.PI * index) / group.length
+      positions.set(entry.id, {
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+      })
+    })
   }
 
-  if (observedDistances.length === 0) {
-    return null
+  return positions
+}
+
+function refineWithForces(
+  entries: Entry[],
+  edges: Edge[],
+  pairwiseDistances: GraphNodeDistance[] = [],
+  initialPositions: Map<string, { x: number; y: number }>,
+  centerId: string
+): Map<string, { x: number; y: number }> {
+  interface SimNode {
+    id: string
+    x: number
+    y: number
+    vx: number
+    vy: number
   }
 
-  const fallbackDistance = Math.max(...observedDistances) * 1.15
-  for (let row = 0; row < matrix.length; row += 1) {
-    for (let column = 0; column < matrix.length; column += 1) {
-      if (row === column) {
-        matrix[row][column] = 0
-      } else if (matrix[row][column] <= 0) {
-        matrix[row][column] = fallbackDistance
+  const nodes: SimNode[] = entries.map((e) => {
+    const pos = initialPositions.get(e.id) || { x: 0, y: 0 }
+    return { id: e.id, x: pos.x, y: pos.y, vx: 0, vy: 0 }
+  })
+
+  const nodeById = new Map(nodes.map((n) => [n.id, n]))
+
+  // Simulation constants - Tuned for a wide Graph DB feel
+  const ITERATIONS = 120
+  const REPULSION_RADIUS = 1000
+  const REPULSION_STRENGTH = 40000
+  const EDGE_STRENGTH = 0.8
+  const EDGE_DISTANCE = 550
+  const SIMILARITY_STRENGTH = 0.5
+  const CENTER_PULL = 0.04
+  const FRICTION = 0.55
+  const HORIZONTAL_BIAS = 2.0 // Strong horizontal spread for card readability
+
+  for (let i = 0; i < ITERATIONS; i++) {
+    const alpha = 1.0 - i / ITERATIONS 
+
+    // 1. Many-body Repulsion
+    for (let u = 0; u < nodes.length; u++) {
+      for (let v = u + 1; v < nodes.length; v++) {
+        const nodeA = nodes[u]
+        const nodeB = nodes[v]
+        const dx = (nodeA.x - nodeB.x) / HORIZONTAL_BIAS
+        const dy = nodeA.y - nodeB.y
+        const dist2 = dx * dx + dy * dy + 1e-6
+        const dist = Math.sqrt(dist2)
+
+        if (dist < REPULSION_RADIUS) {
+          const force = (REPULSION_STRENGTH * alpha) / dist2
+          const fx = (dx / dist) * force * HORIZONTAL_BIAS
+          const fy = (dy / dist) * force
+          nodeA.vx += fx
+          nodeA.vy += fy
+          nodeB.vx -= fx
+          nodeB.vy -= fy
+        }
       }
+    }
+
+    // 2. Manual Link Attraction
+    for (const edge of edges) {
+      const nodeA = nodeById.get(edge.source_id)
+      const nodeB = nodeById.get(edge.target_id)
+      if (nodeA && nodeB) {
+        const dx = nodeB.x - nodeA.x
+        const dy = nodeB.y - nodeA.y
+        const dist = Math.sqrt(dx * dx + dy * dy) + 1e-6
+        const force = (dist - EDGE_DISTANCE) * EDGE_STRENGTH * alpha
+        const fx = (dx / dist) * force
+        const fy = (dy / dist) * force
+        nodeA.vx += fx
+        nodeA.vy += fy
+        nodeB.vx -= fx
+        nodeB.vy -= fy
+      }
+    }
+
+    // 3. Semantic Similarity Link Attraction
+    for (const distInfo of (pairwiseDistances || [])) {
+      const nodeA = nodeById.get(distInfo.from_item_id)
+      const nodeB = nodeById.get(distInfo.to_item_id)
+      if (nodeA && nodeB) {
+        const dx = nodeB.x - nodeA.x
+        const dy = nodeB.y - nodeA.y
+        const dist = Math.sqrt(dx * dx + dy * dy) + 1e-6
+        
+        const targetDist = 250 + (distInfo.distance * 350) 
+        const strength = (1.0 - distInfo.distance) * SIMILARITY_STRENGTH * alpha
+        
+        const force = (dist - targetDist) * strength
+        const fx = (dx / dist) * force
+        const fy = (dy / dist) * force
+        nodeA.vx += fx
+        nodeA.vy += fy
+        nodeB.vx -= fx
+        nodeB.vy -= fy
+      }
+    }
+
+    // 4. Center gravity
+    const centerNode = nodeById.get(centerId) || nodes[0]
+    for (const node of nodes) {
+      if (node.id === centerId) continue
+      const dx = centerNode.x - node.x
+      const dy = centerNode.y - node.y
+      node.vx += dx * CENTER_PULL * alpha
+      node.vy += dy * CENTER_PULL * alpha
+    }
+
+    // 5. Update positions
+    for (const node of nodes) {
+      node.x += node.vx
+      node.y += node.vy
+      node.vx *= FRICTION
+      node.vy *= FRICTION
     }
   }
 
-  return matrix
-}
-
-function computeDistanceAwarePositions(
-  entries: Entry[],
-  pairwiseDistances: GraphNodeDistance[],
-  centerId: string
-): Map<string, { x: number; y: number }> | null {
-  const distanceMatrix = buildDistanceMatrix(entries, pairwiseDistances)
-  if (!distanceMatrix) {
-    return null
-  }
-
-  const size = distanceMatrix.length
-  const squaredMeansByRow = distanceMatrix.map(
-    (row) => row.reduce((sum, value) => sum + value * value, 0) / size
-  )
-  const grandMean = squaredMeansByRow.reduce((sum, value) => sum + value, 0) / size
-  const centered = Array.from({ length: size }, (_, row) =>
-    Array.from({ length: size }, (_, column) => {
-      const squaredDistance = distanceMatrix[row][column] * distanceMatrix[row][column]
-      return -0.5 * (
-        squaredDistance - squaredMeansByRow[row] - squaredMeansByRow[column] + grandMean
-      )
-    })
-  )
-
-  const first = principalEigenpair(centered, [])
-  const second = first ? principalEigenpair(centered, [first.vector]) : null
-  if (!first) {
-    return null
-  }
-
-  const xScale = Math.sqrt(first.value)
-  const yScale = second ? Math.sqrt(second.value) : 0
-  const rawPositions = entries.map((entry, index) => ({
-    id: entry.id,
-    x: first.vector[index] * xScale,
-    y: second ? second.vector[index] * yScale : 0,
-  }))
-
-  const centerPosition =
-    rawPositions.find((position) => position.id === centerId) ?? rawPositions[0]
-  const shifted = rawPositions.map((position) => ({
-    ...position,
-    x: position.x - centerPosition.x,
-    y: position.y - centerPosition.y,
-  }))
-
-  const maxAbs = shifted.reduce(
-    (max, position) => Math.max(max, Math.abs(position.x), Math.abs(position.y)),
-    0
-  )
-  const scale = maxAbs > 0 ? 360 / maxAbs : 1
-
-  return new Map(
-    shifted.map((position) => [
-      position.id,
-      {
-        x: position.x * scale,
-        y: position.y * scale,
-      },
-    ])
-  )
+  return new Map(nodes.map((n) => [n.id, { x: n.x, y: n.y }]))
 }
 
 export function layoutGraphNodes(
   entries: Entry[],
   edges: Edge[],
-  pairwiseDistances: GraphNodeDistance[],
+  pairwiseDistances: GraphNodeDistance[] = [],
   centerId: string,
   selectedNode: string | null
 ): GraphNode[] {
   const depthById = buildDepthMap(centerId, edges)
-  const positions = computeDistanceAwarePositions(entries, pairwiseDistances, centerId)
-  if (!positions) {
-    return fallbackLayout(entries, edges, centerId, selectedNode)
-  }
+  const radialSeed = computeRadialSeed(entries, edges, centerId)
+  const refinedPositions = refineWithForces(entries, edges, pairwiseDistances, radialSeed, centerId)
 
   return entries.map((entry) =>
     createGraphNode(
       entry,
-      positions.get(entry.id) ?? { x: 0, y: 0 },
+      refinedPositions.get(entry.id) ?? { x: 0, y: 0 },
       depthById.get(entry.id) ?? (entry.id === centerId ? 0 : 1),
       entry.id === centerId,
       selectedNode === entry.id
@@ -314,12 +361,15 @@ export function layoutGraphNodes(
   )
 }
 
-export function convertGraphEdges(edges: Edge[]): FlowEdge[] {
-  return edges.map((edge) => {
+export function convertGraphEdges(
+  edges: Edge[],
+  pairwiseDistances: GraphNodeDistance[] = [],
+  semanticSearchNeighborIds: string[] = [],
+  centerId: string | null = null
+): FlowEdge[] {
+  const flowEdges: FlowEdge[] = edges.map((edge) => {
     const isSimilarity = edge.edge_type === "similarity"
-    const strokeOpacity = isSimilarity
-      ? Math.max(0.2, 1 - (edge.distance ?? 0.75))
-      : 0.95
+    const strokeOpacity = isSimilarity ? 0.35 : 0.9
 
     return {
       id: edge.id,
@@ -327,23 +377,82 @@ export function convertGraphEdges(edges: Edge[]): FlowEdge[] {
       target: edge.target_id,
       label: isSimilarity ? undefined : edge.relationship,
       type: "default",
-      animated: false,
-      markerEnd: edge.directed
-        ? {
-            type: MarkerType.ArrowClosed,
-            width: 18,
-            height: 18,
-            color: isSimilarity ? "var(--chart-4)" : "var(--primary)",
-          }
-        : undefined,
+      animated: isSimilarity,
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 14,
+        height: 14,
+        color: isSimilarity ? "var(--chart-4)" : "var(--primary)",
+      },
       style: {
         stroke: isSimilarity ? "var(--chart-4)" : "var(--primary)",
-        strokeDasharray: isSimilarity ? "6 4" : undefined,
+        strokeDasharray: isSimilarity ? "2 4" : undefined, // Dotted for similarity
         strokeOpacity,
-        strokeWidth: isSimilarity ? 1 + edge.weight * 2 : 1.75 + edge.weight,
+        strokeWidth: isSimilarity ? 1.5 : 2,
       },
-      labelStyle: { fontSize: 10, fill: "var(--foreground)" },
-      labelBgStyle: { fill: "var(--background)", opacity: 0.85 },
+      labelStyle: { 
+        fontSize: 8, 
+        fontWeight: "bold",
+        fill: "var(--primary)",
+        opacity: 0.7
+      },
+      labelBgStyle: { fill: "var(--background)", opacity: 0.95 },
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 4,
     }
   })
+
+  // Ensure Semantic Search results also have dotted lines to the focal node
+  if (centerId) {
+    semanticSearchNeighborIds.forEach((neighborId) => {
+      if (neighborId === centerId) return
+      
+      const exists = flowEdges.some(e => 
+        (e.source === centerId && e.target === neighborId) ||
+        (e.source === neighborId && e.target === centerId)
+      )
+
+      if (!exists) {
+        flowEdges.push({
+          id: `related-${centerId}-${neighborId}`,
+          source: centerId,
+          target: neighborId,
+          type: "default",
+          animated: true,
+          style: {
+            stroke: "var(--chart-4)",
+            strokeDasharray: "2 4", // Dotted line
+            strokeOpacity: 0.25,
+            strokeWidth: 1.25,
+          },
+        })
+      }
+    })
+  }
+
+  // Ensure ALL semantic similarities from pairwise distances are drawn if nodes are present
+  (pairwiseDistances || []).forEach((dist) => {
+    const exists = flowEdges.some(e => 
+      (e.source === dist.from_item_id && e.target === dist.to_item_id) ||
+      (e.source === dist.to_item_id && e.target === dist.from_item_id)
+    )
+
+    if (!exists && dist.distance < 0.85) {
+      flowEdges.push({
+        id: `sim-${dist.from_item_id}-${dist.to_item_id}`,
+        source: dist.from_item_id,
+        target: dist.to_item_id,
+        type: "default",
+        animated: true,
+        style: {
+          stroke: "var(--chart-4)",
+          strokeDasharray: "2 4", // Dotted line
+          strokeOpacity: 0.3,
+          strokeWidth: 1.25,
+        },
+      })
+    }
+  })
+
+  return flowEdges
 }
