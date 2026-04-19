@@ -14,6 +14,7 @@ bytemuck = "1.25.0"
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.12", features = ["ndarray", "download-binaries", "tracing"] }
 openssl = { version = "0.10", features = ["vendored"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
 rusqlite = { version = "0.39.0", features = ["bundled", "load_extension"] }
 schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }

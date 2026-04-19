@@ -10,6 +10,7 @@ permissions:
 
 env:
   BINARY_NAME: rust-rag
+  OPENSSL_STATIC: 1
 
 jobs:
   build:

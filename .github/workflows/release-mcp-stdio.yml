@@ -10,6 +10,7 @@ permissions:
 
 env:
   BINARY_NAME: mcp-stdio
+  OPENSSL_STATIC: 1
 
 jobs:
   build:
