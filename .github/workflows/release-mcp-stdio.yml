@@ -42,7 +42,7 @@ jobs:
 
       - name: Build release binary
         working-directory: mcp-stdio
-        run: cross build --locked --release --bin mcp-stdio --target ${{ matrix.target }}
+        run: cross build --locked --release --target ${{ matrix.target }}
 
       - name: Package release artifact
         working-directory: mcp-stdio
