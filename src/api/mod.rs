@@ -11,11 +11,12 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -357,6 +358,12 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
@@ -402,7 +409,7 @@ async fn require_api_key(
         .or_else(|| {
             request
                 .headers()
-                .get(axum::http::header::AUTHORIZATION)
+                .get(header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(str::trim)
@@ -410,13 +417,36 @@ async fn require_api_key(
                 .map(ToOwned::to_owned)
         });
 
-    match provided {
-        Some(key) if state.auth.matches_api_key(&key) => Ok(next.run(request).await),
-        Some(_) => Err(ApiError::Unauthorized("invalid API credential".to_owned())),
-        None => Err(ApiError::Unauthorized(
-            "missing x-api-key header or bearer token".to_owned(),
-        )),
+    if let Some(key) = provided {
+        if state.auth.matches_api_key(&key) {
+            return Ok(next.run(request).await);
+        }
     }
+
+    if let Some(secret) = state.auth.session_secret.as_deref() {
+        if let Some(cookies) = request.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+            for cookie in cookies.split(';') {
+                let mut parts = cookie.trim().splitn(2, '=');
+                if let (Some(name), Some(value)) = (parts.next(), parts.next()) {
+                    if name == "rag_session" {
+                        if decode::<Claims>(
+                            value,
+                            &DecodingKey::from_secret(secret.as_bytes()),
+                            &Validation::default(),
+                        )
+                        .is_ok()
+                        {
+                            return Ok(next.run(request).await);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(ApiError::Unauthorized(
+        "missing x-api-key header, bearer token or valid session cookie".to_owned(),
+    ))
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {

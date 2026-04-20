@@ -18,7 +18,7 @@ Frontend environment variables:
 - `ZITADEL_ISSUER` - Zitadel issuer URL
 - `ZITADEL_CLIENT_ID` - Zitadel application client ID
 - `ZITADEL_CLIENT_SECRET` - Zitadel application client secret
-- `ZITADEL_REDIRECT_URI` - optional override for the callback URL. Default: `${APP_BASE_URL}/api/auth/callback`
+- `ZITADEL_REDIRECT_URI` - optional override for the callback URL. Default: `${APP_BASE_URL}/auth/callback`
 - `ZITADEL_SCOPES` - optional scopes. Default: `openid profile email`
 - `RAG_API_URL` - Rust API base URL used by the Next.js proxy. Default: `http://127.0.0.1:4001`
 - `RAG_FRONTEND_API_KEY` - shared key the Next.js proxy sends to the Rust API

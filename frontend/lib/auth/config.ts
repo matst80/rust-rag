@@ -2,15 +2,16 @@ const DEFAULT_SCOPES = "openid profile email"
 const DEFAULT_SESSION_MAX_AGE_SECS = 8 * 60 * 60
 
 export interface AuthConfig {
+	authEnabled: boolean
 	appBaseUrl: string
 	backendApiUrl: string
 	backendApiKey?: string
-	issuer: string
-	clientId: string
-	clientSecret: string
+	issuer?: string
+	clientId?: string
+	clientSecret?: string
 	redirectUri: string
 	scopes: string
-	sessionSecret: string
+	sessionSecret?: string
 	sessionMaxAgeSeconds: number
 }
 
@@ -29,22 +30,24 @@ function optionalEnv(name: string): string | undefined {
 }
 
 export function getAuthConfig(): AuthConfig {
-	const appBaseUrl = requiredEnv("APP_BASE_URL")
+	const authEnabled = process.env.RAG_AUTH_ENABLED !== "false"
+	const appBaseUrl = authEnabled ? requiredEnv("APP_BASE_URL") : (optionalEnv("APP_BASE_URL") ?? "http://localhost:3000")
 	const sessionMaxAgeSeconds = Number.parseInt(
 		process.env.AUTH_SESSION_MAX_AGE_SECS ?? `${DEFAULT_SESSION_MAX_AGE_SECS}`,
 		10
 	)
 
 	return {
+		authEnabled,
 		appBaseUrl,
 		backendApiUrl: optionalEnv("RAG_API_URL") ?? "http://127.0.0.1:4001",
 		backendApiKey: optionalEnv("RAG_FRONTEND_API_KEY"),
-		issuer: requiredEnv("ZITADEL_ISSUER"),
-		clientId: requiredEnv("ZITADEL_CLIENT_ID"),
-		clientSecret: requiredEnv("ZITADEL_CLIENT_SECRET"),
+		issuer: authEnabled ? requiredEnv("ZITADEL_ISSUER") : optionalEnv("ZITADEL_ISSUER"),
+		clientId: authEnabled ? requiredEnv("ZITADEL_CLIENT_ID") : optionalEnv("ZITADEL_CLIENT_ID"),
+		clientSecret: authEnabled ? requiredEnv("ZITADEL_CLIENT_SECRET") : optionalEnv("ZITADEL_CLIENT_SECRET"),
 		redirectUri: optionalEnv("ZITADEL_REDIRECT_URI") ?? `${appBaseUrl}/api/auth/callback`,
 		scopes: optionalEnv("ZITADEL_SCOPES") ?? DEFAULT_SCOPES,
-		sessionSecret: requiredEnv("AUTH_SESSION_SECRET"),
+		sessionSecret: authEnabled ? requiredEnv("AUTH_SESSION_SECRET") : optionalEnv("AUTH_SESSION_SECRET"),
 		sessionMaxAgeSeconds:
 			Number.isFinite(sessionMaxAgeSeconds) && sessionMaxAgeSeconds > 0
 				? sessionMaxAgeSeconds

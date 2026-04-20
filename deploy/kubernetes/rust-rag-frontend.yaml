@@ -9,10 +9,11 @@ data:
   PORT: "3000"
   HOSTNAME: "0.0.0.0"
   NEXT_TELEMETRY_DISABLED: "1"
-  APP_BASE_URL: "https://rag.example.com"
+  RAG_AUTH_ENABLED: "true"
+  APP_BASE_URL: "https://rag.k6n.net"
   RAG_API_URL: "http://rust-rag:4001"
-  ZITADEL_ISSUER: "https://auth.example.com"
-  ZITADEL_CLIENT_ID: "replace-with-zitadel-client-id"
+  ZITADEL_ISSUER: "https://auth.k6n.net"
+  ZITADEL_CLIENT_ID: "369392141752927246@rag"
   ZITADEL_SCOPES: "openid profile email"
 ---
 apiVersion: apps/v1

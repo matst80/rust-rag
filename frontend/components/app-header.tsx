@@ -28,6 +28,7 @@ const navigation = [
 
 interface SessionResponse {
 	authenticated: boolean
+	authEnabled: boolean
 	user?: {
 		name?: string
 		email?: string
@@ -38,7 +39,7 @@ interface SessionResponse {
 async function loadSession(url: string): Promise<SessionResponse> {
 	const response = await fetch(url, { cache: "no-store" })
 	if (!response.ok) {
-		return { authenticated: false }
+		return { authenticated: false, authEnabled: true }
 	}
 
 	return response.json()
@@ -97,7 +98,7 @@ export function AppHeader() {
 								<span className="hidden sm:inline">Sign out</span>
 							</a>
 						</>
-					) : (
+					) : session?.authEnabled ? (
 						<a
 							href="/api/auth/login"
 							className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
@@ -105,7 +106,7 @@ export function AppHeader() {
 							<LogIn className="size-4" />
 							<span className="hidden sm:inline">Sign in</span>
 						</a>
-					)}
+					) : null}
 					<a
 						href={GITHUB_REPO_URL}
 						target="_blank"

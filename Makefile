@@ -12,11 +12,15 @@ RAG_GRAPH_BUILD_ON_STARTUP ?= true
 RAG_GRAPH_K ?= 5
 RAG_GRAPH_MAX_DISTANCE ?= 0.75
 RAG_GRAPH_CROSS_SOURCE ?= false
+RAG_AUTH_ENABLED ?= false
+RAG_FRONTEND_API_KEY ?= replace-with-shared-frontend-backend-key
+RAG_MCP_AUTH_BEARER ?=
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
 ZITADEL_CLIENT_ID ?= 369392141752927246@rag
 IMAGE_NAME ?= matst80/rust-rag:latest
 FRONTEND_IMAGE_NAME ?= matst80/rust-rag-frontend:latest
 FRONTEND_DIR ?= $(CURDIR)/frontend
+APP_BASE_URL ?= http://localhost:3000
 K8S_MANIFEST ?= deploy/kubernetes/rust-rag.yaml
 K8S_FRONTEND_MANIFEST ?= deploy/kubernetes/rust-rag-frontend.yaml
 K8S_NAMESPACE ?= home
@@ -116,10 +120,14 @@ run: check-env
 	RAG_GRAPH_K="$(RAG_GRAPH_K)" \
 	RAG_GRAPH_MAX_DISTANCE="$(RAG_GRAPH_MAX_DISTANCE)" \
 	RAG_GRAPH_CROSS_SOURCE="$(RAG_GRAPH_CROSS_SOURCE)" \
+	RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
+	RAG_FRONTEND_API_KEY="$(RAG_FRONTEND_API_KEY)" \
+	AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
 	cargo run
 
 run-mcp:
 	RAG_MCP_API_BASE_URL="$(API_URL)" \
+	RAG_MCP_AUTH_BEARER="$(RAG_MCP_AUTH_BEARER)" \
 	cargo run --manifest-path mcp-stdio/Cargo.toml
 
 docker-build:
@@ -145,6 +153,13 @@ frontend-docker-run:
 	docker run --rm \
 		-p 3000:3000 \
 		-e RAG_API_URL="$(API_URL)" \
+		-e RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
+		-e RAG_FRONTEND_API_KEY="$(RAG_FRONTEND_API_KEY)" \
+		-e ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
+		-e ZITADEL_CLIENT_ID="$(ZITADEL_CLIENT_ID)" \
+		-e ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
+		-e AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
+		-e APP_BASE_URL="$(APP_BASE_URL)" \
 		"$(FRONTEND_IMAGE_NAME)"
 
 docker-build-all: docker-build frontend-docker-build

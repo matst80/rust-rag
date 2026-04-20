@@ -17,6 +17,7 @@ pub struct ApiKeyConfig {
 pub struct AuthConfig {
     pub enabled: bool,
     pub frontend_api_key: Option<String>,
+    pub session_secret: Option<String>,
     pub api_keys: Vec<ApiKeyConfig>,
 }
 
@@ -57,12 +58,15 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let frontend_api_key = non_empty_var("RAG_FRONTEND_API_KEY");
+        let session_secret = non_empty_var("AUTH_SESSION_SECRET");
         let api_keys = parse_api_keys(env::var("RAG_API_KEYS").ok())?;
         let auth_enabled = match env::var("RAG_AUTH_ENABLED") {
             Ok(raw) => raw
                 .parse::<bool>()
                 .map_err(|error| anyhow!("failed to parse RAG_AUTH_ENABLED={raw:?}: {error}"))?,
-            Err(env::VarError::NotPresent) => frontend_api_key.is_some() || !api_keys.is_empty(),
+            Err(env::VarError::NotPresent) => {
+                frontend_api_key.is_some() || session_secret.is_some() || !api_keys.is_empty()
+            }
             Err(error) => return Err(anyhow!("failed to read RAG_AUTH_ENABLED: {error}")),
         };
 
@@ -83,6 +87,7 @@ impl AppConfig {
             auth: AuthConfig {
                 enabled: auth_enabled,
                 frontend_api_key,
+                session_secret,
                 api_keys,
             },
         })

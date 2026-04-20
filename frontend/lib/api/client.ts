@@ -17,7 +17,7 @@ import type {
   PagedItems,
 } from "./types"
 
-const API_BASE_URL = ""
+const API_BASE_URL = "/api"
 
 interface CategoriesResponse {
   categories: Array<{

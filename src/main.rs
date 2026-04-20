@@ -33,6 +33,12 @@ async fn main() -> Result<()> {
         config.graph_cross_source
     );
     println!("loading sqlite store");
+    println!("config: auth enabled={} (frontend_key={}, session_secret={}, api_keys={})", 
+        config.auth.enabled,
+        config.auth.frontend_api_key.is_some(),
+        config.auth.session_secret.is_some(),
+        config.auth.api_keys.len()
+    );
     let store = Arc::new(SqliteVectorStore::connect(
         &config.db_path,
         config.embedding_dimension,

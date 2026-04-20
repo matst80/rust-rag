@@ -20,16 +20,6 @@ data:
   RAG_AUTH_ENABLED: "true"
 ---
 apiVersion: v1
-kind: Secret
-metadata:
-  name: rust-rag-auth
-  labels:
-    app.kubernetes.io/name: rust-rag
-type: Opaque
-stringData:
-  RAG_FRONTEND_API_KEY: "replace-with-shared-frontend-backend-key"
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: rust-rag-data
@@ -69,7 +59,7 @@ spec:
             - configMapRef:
                 name: rust-rag-config
             - secretRef:
-                name: rust-rag-auth
+                name: rust-rag-frontend-auth
           volumeMounts:
             - name: data
               mountPath: /app/data

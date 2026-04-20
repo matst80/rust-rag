@@ -7,6 +7,14 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path((?!auth/).*)',
+        destination: (process.env.RAG_API_URL || 'http://localhost:4001') + '/:path*',
+      },
+    ]
+  },
 }
 
 export default nextConfig
