@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     let store_service: Arc<dyn VectorStore> = store.clone();
     let embedder_handle = Arc::new(EmbedderHandle::loading());
-    let state = AppState::new(embedder_handle.clone(), store_service);
+    let state = AppState::new(embedder_handle.clone(), store_service, config.auth.clone());
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;

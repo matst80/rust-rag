@@ -1,8 +1,13 @@
 import type { NextRequest } from "next/server"
 import { NextResponse } from "next/server"
+import { readSessionFromRequest } from "@/lib/auth/session"
 import { acceptsMarkdown } from "@/lib/start-page"
 
-export function proxy(request: NextRequest) {
+function isProtectedAppRoute(pathname: string) {
+	return pathname === "/" || pathname.startsWith("/entries") || pathname.startsWith("/visualize")
+}
+
+export async function proxy(request: NextRequest) {
 	const pathname = request.nextUrl.pathname
 	const isMarkdown = acceptsMarkdown(request.headers.get("accept"))
 
@@ -26,9 +31,19 @@ export function proxy(request: NextRequest) {
 		}
 	}
 
+	if (isProtectedAppRoute(pathname)) {
+		const session = await readSessionFromRequest(request)
+		if (!session) {
+			const url = request.nextUrl.clone()
+			url.pathname = "/api/auth/login"
+			url.searchParams.set("returnTo", `${pathname}${request.nextUrl.search}`)
+			return NextResponse.redirect(url)
+		}
+	}
+
 	return NextResponse.next()
 }
 
 export const config = {
-	matcher: ["/", "/start-guide", "/mcp-setup"],
+	matcher: ["/", "/entries/:path*", "/visualize", "/visualize/:path*", "/start-guide", "/mcp-setup"],
 }

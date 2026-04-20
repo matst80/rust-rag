@@ -9,7 +9,11 @@ data:
   PORT: "3000"
   HOSTNAME: "0.0.0.0"
   NEXT_TELEMETRY_DISABLED: "1"
-  RAG_API_URL: "http://rag-service:4001"
+  APP_BASE_URL: "https://rag.example.com"
+  RAG_API_URL: "http://rust-rag:4001"
+  ZITADEL_ISSUER: "https://auth.example.com"
+  ZITADEL_CLIENT_ID: "replace-with-zitadel-client-id"
+  ZITADEL_SCOPES: "openid profile email"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -37,6 +41,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: rust-rag-frontend-config
+            - secretRef:
+                name: rust-rag-frontend-auth
           startupProbe:
             httpGet:
               path: /

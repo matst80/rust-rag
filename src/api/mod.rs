@@ -1,4 +1,5 @@
 use crate::{
+    config::AuthConfig,
     db::{
         CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
         GraphStatus,
@@ -11,6 +12,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -29,11 +31,16 @@ use uuid::Uuid;
 pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
     pub store: Arc<dyn VectorStore>,
+    pub auth: Arc<AuthConfig>,
 }
 
 impl AppState {
-    pub fn new(embedder: Arc<EmbedderHandle>, store: Arc<dyn VectorStore>) -> Self {
-        Self { embedder, store }
+    pub fn new(embedder: Arc<EmbedderHandle>, store: Arc<dyn VectorStore>, auth: AuthConfig) -> Self {
+        Self {
+            embedder,
+            store,
+            auth: Arc::new(auth),
+        }
     }
 
     #[cfg(test)]
@@ -41,6 +48,7 @@ impl AppState {
         Self {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
             store,
+            auth: Arc::new(AuthConfig::default()),
         }
     }
 }
@@ -350,8 +358,7 @@ struct ErrorResponse {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(health))
+    let protected_routes = Router::new()
         .route("/store", post(store))
         .route("/search", post(search))
         .route("/graph/status", get(graph_status))
@@ -363,8 +370,53 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ))
+        .with_state(state.clone());
+
+    Router::new()
+        .route("/healthz", get(health))
+        .merge(protected_routes)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+async fn require_api_key(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !state.auth.is_enabled() {
+        return Ok(next.run(request).await);
+    }
+
+    let provided = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+
+    match provided {
+        Some(key) if state.auth.matches_api_key(&key) => Ok(next.run(request).await),
+        Some(_) => Err(ApiError::Unauthorized("invalid API credential".to_owned())),
+        None => Err(ApiError::Unauthorized(
+            "missing x-api-key header or bearer token".to_owned(),
+        )),
+    }
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
@@ -727,6 +779,8 @@ async fn delete_graph_edge(
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
     #[error("{0}")]
+    Unauthorized(String),
+    #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
@@ -740,15 +794,24 @@ enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, error) = match self {
-            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
-            Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
+        let (status, error_message) = match &self {
+            Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.clone()),
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
+            Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message.clone()),
             Self::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::TaskJoin(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         };
 
-        (status, Json(ErrorResponse { error })).into_response()
+        if status.is_server_error() {
+            tracing::error!(
+                status = %status,
+                error = %self,
+                "api request failed"
+            );
+        }
+
+        (status, Json(ErrorResponse { error: error_message })).into_response()
     }
 }
 

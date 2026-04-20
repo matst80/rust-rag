@@ -16,7 +16,13 @@ The `mcp-stdio` bridge exposes rust-rag to MCP-compatible agent clients over std
 - `RAG_MCP_API_BASE_URL` - your deployed rust-rag base URL
 - `RAG_MCP_TOOL_GROUPS` - keep this narrow, for example `core,graph`
 - `RAG_MCP_SEARCH_FORMAT` - `markdown` is the best default for agents
-- `RAG_MCP_AUTH_BEARER` - optional auth for upstream requests
+- `RAG_MCP_AUTH_BEARER` - optional bearer-style API key for upstream requests
+- `RAG_MCP_HEADERS` - optional extra headers, for example `x-api-key=your-direct-key`
+
+If the Rust API is protected with `RAG_API_KEYS`, use one of these:
+
+- `RAG_MCP_AUTH_BEARER=your-direct-key`
+- `RAG_MCP_HEADERS=x-api-key=your-direct-key`
 
 ## Claude Code
 
@@ -35,7 +41,8 @@ claude mcp add rust-rag \
       "command": "/absolute/path/to/mcp-stdio",
       "env": {
         "RAG_MCP_API_BASE_URL": "https://your-rag-host",
-        "RAG_MCP_TOOL_GROUPS": "core,graph"
+        "RAG_MCP_TOOL_GROUPS": "core,graph",
+        "RAG_MCP_HEADERS": "x-api-key=replace-me"
       }
     }
   }
