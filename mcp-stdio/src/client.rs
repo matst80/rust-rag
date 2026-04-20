@@ -347,6 +347,7 @@ mod tests {
                                 center_id: id,
                                 nodes: Vec::new(),
                                 edges: Vec::new(),
+                                pairwise_distances: Vec::new(),
                             })
                         }
                     }

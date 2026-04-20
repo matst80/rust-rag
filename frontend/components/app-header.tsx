@@ -28,7 +28,7 @@ const navigation = [
 
 interface SessionResponse {
 	authenticated: boolean
-	authEnabled: boolean
+	auth_enabled: boolean
 	user?: {
 		name?: string
 		email?: string
@@ -39,7 +39,7 @@ interface SessionResponse {
 async function loadSession(url: string): Promise<SessionResponse> {
 	const response = await fetch(url, { cache: "no-store" })
 	if (!response.ok) {
-		return { authenticated: false, authEnabled: true }
+		return { authenticated: false, auth_enabled: true }
 	}
 
 	return response.json()
@@ -47,7 +47,7 @@ async function loadSession(url: string): Promise<SessionResponse> {
 
 export function AppHeader() {
 	const pathname = usePathname()
-	const { data: session } = useSWR<SessionResponse>("/api/auth/session", loadSession, {
+	const { data: session } = useSWR<SessionResponse>("/auth/session", loadSession, {
 		revalidateOnFocus: true,
 	})
 	const displayName =
@@ -91,16 +91,16 @@ export function AppHeader() {
 								<span>{displayName}</span>
 							</span>
 							<a
-								href="/api/auth/logout"
+								href="/auth/logout"
 								className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 							>
 								<LogOut className="size-4" />
 								<span className="hidden sm:inline">Sign out</span>
 							</a>
 						</>
-					) : session?.authEnabled ? (
+					) : session?.auth_enabled ? (
 						<a
-							href="/api/auth/login"
+							href="/auth/login"
 							className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
 						>
 							<LogIn className="size-4" />

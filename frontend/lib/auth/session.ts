@@ -4,75 +4,55 @@ import { getAuthConfig } from "@/lib/auth/config"
 
 export const SESSION_COOKIE_NAME = "rag_session"
 
-export interface AuthSession {
+export interface UserSession {
 	sub: string
 	name?: string
 	email?: string
 	preferred_username?: string
-	exp: number
 }
 
-function getSessionKey() {
-	return new TextEncoder().encode(getAuthConfig().sessionSecret)
+function getSessionSecret() {
+	const config = getAuthConfig()
+	return new TextEncoder().encode(config.sessionSecret)
 }
 
 function isSecureCookie() {
-	return process.env.NODE_ENV === "production"
+	const config = getAuthConfig()
+	return config.appBaseUrl.startsWith("https")
 }
 
-export async function createSessionToken(
-	claims: Omit<AuthSession, "exp">,
-	maxAgeSeconds: number
-): Promise<string> {
-	return new SignJWT({
-		email: claims.email,
-		name: claims.name,
-		preferred_username: claims.preferred_username,
-	})
+export async function createSessionToken(user: UserSession, maxAge: number): Promise<string> {
+	const secret = getSessionSecret()
+
+	return new SignJWT({ ...user })
 		.setProtectedHeader({ alg: "HS256" })
-		.setSubject(claims.sub)
 		.setIssuedAt()
-		.setExpirationTime(`${maxAgeSeconds}s`)
-		.sign(getSessionKey())
+		.setExpirationTime(Math.floor(Date.now() / 1000) + maxAge)
+		.sign(secret)
 }
 
-export async function verifySessionToken(token: string): Promise<AuthSession | null> {
+export async function readSessionFromRequest(request: NextRequest): Promise<UserSession | null> {
+	const cookie = request.cookies.get(SESSION_COOKIE_NAME)
+	if (!cookie?.value) {
+		return null
+	}
+
 	try {
-		const { payload } = await jwtVerify(token, getSessionKey())
-		if (typeof payload.sub !== "string" || typeof payload.exp !== "number") {
-			return null
-		}
+		const secret = getSessionSecret()
+		const { payload } = await jwtVerify(cookie.value, secret, {
+			algorithms: ["HS256"],
+		})
 
-		return {
-			sub: payload.sub,
-			exp: payload.exp,
-			name: typeof payload.name === "string" ? payload.name : undefined,
-			email: typeof payload.email === "string" ? payload.email : undefined,
-			preferred_username:
-				typeof payload.preferred_username === "string"
-					? payload.preferred_username
-					: undefined,
-		}
-	} catch {
+		return payload as unknown as UserSession
+	} catch (error) {
+		console.error("session verification failed", error)
 		return null
 	}
 }
 
-export async function readSessionFromRequest(request: NextRequest): Promise<AuthSession | null> {
-	const token = request.cookies.get(SESSION_COOKIE_NAME)?.value
-	if (!token) {
-		return null
-	}
+export async function setSessionCookie(response: NextResponse, user: UserSession, maxAge: number) {
+	const token = await createSessionToken(user, maxAge)
 
-	return verifySessionToken(token)
-}
-
-export async function setSessionCookie(
-	response: NextResponse,
-	claims: Omit<AuthSession, "exp">,
-	maxAgeSeconds: number
-) {
-	const token = await createSessionToken(claims, maxAgeSeconds)
 	response.cookies.set({
 		name: SESSION_COOKIE_NAME,
 		value: token,
@@ -80,9 +60,8 @@ export async function setSessionCookie(
 		sameSite: "lax",
 		secure: isSecureCookie(),
 		path: "/",
-		maxAge: maxAgeSeconds,
+		maxAge,
 	})
-	return token
 }
 
 export function clearSessionCookie(response: NextResponse) {

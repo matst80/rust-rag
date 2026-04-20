@@ -11,12 +11,13 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use jsonwebtoken::{DecodingKey, Validation, decode};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,7 +37,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(embedder: Arc<EmbedderHandle>, store: Arc<dyn VectorStore>, auth: AuthConfig) -> Self {
+    pub fn new(
+        embedder: Arc<EmbedderHandle>,
+        store: Arc<dyn VectorStore>,
+        auth: AuthConfig,
+    ) -> Self {
         Self {
             embedder,
             store,
@@ -353,24 +358,41 @@ pub struct HealthResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SessionResponse {
+    pub authenticated: bool,
+    pub auth_enabled: bool,
+    pub user: Option<SessionUser>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SessionUser {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub preferred_username: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
+    name: Option<String>,
+    email: Option<String>,
+    preferred_username: Option<String>,
     exp: usize,
 }
 
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
-        .route("/store", post(store))
-        .route("/search", post(search))
-        .route("/graph/status", get(graph_status))
-        .route("/graph/edges", get(list_graph_edges))
-        .route("/graph/neighborhood/{id}", get(graph_neighborhood))
+        .route("/api/store", post(store))
+        .route("/api/search", post(search))
+        .route("/api/graph/status", get(graph_status))
+        .route("/api/graph/edges", get(list_graph_edges))
+        .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
         .route("/admin/items/{id}", get(get_item).put(update_item).delete(delete_item))
@@ -409,7 +431,7 @@ async fn require_api_key(
         .or_else(|| {
             request
                 .headers()
-                .get(header::AUTHORIZATION)
+                .get(axum::http::header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .map(str::trim)
@@ -417,32 +439,49 @@ async fn require_api_key(
                 .map(ToOwned::to_owned)
         });
 
-    if let Some(key) = provided {
-        if state.auth.matches_api_key(&key) {
+    if let Some(ref key) = provided {
+        if state.auth.matches_api_key(key) {
             return Ok(next.run(request).await);
         }
     }
 
     if let Some(secret) = state.auth.session_secret.as_deref() {
-        if let Some(cookies) = request.headers().get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+        if let Some(cookies) = request.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()) {
             for cookie in cookies.split(';') {
                 let mut parts = cookie.trim().splitn(2, '=');
                 if let (Some(name), Some(value)) = (parts.next(), parts.next()) {
                     if name == "rag_session" {
-                        if decode::<Claims>(
+                        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+                        validation.validate_aud = false; // Token has no aud claim
+
+                        match decode::<Claims>(
                             value,
                             &DecodingKey::from_secret(secret.as_bytes()),
-                            &Validation::default(),
-                        )
-                        .is_ok()
-                        {
-                            return Ok(next.run(request).await);
+                            &validation,
+                        ) {
+                            Ok(_) => {
+                                tracing::info!("authorized via session cookie");
+                                return Ok(next.run(request).await);
+                            }
+                            Err(err) => {
+                                tracing::warn!(error = %err, "failed to decode session cookie");
+                            }
                         }
                     }
                 }
             }
+        } else {
+            tracing::info!("no cookie header found in request");
         }
+    } else {
+        tracing::warn!("AUTH_SESSION_SECRET not configured in backend - session cookies will be ignored");
     }
+
+    tracing::warn!(
+        has_x_api_key = provided.is_some(),
+        has_cookies = request.headers().contains_key(axum::http::header::COOKIE),
+        "unauthorized request: no valid credential found"
+    );
 
     Err(ApiError::Unauthorized(
         "missing x-api-key header, bearer token or valid session cookie".to_owned(),
@@ -2166,6 +2205,7 @@ mod tests {
         let server = TestServer::new(router(AppState::new(
             Arc::new(EmbedderHandle::loading()),
             store,
+            AuthConfig { enabled: false, api_keys: vec![], frontend_api_key: None, session_secret: None },
         )));
 
         let response = server.get("/healthz").await;

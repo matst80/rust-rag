@@ -60,6 +60,7 @@ impl AppConfig {
         let frontend_api_key = non_empty_var("RAG_FRONTEND_API_KEY");
         let session_secret = non_empty_var("AUTH_SESSION_SECRET");
         let api_keys = parse_api_keys(env::var("RAG_API_KEYS").ok())?;
+
         let auth_enabled = match env::var("RAG_AUTH_ENABLED") {
             Ok(raw) => raw
                 .parse::<bool>()

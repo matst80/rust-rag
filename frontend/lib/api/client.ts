@@ -17,7 +17,7 @@ import type {
   PagedItems,
 } from "./types"
 
-const API_BASE_URL = "/api"
+const API_BASE_URL = ""
 
 interface CategoriesResponse {
   categories: Array<{
@@ -192,7 +192,7 @@ export async function getItem(id: string): Promise<Entry> {
 }
 
 export async function createItem(data: StoreRequest): Promise<Entry> {
-  return request<Entry>("/store", {
+  return request<Entry>("/api/store", {
     method: "POST",
     body: JSON.stringify(data),
   })
@@ -216,7 +216,7 @@ export async function deleteItem(id: string): Promise<void> {
 
 // Search API
 export async function search(data: SearchRequest): Promise<SearchResultsBundle> {
-  const response = await request<SearchResponse>("/search", {
+  const response = await request<SearchResponse>("/api/search", {
     method: "POST",
     body: JSON.stringify({
       query: data.query,
@@ -233,17 +233,17 @@ export async function search(data: SearchRequest): Promise<SearchResultsBundle> 
 
 // Edges API
 export async function getGraphStatus(): Promise<GraphStatus> {
-  return request<GraphStatus>("/graph/status")
+  return request<GraphStatus>("/api/graph/status")
 }
 
 export async function getEdges(): Promise<Edge[]> {
-  const response = await request<GraphEdgesResponse>("/graph/edges")
+  const response = await request<GraphEdgesResponse>("/api/graph/edges")
   return ensureArray(response.edges, "graph edges").map(toEdge)
 }
 
 export async function getEdgesForItem(itemId: string): Promise<Edge[]> {
   const response = await request<GraphEdgesResponse>(
-    `/graph/edges?item_id=${encodeURIComponent(itemId)}`
+    `/api/graph/edges?item_id=${encodeURIComponent(itemId)}`
   )
   return ensureArray(response.edges, "graph edges").map(toEdge)
 }
@@ -258,7 +258,7 @@ export async function getGraphNeighborhood(
     limit: String(limit),
   })
   const response = await request<GraphNeighborhoodResponse>(
-    `/graph/neighborhood/${encodeURIComponent(itemId)}?${params.toString()}`
+    `/api/graph/neighborhood/${encodeURIComponent(itemId)}?${params.toString()}`
   )
 
   return {

@@ -1,129 +1,104 @@
-import { decodeJwt } from "jose"
-import { getAuthConfig } from "@/lib/auth/config"
+import { jwtVerify, createRemoteJWKSet } from "jose"
 
-interface DiscoveryDocument {
+export interface DiscoveryDocument {
+	issuer: string
 	authorization_endpoint: string
 	token_endpoint: string
-	userinfo_endpoint?: string
-	end_session_endpoint?: string
+	userinfo_endpoint: string
+	jwks_uri: string
 }
 
-interface TokenResponse {
+export interface ZitadelTokenResponse {
 	access_token: string
-	id_token?: string
+	id_token: string
 	token_type: string
-	expires_in?: number
+	expires_in: number
+	scope: string
 }
 
-export interface ZitadelUserInfo {
+export interface IdTokenClaims {
 	sub: string
 	name?: string
 	email?: string
 	preferred_username?: string
+	exp: number
+	aud: string | string[]
+	iss: string
 }
 
-let discoveryPromise: Promise<DiscoveryDocument> | undefined
-
-function ensureTrailingSlash(value: string) {
-	return value.endsWith("/") ? value : `${value}/`
-}
-
-function bytesToBase64Url(bytes: Uint8Array) {
-	let binary = ""
-	for (const byte of bytes) {
-		binary += String.fromCharCode(byte)
+export async function getDiscoveryDocument(issuer: string): Promise<DiscoveryDocument> {
+	const response = await fetch(`${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`)
+	if (!response.ok) {
+		throw new Error(`failed to fetch discovery document: ${response.statusText}`)
 	}
-
-	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
+	return response.json()
 }
 
-export function createRandomToken(byteLength: number = 32) {
-	const bytes = new Uint8Array(byteLength)
-	crypto.getRandomValues(bytes)
-	return bytesToBase64Url(bytes)
-}
-
-export async function createPkceChallenge(verifier: string) {
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))
-	return bytesToBase64Url(new Uint8Array(digest))
-}
-
-export async function getDiscoveryDocument() {
-	if (!discoveryPromise) {
-		const issuer = ensureTrailingSlash(getAuthConfig().issuer)
-		discoveryPromise = fetch(new URL(".well-known/openid-configuration", issuer), {
-			cache: "no-store",
-		}).then(async (response) => {
-			if (!response.ok) {
-				throw new Error(`Failed to load Zitadel discovery document: ${response.status}`)
-			}
-
-			return (await response.json()) as DiscoveryDocument
-		})
-	}
-
-	return discoveryPromise
-}
-
-export async function exchangeCodeForTokens(code: string, codeVerifier: string) {
-	const config = getAuthConfig()
-	const discovery = await getDiscoveryDocument()
-	const body = new URLSearchParams({
+export async function exchangeCodeForToken(
+	code: string,
+	codeVerifier: string,
+	clientId: string,
+	clientSecret: string,
+	redirectUri: string,
+	tokenEndpoint: string
+): Promise<ZitadelTokenResponse> {
+	const params = new URLSearchParams({
 		grant_type: "authorization_code",
 		code,
-		redirect_uri: config.redirectUri,
+		redirect_uri: redirectUri,
+		client_id: clientId,
+		client_secret: clientSecret,
 		code_verifier: codeVerifier,
-		client_id: config.clientId,
-		client_secret: config.clientSecret,
 	})
 
-	const response = await fetch(discovery.token_endpoint, {
+	const response = await fetch(tokenEndpoint, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/x-www-form-urlencoded",
-			Accept: "application/json",
 		},
-		body,
-		cache: "no-store",
+		body: params.toString(),
 	})
 
 	if (!response.ok) {
-		throw new Error(`Zitadel code exchange failed: ${response.status}`)
+		const error = await response.text()
+		throw new Error(`token exchange failed: ${error}`)
 	}
 
-	return (await response.json()) as TokenResponse
+	return response.json()
 }
 
-export async function fetchUserInfo(tokens: TokenResponse): Promise<ZitadelUserInfo> {
-	const discovery = await getDiscoveryDocument()
-	if (discovery.userinfo_endpoint) {
-		const response = await fetch(discovery.userinfo_endpoint, {
-			headers: {
-				Authorization: `Bearer ${tokens.access_token}`,
-				Accept: "application/json",
-			},
-			cache: "no-store",
-		})
+export async function verifyIdToken(
+	idToken: string,
+	jwksUri: string,
+	issuer: string,
+	clientId: string
+): Promise<IdTokenClaims> {
+	const JWKS = createRemoteJWKSet(new URL(jwksUri))
+	const { payload } = await jwtVerify(idToken, JWKS, {
+		issuer,
+		audience: clientId,
+	})
 
-		if (response.ok) {
-			return (await response.json()) as ZitadelUserInfo
-		}
-	}
+	return payload as unknown as IdTokenClaims
+}
 
-	if (!tokens.id_token) {
-		throw new Error("Zitadel did not return userinfo or id_token claims")
-	}
+export async function createPkceChallenge(verifier: string): Promise<string> {
+	const encoder = new TextEncoder()
+	const data = encoder.encode(verifier)
+	const hash = await crypto.subtle.digest("SHA-256", data)
+	return btoa(String.fromCharCode(...new Uint8Array(hash)))
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/, "")
+}
 
-	const claims = decodeJwt(tokens.id_token)
-	if (typeof claims.sub !== "string") {
-		throw new Error("Zitadel id_token is missing subject claim")
+export function createRandomToken(length = 32): string {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+	let result = ""
+	const bytes = new Uint8Array(length)
+	crypto.getRandomValues(bytes)
+	for (let i = 0; i < length; i++) {
+		result += chars.charAt(bytes[i] % chars.length)
 	}
-
-	return {
-		sub: claims.sub,
-		name: typeof claims.name === "string" ? claims.name : undefined,
-		email: typeof claims.email === "string" ? claims.email : undefined,
-		preferred_username:
-			typeof claims.preferred_username === "string" ? claims.preferred_username : undefined,
-	}
+	return result
 }

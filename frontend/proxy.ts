@@ -35,7 +35,7 @@ export async function proxy(request: NextRequest) {
 		const session = await readSessionFromRequest(request)
 		if (!session) {
 			const url = request.nextUrl.clone()
-			url.pathname = "/api/auth/login"
+			url.pathname = "/auth/login"
 			url.searchParams.set("returnTo", `${pathname}${request.nextUrl.search}`)
 			return NextResponse.redirect(url)
 		}
