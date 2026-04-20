@@ -17,6 +17,17 @@ data:
   RAG_GRAPH_K: "5"
   RAG_GRAPH_MAX_DISTANCE: "0.75"
   RAG_GRAPH_CROSS_SOURCE: "false"
+  RAG_AUTH_ENABLED: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rust-rag-auth
+  labels:
+    app.kubernetes.io/name: rust-rag
+type: Opaque
+stringData:
+  RAG_FRONTEND_API_KEY: "replace-with-shared-frontend-backend-key"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -57,6 +68,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: rust-rag-config
+            - secretRef:
+                name: rust-rag-auth
           volumeMounts:
             - name: data
               mountPath: /app/data

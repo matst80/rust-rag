@@ -7,6 +7,35 @@ use std::{
     str::FromStr,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyConfig {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub frontend_api_key: Option<String>,
+    pub api_keys: Vec<ApiKeyConfig>,
+}
+
+impl AuthConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn matches_api_key(&self, candidate: &str) -> bool {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            return false;
+        }
+
+        self.frontend_api_key.as_deref() == Some(candidate)
+            || self.api_keys.iter().any(|key| key.value == candidate)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
@@ -22,10 +51,21 @@ pub struct AppConfig {
     pub graph_similarity_top_k: usize,
     pub graph_similarity_max_distance: f32,
     pub graph_cross_source: bool,
+    pub auth: AuthConfig,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
+        let frontend_api_key = non_empty_var("RAG_FRONTEND_API_KEY");
+        let api_keys = parse_api_keys(env::var("RAG_API_KEYS").ok())?;
+        let auth_enabled = match env::var("RAG_AUTH_ENABLED") {
+            Ok(raw) => raw
+                .parse::<bool>()
+                .map_err(|error| anyhow!("failed to parse RAG_AUTH_ENABLED={raw:?}: {error}"))?,
+            Err(env::VarError::NotPresent) => frontend_api_key.is_some() || !api_keys.is_empty(),
+            Err(error) => return Err(anyhow!("failed to read RAG_AUTH_ENABLED: {error}")),
+        };
+
         Ok(Self {
             host: parse_env("RAG_HOST", "0.0.0.0")?,
             port: parse_env("RAG_PORT", "4001")?,
@@ -40,6 +80,11 @@ impl AppConfig {
             graph_similarity_top_k: parse_env("RAG_GRAPH_K", "5")?,
             graph_similarity_max_distance: parse_env("RAG_GRAPH_MAX_DISTANCE", "0.75")?,
             graph_cross_source: parse_env("RAG_GRAPH_CROSS_SOURCE", "false")?,
+            auth: AuthConfig {
+                enabled: auth_enabled,
+                frontend_api_key,
+                api_keys,
+            },
         })
     }
 
@@ -72,4 +117,36 @@ fn required_path(name: &str) -> Result<PathBuf> {
     env::var_os(name)
         .map(PathBuf::from)
         .with_context(|| format!("missing required environment variable {name}"))
+}
+
+fn parse_api_keys(raw: Option<String>) -> Result<Vec<ApiKeyConfig>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+
+    let mut api_keys = Vec::new();
+    for (index, entry) in raw.split(',').enumerate() {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let (name, value) = match trimmed.split_once(':') {
+            Some((name, value)) if !name.trim().is_empty() && !value.trim().is_empty() => {
+                (name.trim().to_owned(), value.trim().to_owned())
+            }
+            _ => (format!("key-{}", index + 1), trimmed.to_owned()),
+        };
+
+        api_keys.push(ApiKeyConfig { name, value });
+    }
+
+    Ok(api_keys)
+}
+
+fn non_empty_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }

@@ -417,7 +417,7 @@ impl VectorStore for SqliteVectorStore {
         // FTS5 MATCH syntax preparation
         let fts_query = query_text
             .split_whitespace()
-            .map(|w| format!("{}*", w.replace('"', "")))
+            .map(|w| format!("\"{}\"*", w.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -492,7 +492,11 @@ impl VectorStore for SqliteVectorStore {
             })
             .collect();
 
-        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
 
         Ok(results)

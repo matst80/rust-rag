@@ -5,6 +5,8 @@
 
 rust-rag is a local retrieval backend with a Next.js frontend, an Axum HTTP API, SQLite/sqlite-vec storage, and an MCP stdio bridge for agent clients.
 
+The web application is protected with Zitadel-backed sign-in. The Next.js server completes the authorization-code exchange, stores a signed session cookie, and proxies browser traffic to the Rust API with an internal API key.
+
 ## What You Can Do
 
 - Search entries semantically from the web UI.
@@ -30,6 +32,8 @@ The frontend proxies these backend routes:
 - GET /admin/items
 - GET /graph/status
 - GET /graph/neighborhood/:id
+
+Direct HTTP and MCP access can use configured API keys via `x-api-key` or `Authorization: Bearer`.
 
 ## Search Workflow
 
