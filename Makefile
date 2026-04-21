@@ -12,15 +12,16 @@ RAG_GRAPH_BUILD_ON_STARTUP ?= true
 RAG_GRAPH_K ?= 5
 RAG_GRAPH_MAX_DISTANCE ?= 0.75
 RAG_GRAPH_CROSS_SOURCE ?= false
-RAG_AUTH_ENABLED ?= true
+RAG_AUTH_ENABLED ?= false
 RAG_FRONTEND_API_KEY ?= replace-with-shared-frontend-backend-key
 RAG_MCP_AUTH_BEARER ?=
 AUTH_SESSION_SECRET ?= replace-with-a-long-random-secret
-RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:8081/v1
+RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:11434/v1
 RAG_OPENAI_API_KEY ?=
-RAG_OPENAI_MODEL ?= current_model.gguf
+RAG_OPENAI_MODEL ?= qwen3.5:4b
 RAG_OPENAI_TIMEOUT_SECS ?= 60
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
+RAG_CDP_URL ?= ws://127.0.0.1:9222
 ZITADEL_ISSUER ?= https://auth.k6n.net
 ZITADEL_CLIENT_ID ?= 369530153681881434@rag
 ZITADEL_CLIENT_SECRET ?= U8opCVRn3hrFNcyXDJpb7DLQAa5aHEikjuQn2Rr5KwG7RiofvzKifxdTB3yEO0ID
@@ -126,7 +127,7 @@ build:
 build-mcp:
 	cargo build --release --manifest-path mcp-stdio/Cargo.toml
 
-run: check-env
+run: 
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
 	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
 	RAG_DB_PATH="$(RAG_DB_PATH)" \

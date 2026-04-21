@@ -11,6 +11,7 @@ import {
 	Github,
 	LogIn,
 	LogOut,
+	MessageSquare,
 	Search,
 	User,
 } from "lucide-react"
@@ -21,6 +22,7 @@ const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
 const navigation = [
 	{ name: "Search", href: "/", icon: Search },
+	{ name: "Chat", href: "/chat", icon: MessageSquare },
 	{ name: "Docs", href: "/start-guide", icon: BookOpen },
 	{ name: "Entries", href: "/entries", icon: FolderOpen },
 	{ name: "Graph", href: "/visualize", icon: GitBranch },

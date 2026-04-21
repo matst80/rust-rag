@@ -1,8 +1,12 @@
 use super::{
-    ApiError, AppState, SearchResultPayload, current_timestamp_millis, validate_non_empty,
-    validate_source_id,
+    AdminItemPayload, AdminItemsResponse, ApiError, AppState,
+    CategoriesResponse, GraphNeighborhoodResponse, GraphStatusResponse, SearchResultPayload,
+    current_timestamp_millis, map_graph_error, resolve_store_id, validate_graph_depth,
+    validate_graph_limit, validate_metadata, validate_non_empty, validate_source_id,
 };
+use crate::db::{ItemRecord, ListItemsRequest, SortOrder};
 use anyhow::{Context, anyhow};
+use scraper::{Html, Selector};
 use async_stream::stream;
 use axum::{
     Json,
@@ -17,9 +21,27 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
 
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-const SERVER_TOOL_PREFIX: &str = "server__";
-const CLIENT_TOOL_PREFIX: &str = "client__";
-const SEARCH_ENTRIES_TOOL: &str = "server__search_entries";
+const SEARCH_ENTRIES_TOOL: &str = "search_entries";
+const STORE_ENTRY_TOOL: &str = "store_entry";
+const LIST_CATEGORIES_TOOL: &str = "list_categories";
+const LIST_ITEMS_TOOL: &str = "list_items";
+const GET_ITEM_TOOL: &str = "get_item";
+const UPDATE_ITEM_TOOL: &str = "update_item";
+const DELETE_ITEM_TOOL: &str = "delete_item";
+const GRAPH_STATUS_TOOL: &str = "graph_status";
+const GRAPH_NEIGHBORHOOD_TOOL: &str = "graph_neighborhood";
+const REBUILD_GRAPH_TOOL: &str = "rebuild_graph";
+const CREATE_GRAPH_EDGE_TOOL: &str = "create_graph_edge";
+const DELETE_GRAPH_EDGE_TOOL: &str = "delete_graph_edge";
+const INGEST_WEB_CONTENT_TOOL: &str = "ingest_web_content";
+const READ_FILE_RANGE_TOOL: &str = "read_file_range";
+
+#[derive(Debug, Deserialize)]
+struct ReadFileRangeArguments {
+    file_id: String,
+    start_line: usize,
+    end_line: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionsRequest {
@@ -47,6 +69,8 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +125,8 @@ struct ChatCompletionDelta {
     #[serde(rename = "role")]
     _role: Option<String>,
     content: Option<String>,
+    #[serde(alias = "reasoning")]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCallDelta>>,
 }
 
@@ -144,6 +170,70 @@ struct SearchEntriesArguments {
     source_id: Option<String>,
     hybrid: Option<bool>,
     max_distance: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoreEntryArguments {
+    id: Option<String>,
+    text: String,
+    metadata: Value,
+    source_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListItemsArguments {
+    source_id: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort_order: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetItemArguments {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateItemArguments {
+    id: String,
+    text: String,
+    metadata: Value,
+    source_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteItemArguments {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphNeighborhoodArguments {
+    id: String,
+    depth: Option<usize>,
+    limit: Option<usize>,
+    edge_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateGraphEdgeArguments {
+    from_item_id: String,
+    to_item_id: String,
+    relation: Option<String>,
+    weight: Option<f32>,
+    directed: Option<bool>,
+    metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteGraphEdgeArguments {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IngestWebContentArguments {
+    url: String,
+    source_id: String,
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +335,7 @@ pub(super) async fn chat_completions(
             let mut event_buffer = SseEventBuffer::default();
             let mut tool_calls = ToolCallAccumulator::default();
             let mut assistant_content = String::new();
+            let mut assistant_reasoning = String::new();
             let mut tool_loop_requested = false;
             let mut upstream_failed = false;
             let mut upstream_stream = upstream_response.bytes_stream();
@@ -277,14 +368,16 @@ pub(super) async fn chat_completions(
                         }
                     };
 
-                    let mut contains_tool_delta = false;
                     for choice in &parsed.choices {
                         if let Some(content) = &choice.delta.content {
                             assistant_content.push_str(content);
                         }
 
+                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                            assistant_reasoning.push_str(reasoning);
+                        }
+
                         if let Some(tool_call_deltas) = &choice.delta.tool_calls {
-                            contains_tool_delta = true;
                             tool_calls.apply(tool_call_deltas);
                         }
 
@@ -293,9 +386,7 @@ pub(super) async fn chat_completions(
                         }
                     }
 
-                    if !contains_tool_delta {
-                        yield Ok::<_, Infallible>(encode_data_event(&event));
-                    }
+                    yield Ok::<_, Infallible>(encode_data_event(&event));
                 }
 
                 if upstream_failed {
@@ -329,6 +420,11 @@ pub(super) async fn chat_completions(
                 } else {
                     Some(Value::String(assistant_content))
                 },
+                reasoning_content: if assistant_reasoning.is_empty() {
+                    None
+                } else {
+                    Some(assistant_reasoning)
+                },
                 name: None,
                 tool_call_id: None,
                 tool_calls: Some(finalized_tool_calls.clone()),
@@ -336,9 +432,12 @@ pub(super) async fn chat_completions(
 
             for tool_call in finalized_tool_calls {
                 let tool_output = execute_server_tool(&state, &tool_call).await;
+                yield Ok::<_, Infallible>(encode_tool_result_event(&tool_call.id, &tool_call.function.name, &tool_output));
+
                 messages.push(ChatMessage {
                     role: "tool".to_owned(),
                     content: Some(Value::String(tool_output)),
+                    reasoning_content: None,
                     name: Some(tool_call.function.name.clone()),
                     tool_call_id: Some(tool_call.id.clone()),
                     tool_calls: None,
@@ -401,60 +500,309 @@ fn build_upstream_payload(
 }
 
 fn sanitize_tool_choice(tool_choice: Option<Value>) -> Option<Value> {
-    let value = tool_choice?;
-    let Some(function_name) = value
-        .get("function")
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-    else {
-        return Some(value);
-    };
-
-    if function_name.starts_with(SERVER_TOOL_PREFIX) {
-        Some(value)
-    } else {
-        None
-    }
+    tool_choice
 }
 
 fn server_tool_definitions() -> Vec<ChatToolDefinition> {
-    vec![ChatToolDefinition {
-        kind: "function".to_owned(),
-        function: ChatFunctionDefinition {
-            name: SEARCH_ENTRIES_TOOL.to_owned(),
-            description: Some(
-                "Search stored RAG entries by semantic similarity and optional source_id filter."
-                    .to_owned(),
-            ),
-            parameters: Some(json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Natural-language search query." },
-                    "top_k": { "type": "integer", "minimum": 1, "maximum": 25, "default": 5 },
-                    "source_id": { "type": "string" },
-                    "hybrid": { "type": "boolean", "default": true },
-                    "max_distance": { "type": "number", "default": 0.8 }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            })),
+    vec![
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: SEARCH_ENTRIES_TOOL.to_owned(),
+                description: Some(
+                    "Search stored RAG entries by semantic similarity and optional source_id filter."
+                        .to_owned(),
+                ),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Natural-language search query." },
+                        "top_k": { "type": "integer", "minimum": 1, "maximum": 25, "default": 5 },
+                        "source_id": { "type": "string" },
+                        "hybrid": { "type": "boolean", "default": true },
+                        "max_distance": { "type": "number", "default": 0.8 }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                })),
+            },
         },
-    }]
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: STORE_ENTRY_TOOL.to_owned(),
+                description: Some("Store a new RAG entry with text, metadata, and source_id.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Optional stable identifier." },
+                        "text": { "type": "string", "description": "The content to store." },
+                        "metadata": { "type": "object", "description": "JSON metadata object." },
+                        "source_id": { "type": "string", "description": "Namespace/category (e.g., 'notes', 'knowledge')." }
+                    },
+                    "required": ["text", "metadata", "source_id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: LIST_CATEGORIES_TOOL.to_owned(),
+                description: Some("List all available source_id categories and their item counts.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: LIST_ITEMS_TOOL.to_owned(),
+                description: Some("List items with optional filtering and pagination.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "source_id": { "type": "string" },
+                        "limit": { "type": "integer", "default": 10 },
+                        "offset": { "type": "integer", "default": 0 },
+                        "sort_order": { "type": "string", "enum": ["Asc", "Desc"], "default": "Desc" }
+                    },
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: GET_ITEM_TOOL.to_owned(),
+                description: Some("Get a single item by its ID.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" }
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: UPDATE_ITEM_TOOL.to_owned(),
+                description: Some("Update an existing item's text, metadata, and source_id.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "text": { "type": "string" },
+                        "metadata": { "type": "object" },
+                        "source_id": { "type": "string" }
+                    },
+                    "required": ["id", "text", "metadata", "source_id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: DELETE_ITEM_TOOL.to_owned(),
+                description: Some("Delete an item by its ID.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" }
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: GRAPH_STATUS_TOOL.to_owned(),
+                description: Some("Get the status of the similarity graph.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: GRAPH_NEIGHBORHOOD_TOOL.to_owned(),
+                description: Some("Get the graph neighborhood for a specific item.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "depth": { "type": "integer", "default": 1 },
+                        "limit": { "type": "integer", "default": 50 },
+                        "edge_type": { "type": "string", "enum": ["Similarity", "Manual"] }
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: REBUILD_GRAPH_TOOL.to_owned(),
+                description: Some("Trigger a rebuild of the similarity graph.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: CREATE_GRAPH_EDGE_TOOL.to_owned(),
+                description: Some("Create a manual graph edge between two items.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "from_item_id": { "type": "string" },
+                        "to_item_id": { "type": "string" },
+                        "relation": { "type": "string" },
+                        "weight": { "type": "number", "default": 1.0 },
+                        "directed": { "type": "boolean", "default": false },
+                        "metadata": { "type": "object" }
+                    },
+                    "required": ["from_item_id", "to_item_id", "metadata"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: DELETE_GRAPH_EDGE_TOOL.to_owned(),
+                description: Some("Delete a manual graph edge by its ID.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" }
+                    },
+                    "required": ["id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: INGEST_WEB_CONTENT_TOOL.to_owned(),
+                description: Some("Fetch a web page, clean it, and ingest its content as markdown into RAG.".to_owned()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL of the page to ingest." },
+                        "source_id": { "type": "string", "description": "Namespace/category for this entry." },
+                        "metadata": { "type": "object", "description": "Optional JSON metadata." }
+                    },
+                    "required": ["url", "source_id"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
+                name: READ_FILE_RANGE_TOOL.to_owned(),
+                description: Some(
+                    "Read a specific line range from a large file stored on disk during research."
+                        .to_owned(),
+                ),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "file_id": { "type": "string", "description": "The identifier of the file to read." },
+                        "start_line": { "type": "integer", "minimum": 1, "description": "1-based start line number." },
+                        "end_line": { "type": "integer", "minimum": 1, "description": "1-based end line number." }
+                    },
+                    "required": ["file_id", "start_line", "end_line"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+    ]
 }
 
 async fn execute_server_tool(state: &AppState, tool_call: &AssistantToolCall) -> String {
-    if tool_call.function.name.starts_with(CLIENT_TOOL_PREFIX) {
-        return json!({
-            "error": "client tools must not be executed by the backend"
-        })
-        .to_string();
-    }
-
     match tool_call.function.name.as_str() {
         SEARCH_ENTRIES_TOOL => match search_entries_tool(state, &tool_call.function.arguments).await {
             Ok(result) => result,
             Err(error) => json!({ "error": error.to_string() }).to_string(),
         },
+        STORE_ENTRY_TOOL => match store_entry_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        LIST_CATEGORIES_TOOL => match list_categories_tool(state).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        LIST_ITEMS_TOOL => match list_items_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        GET_ITEM_TOOL => match get_item_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        UPDATE_ITEM_TOOL => match update_item_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        DELETE_ITEM_TOOL => match delete_item_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        GRAPH_STATUS_TOOL => match graph_status_tool(state).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        GRAPH_NEIGHBORHOOD_TOOL => {
+            match graph_neighborhood_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
+        REBUILD_GRAPH_TOOL => match rebuild_graph_tool(state).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        CREATE_GRAPH_EDGE_TOOL => match create_graph_edge_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        DELETE_GRAPH_EDGE_TOOL => match delete_graph_edge_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
+        INGEST_WEB_CONTENT_TOOL => {
+            match ingest_web_content_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
+        READ_FILE_RANGE_TOOL => {
+            match read_file_range_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
         _ => json!({
             "error": format!("unsupported server tool {}", tool_call.function.name)
         })
@@ -513,6 +861,451 @@ async fn search_entries_tool(
         results,
     })
     .map_err(|error| ApiError::Internal(anyhow!(error).context("failed to encode tool result")))?)
+}
+
+async fn store_entry_tool(state: &AppState, arguments: &str) -> std::result::Result<String, ApiError> {
+    let arguments: StoreEntryArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {STORE_ENTRY_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let id = resolve_store_id(arguments.id);
+    validate_non_empty("text", &arguments.text)?;
+    validate_metadata(&arguments.metadata)?;
+    validate_source_id(&arguments.source_id)?;
+
+    let embedder = state.embedder.get_ready()?;
+    let store = state.store.clone();
+    let created_at = current_timestamp_millis()?;
+    let item = ItemRecord {
+        id: id.clone(),
+        text: arguments.text.clone(),
+        metadata: arguments.metadata,
+        source_id: arguments.source_id.clone(),
+        created_at,
+    };
+
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
+        let embedding = embedder.embed(&item.text).map_err(ApiError::Internal)?;
+        store
+            .upsert_item(item, &embedding)
+            .map_err(ApiError::Internal)?;
+        Ok(())
+    })
+    .await
+    .map_err(ApiError::TaskJoin)??;
+
+    Ok(json!({ "id": id, "source_id": arguments.source_id, "created_at": created_at }).to_string())
+}
+
+async fn list_categories_tool(state: &AppState) -> std::result::Result<String, ApiError> {
+    let store = state.store.clone();
+    let categories = tokio::task::spawn_blocking(move || store.list_categories())
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    Ok(serde_json::to_string(&CategoriesResponse {
+        categories: categories.into_iter().map(Into::into).collect(),
+    })
+    .map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn list_items_tool(state: &AppState, arguments: &str) -> std::result::Result<String, ApiError> {
+    let arguments: ListItemsArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {LIST_ITEMS_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    if let Some(source_id) = arguments.source_id.as_deref() {
+        validate_source_id(source_id)?;
+    }
+
+    let store = state.store.clone();
+    let sort_order = match arguments.sort_order.as_deref() {
+        Some("Asc") => SortOrder::Asc,
+        _ => SortOrder::Desc,
+    };
+
+    let request = ListItemsRequest {
+        source_id: arguments.source_id,
+        limit: arguments.limit,
+        offset: arguments.offset,
+        sort_order,
+    };
+
+    let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    Ok(serde_json::to_string(&AdminItemsResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        total_count,
+    })
+    .map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn get_item_tool(state: &AppState, arguments: &str) -> std::result::Result<String, ApiError> {
+    let arguments: GetItemArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {GET_ITEM_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let store = state.store.clone();
+    let id = arguments.id;
+    let item = tokio::task::spawn_blocking(move || store.get_item(&id))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
+
+    let payload: AdminItemPayload = item.into();
+    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn update_item_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: UpdateItemArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {UPDATE_ITEM_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    validate_metadata(&arguments.metadata)?;
+    validate_source_id(&arguments.source_id)?;
+
+    let embedder = state.embedder.get_ready()?;
+    let store = state.store.clone();
+    let id = arguments.id;
+
+    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<ItemRecord> {
+        let existing = store
+            .get_item(&id)?
+            .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
+        let item = ItemRecord {
+            id: existing.id,
+            text: arguments.text,
+            metadata: arguments.metadata,
+            source_id: arguments.source_id,
+            created_at: existing.created_at,
+        };
+        let embedding = embedder.embed(&item.text)?;
+        store.upsert_item(item.clone(), &embedding)?;
+        Ok(item)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(|error| {
+        let message = error.to_string();
+        if message.contains("not found") {
+            ApiError::NotFound(message)
+        } else {
+            ApiError::Internal(error)
+        }
+    })?;
+
+    let payload: AdminItemPayload = updated.into();
+    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn delete_item_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: DeleteItemArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {DELETE_ITEM_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let store = state.store.clone();
+    let id = arguments.id;
+    let id_for_task = id.clone();
+    let deleted = tokio::task::spawn_blocking(move || store.delete_item(&id_for_task))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    if !deleted {
+        return Err(ApiError::NotFound(format!("item {id} not found")));
+    }
+
+    Ok(json!({ "id": id, "deleted": deleted }).to_string())
+}
+
+async fn graph_status_tool(state: &AppState) -> std::result::Result<String, ApiError> {
+    let store = state.store.clone();
+    let status = tokio::task::spawn_blocking(move || store.graph_status())
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    let payload: GraphStatusResponse = status.into();
+    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn graph_neighborhood_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: GraphNeighborhoodArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {GRAPH_NEIGHBORHOOD_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let depth = arguments.depth.unwrap_or(1);
+    let limit = arguments.limit.unwrap_or(50);
+    validate_graph_depth(depth)?;
+    validate_graph_limit(limit)?;
+
+    let store = state.store.clone();
+    let id = arguments.id;
+    let edge_type = match arguments.edge_type.as_deref() {
+        Some("Similarity") => Some(crate::db::GraphEdgeType::Similarity),
+        Some("Manual") => Some(crate::db::GraphEdgeType::Manual),
+        _ => None,
+    };
+
+    let neighborhood =
+        tokio::task::spawn_blocking(move || store.graph_neighborhood(&id, depth, limit, edge_type))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(map_graph_error)?;
+
+    let payload: GraphNeighborhoodResponse = neighborhood.into();
+    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn rebuild_graph_tool(state: &AppState) -> std::result::Result<String, ApiError> {
+    let store = state.store.clone();
+    let rebuilt_edges = tokio::task::spawn_blocking(move || store.rebuild_similarity_graph())
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    Ok(json!({ "rebuilt_edges": rebuilt_edges }).to_string())
+}
+
+async fn create_graph_edge_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: CreateGraphEdgeArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {CREATE_GRAPH_EDGE_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    validate_non_empty("from_item_id", &arguments.from_item_id)?;
+    validate_non_empty("to_item_id", &arguments.to_item_id)?;
+    validate_metadata(&arguments.metadata)?;
+
+    let store = state.store.clone();
+    let input = crate::db::ManualEdgeInput {
+        from_item_id: arguments.from_item_id,
+        to_item_id: arguments.to_item_id,
+        relation: arguments.relation,
+        weight: arguments.weight.unwrap_or(1.0),
+        directed: arguments.directed.unwrap_or(false),
+        metadata: arguments.metadata,
+    };
+
+    let edge = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    let payload: super::GraphEdgePayload = edge.into();
+    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn delete_graph_edge_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: DeleteGraphEdgeArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {DELETE_GRAPH_EDGE_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let store = state.store.clone();
+    let id = arguments.id;
+    let id_for_task = id.clone();
+    let deleted = tokio::task::spawn_blocking(move || store.delete_graph_edge(&id_for_task))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    if !deleted {
+        return Err(ApiError::NotFound(format!("graph edge {id} not found")));
+    }
+
+    Ok(json!({ "id": id, "deleted": deleted }).to_string())
+}
+
+async fn read_file_range_tool(
+    _state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: ReadFileRangeArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {READ_FILE_RANGE_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    let file_id = arguments.file_id;
+    // Basic path traversal protection: only allow alphanumeric + dashes/underscores
+    if !file_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(ApiError::BadRequest("invalid file_id".to_owned()));
+    }
+
+    let path = format!("data/research/{}.md", file_id);
+    let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ApiError::NotFound(format!("research file {} not found", file_id))
+        } else {
+            ApiError::Internal(anyhow!(e).context("failed to read research file"))
+        }
+    })?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+    
+    let start = arguments.start_line.saturating_sub(1);
+    let end = arguments.end_line.min(total_lines);
+
+    if start >= total_lines || start >= end {
+        return Ok(json!({
+            "file_id": file_id,
+            "total_lines": total_lines,
+            "message": "requested range is out of bounds or empty",
+            "content": ""
+        }).to_string());
+    }
+
+    let range_content = lines[start..end].join("\n");
+
+    Ok(json!({
+        "file_id": file_id,
+        "start_line": start + 1,
+        "end_line": end,
+        "total_lines": total_lines,
+        "content": range_content
+    }).to_string())
+}
+
+async fn ingest_web_content_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: IngestWebContentArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {INGEST_WEB_CONTENT_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    validate_source_id(&arguments.source_id)?;
+    validate_non_empty("url", &arguments.url)?;
+
+    let html_content = if let Some(cdp_url) = state.openai_chat.cdp_url.as_deref() {
+        // Simple CDP-like fetch via reqwest if CDP_URL is provided, 
+        // otherwise fallback to normal fetch. 
+        // For simplicity and to avoid complex CDP implementation, we fetch directly for now.
+        tracing::info!(url = %arguments.url, cdp_url = %cdp_url, "fetching via CDP (simulated)");
+        state.http_client
+            .get(&arguments.url)
+            .send()
+            .await
+            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to fetch URL via CDP")))?
+            .text()
+            .await
+            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to read response text")))?
+    } else {
+        state.http_client
+            .get(&arguments.url)
+            .send()
+            .await
+            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to fetch URL")))?
+            .text()
+            .await
+            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to read response text")))?
+    };
+
+    let cleaned_markdown = tokio::task::spawn_blocking(move || {
+        let document = Html::parse_document(&html_content);
+        
+        // Actually, html2md is quite good. Let's try to refine the HTML before passing it.
+        // We can use scraper to get the main content area if possible (main, article, or body).
+        let main_selector = Selector::parse("main, [role='main'], article, body").unwrap();
+        let content_html = document.select(&main_selector)
+            .next()
+            .map(|el| el.html())
+            .unwrap_or_else(|| document.html());
+
+        let markdown = html2md::parse_html(&content_html);
+        markdown
+    }).await.map_err(ApiError::TaskJoin)?;
+
+    let id = resolve_store_id(None);
+    let (is_large, file_id) = if cleaned_markdown.len() > 20000 {
+        let file_id = id.clone();
+        let path = format!("data/research/{}.md", file_id);
+        tokio::fs::write(&path, &cleaned_markdown).await.map_err(|e| {
+            ApiError::Internal(anyhow!(e).context("failed to save large research file"))
+        })?;
+        (true, Some(file_id))
+    } else {
+        (false, None)
+    };
+
+    // Store in RAG - if large, only store a preview/metadata
+    let id_for_rag = id.clone();
+    let embedder = state.embedder.get_ready()?;
+    let store = state.store.clone();
+    let created_at = current_timestamp_millis()?;
+    
+    let mut metadata = arguments.metadata.unwrap_or_else(|| json!({}));
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("source_url".to_owned(), json!(arguments.url));
+        obj.insert("ingested_at".to_owned(), json!(created_at));
+        if let Some(ref fid) = file_id {
+            obj.insert("research_file_id".to_owned(), json!(fid));
+        }
+    }
+
+    let text_for_rag = if is_large {
+        format!(
+            "Large content ingested from {}. Saved to research file: {}. \n\nPreview:\n{}", 
+            arguments.url, 
+            file_id.as_ref().unwrap(),
+            &cleaned_markdown[..2000.min(cleaned_markdown.len())]
+        )
+    } else {
+        cleaned_markdown.clone()
+    };
+
+    let item = ItemRecord {
+        id: id_for_rag,
+        text: text_for_rag,
+        metadata,
+        source_id: arguments.source_id.clone(),
+        created_at,
+    };
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let embedding = embedder.embed(&item.text)?;
+        store.upsert_item(item, &embedding)?;
+        Ok(())
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    if is_large {
+        Ok(json!({
+            "status": "saved_to_disk",
+            "file_id": file_id.unwrap(),
+            "url": arguments.url,
+            "total_length": cleaned_markdown.len(),
+            "message": "Content is too large for immediate context. Use server__read_file_range to examine specific lines. YOU MUST extract relevant chunks and store them using server__store_entry for better retrieval."
+        }).to_string())
+    } else {
+        Ok(json!({
+            "id": id,
+            "source_id": arguments.source_id,
+            "url": arguments.url,
+            "content": cleaned_markdown,
+            "markdown_length": cleaned_markdown.len()
+        }).to_string())
+    }
 }
 
 impl SseEventBuffer {
@@ -590,8 +1383,27 @@ impl ToolCallAccumulator {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ChatCompletionToolResult {
+    tool_call_id: String,
+    name: String,
+    content: String,
+}
+
 fn encode_data_event(data: &str) -> Bytes {
     Bytes::from(format!("data: {data}\n\n"))
+}
+
+fn encode_tool_result_event(id: &str, name: &str, content: &str) -> Bytes {
+    encode_data_event(
+        &json!({
+            "object": "chat.completion.tool_result",
+            "tool_call_id": id,
+            "name": name,
+            "content": content,
+        })
+        .to_string(),
+    )
 }
 
 fn encode_done_event() -> Bytes {
@@ -634,6 +1446,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_owned(),
                 content: Some(Value::String("hello".to_owned())),
+                reasoning_content: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -673,6 +1486,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_owned(),
                 content: Some(Value::String("hi".to_owned())),
+                reasoning_content: None,
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,

@@ -27,6 +27,7 @@ pub struct OpenAiChatConfig {
     pub api_key: Option<String>,
     pub default_model: Option<String>,
     pub timeout_secs: u64,
+    pub cdp_url: Option<String>,
 }
 
 impl OpenAiChatConfig {
@@ -81,6 +82,7 @@ impl AppConfig {
             .map(|value| value.trim_end_matches('/').to_owned());
         let openai_default_model = non_empty_var("RAG_OPENAI_MODEL");
         let openai_timeout_secs = parse_env("RAG_OPENAI_TIMEOUT_SECS", "60")?;
+        let cdp_url = non_empty_var("RAG_CDP_URL");
 
         let auth_enabled = match env::var("RAG_AUTH_ENABLED") {
             Ok(raw) => raw
@@ -117,6 +119,7 @@ impl AppConfig {
                 api_key: openai_api_key,
                 default_model: openai_default_model,
                 timeout_secs: openai_timeout_secs,
+                cdp_url,
             },
         })
     }

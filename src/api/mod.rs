@@ -873,7 +873,7 @@ async fn delete_graph_edge(
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ApiError {
+pub(super) enum ApiError {
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
@@ -999,7 +999,7 @@ impl From<GraphNodeDistance> for GraphNodeDistancePayload {
     }
 }
 
-fn validate_metadata(metadata: &Value) -> Result<(), ApiError> {
+pub(super) fn validate_metadata(metadata: &Value) -> Result<(), ApiError> {
     if !metadata.is_object() {
         return Err(ApiError::BadRequest(
             "metadata must be a JSON object".to_owned(),
@@ -1008,7 +1008,7 @@ fn validate_metadata(metadata: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_source_id(source_id: &str) -> Result<(), ApiError> {
+pub(super) fn validate_source_id(source_id: &str) -> Result<(), ApiError> {
     if source_id.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "source_id must not be empty".to_owned(),
@@ -1017,14 +1017,14 @@ fn validate_source_id(source_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
+pub(super) fn validate_non_empty(field: &str, value: &str) -> Result<(), ApiError> {
     if value.trim().is_empty() {
         return Err(ApiError::BadRequest(format!("{field} must not be empty")));
     }
     Ok(())
 }
 
-fn resolve_store_id(id: Option<String>) -> String {
+pub(super) fn resolve_store_id(id: Option<String>) -> String {
     match id {
         Some(id) => {
             let trimmed = id.trim();
@@ -1038,7 +1038,7 @@ fn resolve_store_id(id: Option<String>) -> String {
     }
 }
 
-fn validate_graph_depth(depth: usize) -> Result<(), ApiError> {
+pub(super) fn validate_graph_depth(depth: usize) -> Result<(), ApiError> {
     if depth > 5 {
         return Err(ApiError::BadRequest(
             "depth must be less than or equal to 5".to_owned(),
@@ -1047,7 +1047,7 @@ fn validate_graph_depth(depth: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_graph_limit(limit: usize) -> Result<(), ApiError> {
+pub(super) fn validate_graph_limit(limit: usize) -> Result<(), ApiError> {
     if limit == 0 || limit > 500 {
         return Err(ApiError::BadRequest(
             "limit must be between 1 and 500".to_owned(),
@@ -1076,7 +1076,7 @@ fn map_missing_item(kind: &str, error: anyhow::Error) -> ApiError {
     }
 }
 
-fn map_graph_error(error: anyhow::Error) -> ApiError {
+pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("graph support is disabled") {
         ApiError::ServiceUnavailable(message)

@@ -33,6 +33,9 @@ uuid = { version = "1.18.1", features = ["v7"] }
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 cookie = "0.18.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+scraper = "0.26.0"
+html2md = "0.2.15"
+chromiumoxide = "0.9.1"
 
 [dev-dependencies]
 ahash = "0.8.12"

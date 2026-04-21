@@ -165,6 +165,8 @@ export interface ChatCompletionsRequest {
 export interface ChatCompletionChunkDelta {
   role?: "assistant"
   content?: string
+  reasoning_content?: string
+  reasoning?: string
   tool_calls?: Array<{
     index: number
     id?: string
@@ -190,6 +192,13 @@ export interface ChatCompletionChunk {
   choices: ChatCompletionChunkChoice[]
 }
 
+export interface ChatCompletionToolResult {
+  object: "chat.completion.tool_result"
+  tool_call_id: string
+  name: string
+  content: string
+}
+
 export interface ChatCompletionStreamError {
   error: {
     message: string
@@ -199,7 +208,8 @@ export interface ChatCompletionStreamError {
 
 export interface ChatCompletionStreamHandlers {
   onChunk?: (chunk: ChatCompletionChunk) => void
+  onToolResult?: (result: ChatCompletionToolResult) => void
   onError?: (error: ChatCompletionStreamError) => void
   onDone?: () => void
-  onEvent?: (payload: ChatCompletionChunk | ChatCompletionStreamError) => void
+  onEvent?: (payload: ChatCompletionChunk | ChatCompletionToolResult | ChatCompletionStreamError) => void
 }

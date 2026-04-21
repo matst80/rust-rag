@@ -16,6 +16,7 @@ import type {
   ListItemsRequest,
   PagedItems,
   ChatCompletionChunk,
+  ChatCompletionToolResult,
   ChatCompletionsRequest,
   ChatCompletionStreamError,
   ChatCompletionStreamHandlers,
@@ -190,6 +191,14 @@ function isStreamError(value: unknown): value is ChatCompletionStreamError {
   return typeof value === "object" && value !== null && "error" in value
 }
 
+function isToolResult(value: unknown): value is ChatCompletionToolResult {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as any).object === "chat.completion.tool_result"
+  )
+}
+
 export async function streamChatCompletions(
   input: ChatCompletionsRequest,
   handlers: ChatCompletionStreamHandlers = {},
@@ -236,11 +245,19 @@ export async function streamChatCompletions(
           return
         }
 
-        const payload = JSON.parse(event) as ChatCompletionChunk | ChatCompletionStreamError
+        const payload = JSON.parse(event) as
+          | ChatCompletionChunk
+          | ChatCompletionToolResult
+          | ChatCompletionStreamError
         handlers.onEvent?.(payload)
 
         if (isStreamError(payload)) {
           handlers.onError?.(payload)
+          continue
+        }
+
+        if (isToolResult(payload)) {
+          handlers.onToolResult?.(payload)
           continue
         }
 
