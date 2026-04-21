@@ -1,5 +1,5 @@
 use crate::{
-    config::AuthConfig,
+    config::{AuthConfig, OpenAiChatConfig},
     db::{
         CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
         GraphStatus,
@@ -24,16 +24,21 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
+    time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+
+mod openai;
 
 #[derive(Clone)]
 pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
     pub store: Arc<dyn VectorStore>,
     pub auth: Arc<AuthConfig>,
+    pub openai_chat: Arc<OpenAiChatConfig>,
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -41,20 +46,36 @@ impl AppState {
         embedder: Arc<EmbedderHandle>,
         store: Arc<dyn VectorStore>,
         auth: AuthConfig,
+        openai_chat: OpenAiChatConfig,
     ) -> Self {
+        let timeout_secs = openai_chat.timeout_secs.max(1);
         Self {
             embedder,
             store,
             auth: Arc::new(auth),
+            openai_chat: Arc::new(openai_chat),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(timeout_secs))
+                .build()
+                .expect("http client should build"),
         }
     }
 
     #[cfg(test)]
     pub fn new_ready(embedder: Arc<dyn EmbeddingService>, store: Arc<dyn VectorStore>) -> Self {
+        let openai_chat = OpenAiChatConfig {
+            timeout_secs: 60,
+            ..OpenAiChatConfig::default()
+        };
         Self {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
             store,
             auth: Arc::new(AuthConfig::default()),
+            openai_chat: Arc::new(openai_chat),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("http client should build"),
         }
     }
 }
@@ -388,10 +409,16 @@ struct Claims {
 
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
+        .route("/store", post(store))
         .route("/api/store", post(store))
+        .route("/search", post(search))
         .route("/api/search", post(search))
+        .route("/api/openai/v1/chat/completions", post(openai::chat_completions))
+        .route("/graph/status", get(graph_status))
         .route("/api/graph/status", get(graph_status))
+        .route("/graph/edges", get(list_graph_edges))
         .route("/api/graph/edges", get(list_graph_edges))
+        .route("/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
@@ -2206,6 +2233,7 @@ mod tests {
             Arc::new(EmbedderHandle::loading()),
             store,
             AuthConfig { enabled: false, api_keys: vec![], frontend_api_key: None, session_secret: None },
+            OpenAiChatConfig { timeout_secs: 60, ..OpenAiChatConfig::default() },
         )));
 
         let response = server.get("/healthz").await;
@@ -2214,6 +2242,42 @@ mod tests {
         response.assert_json(&json!({
             "status": "loading",
             "error": null
+        }));
+    }
+
+    #[tokio::test]
+    async fn openai_chat_route_returns_unauthorized_when_api_key_is_missing() {
+        let store = Arc::new(MockStore::default());
+        let server = TestServer::new(router(AppState::new(
+            Arc::new(EmbedderHandle::loading()),
+            store,
+            AuthConfig {
+                enabled: true,
+                frontend_api_key: Some("expected-key".to_owned()),
+                session_secret: None,
+                api_keys: vec![],
+            },
+            OpenAiChatConfig {
+                base_url: Some("http://127.0.0.1:8081".to_owned()),
+                default_model: Some("current_model.gguf".to_owned()),
+                timeout_secs: 60,
+                ..OpenAiChatConfig::default()
+            },
+        )));
+
+        let response = server
+            .post("/api/openai/v1/chat/completions")
+            .json(&json!({
+                "messages": [
+                    { "role": "user", "content": "hello" }
+                ],
+                "stream": true
+            }))
+            .await;
+
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+        response.assert_json(&json!({
+            "error": "missing x-api-key header, bearer token or valid session cookie"
         }));
     }
 }

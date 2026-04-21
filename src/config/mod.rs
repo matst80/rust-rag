@@ -21,6 +21,20 @@ pub struct AuthConfig {
     pub api_keys: Vec<ApiKeyConfig>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OpenAiChatConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub default_model: Option<String>,
+    pub timeout_secs: u64,
+}
+
+impl OpenAiChatConfig {
+    pub fn is_configured(&self) -> bool {
+        self.base_url.is_some()
+    }
+}
+
 impl AuthConfig {
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -53,6 +67,7 @@ pub struct AppConfig {
     pub graph_similarity_max_distance: f32,
     pub graph_cross_source: bool,
     pub auth: AuthConfig,
+    pub openai_chat: OpenAiChatConfig,
 }
 
 impl AppConfig {
@@ -60,6 +75,12 @@ impl AppConfig {
         let frontend_api_key = non_empty_var("RAG_FRONTEND_API_KEY");
         let session_secret = non_empty_var("AUTH_SESSION_SECRET");
         let api_keys = parse_api_keys(env::var("RAG_API_KEYS").ok())?;
+        let openai_api_key = non_empty_var("RAG_OPENAI_API_KEY");
+        let openai_base_url = non_empty_var("RAG_OPENAI_API_BASE_URL")
+            .or_else(|| openai_api_key.as_ref().map(|_| "https://api.openai.com/v1".to_owned()))
+            .map(|value| value.trim_end_matches('/').to_owned());
+        let openai_default_model = non_empty_var("RAG_OPENAI_MODEL");
+        let openai_timeout_secs = parse_env("RAG_OPENAI_TIMEOUT_SECS", "60")?;
 
         let auth_enabled = match env::var("RAG_AUTH_ENABLED") {
             Ok(raw) => raw
@@ -90,6 +111,12 @@ impl AppConfig {
                 frontend_api_key,
                 session_secret,
                 api_keys,
+            },
+            openai_chat: OpenAiChatConfig {
+                base_url: openai_base_url,
+                api_key: openai_api_key,
+                default_model: openai_default_model,
+                timeout_secs: openai_timeout_secs,
             },
         })
     }

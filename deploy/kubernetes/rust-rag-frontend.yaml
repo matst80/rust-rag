@@ -13,7 +13,7 @@ data:
   APP_BASE_URL: "https://rag.k6n.net"
   RAG_API_URL: "http://rust-rag:4001"
   ZITADEL_ISSUER: "https://auth.k6n.net"
-  ZITADEL_CLIENT_ID: "369392141752927246@rag"
+  ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"
 ---
 apiVersion: apps/v1

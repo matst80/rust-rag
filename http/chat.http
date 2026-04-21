@@ -1,0 +1,106 @@
+### Test SSE Chat Completions with Server Tool
+
+POST http://localhost:4001/api/openai/v1/chat/completions
+Content-Type: application/json
+x-api-key: replace-with-shared-frontend-backend-key
+
+{
+  "model": "current_model.gguf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Search for documents about kubernetes"
+    }
+  ],
+  "stream": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "server__search_entries",
+        "description": "Search stored RAG entries by semantic similarity and optional source_id filter.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Natural-language search query."
+            },
+            "top_k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 25,
+              "default": 5
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "hybrid": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_distance": {
+              "type": "number",
+              "default": 0.8
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
+
+### Test SSE Chat Completions without Tools
+
+POST http://localhost:4001/api/openai/v1/chat/completions
+Content-Type: application/json
+x-api-key: replace-with-shared-frontend-backend-key
+
+{
+  "model": "current_model.gguf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, how are you?"
+    }
+  ],
+  "stream": true
+}
+
+### Test SSE Chat Completions with Client Tool (should be ignored)
+
+POST http://localhost:4001/api/openai/v1/chat/completions
+Content-Type: application/json
+x-api-key: replace-with-shared-frontend-backend-key
+
+{
+  "model": "current_model.gguf",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Open a modal"
+    }
+  ],
+  "stream": true,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "client__open_modal",
+        "description": "Open a modal dialog in the UI",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

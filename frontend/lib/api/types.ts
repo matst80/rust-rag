@@ -121,3 +121,85 @@ export interface CreateEdgeRequest {
   weight?: number
   metadata?: EntryMetadata
 }
+
+export interface ChatCompletionToolFunction {
+  name: string
+  description?: string
+  parameters?: Record<string, unknown>
+}
+
+export interface ChatCompletionTool {
+  type: "function"
+  function: ChatCompletionToolFunction
+}
+
+export interface ChatCompletionAssistantToolCall {
+  id: string
+  type: "function"
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
+export interface ChatCompletionMessage {
+  role: "system" | "user" | "assistant" | "tool"
+  content?: string | Record<string, unknown> | Array<Record<string, unknown>> | null
+  name?: string
+  tool_call_id?: string
+  tool_calls?: ChatCompletionAssistantToolCall[]
+}
+
+export interface ChatCompletionsRequest {
+  model?: string
+  messages: ChatCompletionMessage[]
+  stream?: true
+  tools?: ChatCompletionTool[]
+  tool_choice?: Record<string, unknown> | string
+  temperature?: number
+  max_completion_tokens?: number
+  parallel_tool_calls?: boolean
+  [key: string]: unknown
+}
+
+export interface ChatCompletionChunkDelta {
+  role?: "assistant"
+  content?: string
+  tool_calls?: Array<{
+    index: number
+    id?: string
+    type?: "function"
+    function?: {
+      name?: string
+      arguments?: string
+    }
+  }>
+}
+
+export interface ChatCompletionChunkChoice {
+  index: number
+  delta: ChatCompletionChunkDelta
+  finish_reason?: string | null
+}
+
+export interface ChatCompletionChunk {
+  id?: string
+  object?: string
+  created?: number
+  model?: string
+  choices: ChatCompletionChunkChoice[]
+}
+
+export interface ChatCompletionStreamError {
+  error: {
+    message: string
+    type?: string
+  }
+}
+
+export interface ChatCompletionStreamHandlers {
+  onChunk?: (chunk: ChatCompletionChunk) => void
+  onError?: (error: ChatCompletionStreamError) => void
+  onDone?: () => void
+  onEvent?: (payload: ChatCompletionChunk | ChatCompletionStreamError) => void
+}

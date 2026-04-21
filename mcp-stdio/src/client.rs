@@ -84,12 +84,12 @@ impl RustRagHttpClient {
     }
 
     pub async fn store(&self, request: &StoreRequest) -> Result<StoreResponse> {
-        self.send_json(Method::POST, "store", Some(request), None::<&()>)
+        self.send_json(Method::POST, "api/store", Some(request), None::<&()>)
             .await
     }
 
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
-        self.send_json(Method::POST, "search", Some(request), None::<&()>)
+        self.send_json(Method::POST, "api/search", Some(request), None::<&()>)
             .await
     }
 
@@ -124,12 +124,12 @@ impl RustRagHttpClient {
     }
 
     pub async fn graph_status(&self) -> Result<GraphStatusResponse> {
-        self.send_json::<(), (), GraphStatusResponse>(Method::GET, "graph/status", None, None)
+        self.send_json::<(), (), GraphStatusResponse>(Method::GET, "api/graph/status", None, None)
             .await
     }
 
     pub async fn list_graph_edges(&self, query: &ListGraphEdgesQuery) -> Result<GraphEdgesResponse> {
-        self.send_json(Method::GET, "graph/edges", None::<&()>, Some(query))
+        self.send_json(Method::GET, "api/graph/edges", None::<&()>, Some(query))
             .await
     }
 
@@ -140,7 +140,7 @@ impl RustRagHttpClient {
     ) -> Result<GraphNeighborhoodResponse> {
         self.send_json(
             Method::GET,
-            &format!("graph/neighborhood/{id}"),
+            &format!("api/graph/neighborhood/{id}"),
             None::<&()>,
             Some(query),
         )
@@ -266,7 +266,7 @@ mod tests {
         let state = TestState::default();
         let server = spawn_server(
             Router::new().route(
-                "/store",
+                "/api/store",
                 post({
                     let state = state.clone();
                     move |Json(request): Json<StoreRequest>| {
@@ -332,7 +332,7 @@ mod tests {
         let state = TestState::default();
         let server = spawn_server(
             Router::new().route(
-                "/graph/neighborhood/{id}",
+                "/api/graph/neighborhood/{id}",
                 get({
                     let state = state.clone();
                     move |Path(id): Path<String>, Query(query): Query<GraphNeighborhoodQuery>| {

@@ -19,16 +19,43 @@ The `mcp-stdio` bridge exposes rust-rag to MCP-compatible agent clients over std
 - `RAG_MCP_AUTH_BEARER` - optional bearer-style API key for upstream requests
 - `RAG_MCP_HEADERS` - optional extra headers, for example `x-api-key=your-direct-key`
 
+The bridge accepts upstream auth only through environment variables. There is no dedicated command-line flag for API keys.
+
 If the Rust API is protected with `RAG_API_KEYS`, use one of these:
 
 - `RAG_MCP_AUTH_BEARER=your-direct-key`
 - `RAG_MCP_HEADERS=x-api-key=your-direct-key`
 
+If you want `x-api-key` auth to be enforced by the Rust API, make sure backend auth is actually enabled, for example with `RAG_AUTH_ENABLED=true` and a matching configured key.
+
+## Local x-api-key Example
+
+For a local server on `http://127.0.0.1:4001` using the default shared key from the Makefile:
+
+~~~bash
+RAG_AUTH_ENABLED=true \
+RAG_FRONTEND_API_KEY=replace-with-shared-frontend-backend-key \
+make run
+~~~
+
+Then configure the MCP bridge like this:
+
+~~~bash
+RAG_MCP_API_BASE_URL=http://127.0.0.1:4001 \
+RAG_MCP_TOOL_GROUPS=core,graph \
+RAG_MCP_SEARCH_FORMAT=markdown \
+RAG_MCP_HEADERS=x-api-key=replace-with-shared-frontend-backend-key \
+/absolute/path/to/mcp-stdio
+~~~
+
 ## Claude Code
 
 ~~~bash
 claude mcp add rust-rag \
+  --env RAG_MCP_API_BASE_URL=http://127.0.0.1:4001 \
+  --env RAG_MCP_TOOL_GROUPS=core,graph \
   --env RAG_MCP_SEARCH_FORMAT=markdown \
+  --env RAG_MCP_HEADERS=x-api-key=replace-with-shared-frontend-backend-key \
   -- /absolute/path/to/mcp-stdio
 ~~~
 
@@ -40,9 +67,9 @@ claude mcp add rust-rag \
     "rust-rag": {
       "command": "/absolute/path/to/mcp-stdio",
       "env": {
-        "RAG_MCP_API_BASE_URL": "https://your-rag-host",
+        "RAG_MCP_API_BASE_URL": "http://127.0.0.1:4001",
         "RAG_MCP_TOOL_GROUPS": "core,graph",
-        "RAG_MCP_HEADERS": "x-api-key=replace-me"
+        "RAG_MCP_HEADERS": "x-api-key=replace-with-shared-frontend-backend-key"
       }
     }
   }

@@ -15,6 +15,10 @@ import type {
   GraphStatus,
   ListItemsRequest,
   PagedItems,
+  ChatCompletionChunk,
+  ChatCompletionsRequest,
+  ChatCompletionStreamError,
+  ChatCompletionStreamHandlers,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -153,6 +157,101 @@ async function request<T>(
   if (!text) return {} as T
 
   return JSON.parse(text)
+}
+
+function parseSseEvents(chunk: string, buffer: { current: string }): string[] {
+  buffer.current += chunk.replaceAll("\r\n", "\n")
+  const events: string[] = []
+
+  while (true) {
+    const separatorIndex = buffer.current.indexOf("\n\n")
+    if (separatorIndex === -1) {
+      break
+    }
+
+    const rawEvent = buffer.current.slice(0, separatorIndex)
+    buffer.current = buffer.current.slice(separatorIndex + 2)
+
+    const data = rawEvent
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+
+    if (data) {
+      events.push(data)
+    }
+  }
+
+  return events
+}
+
+function isStreamError(value: unknown): value is ChatCompletionStreamError {
+  return typeof value === "object" && value !== null && "error" in value
+}
+
+export async function streamChatCompletions(
+  input: ChatCompletionsRequest,
+  handlers: ChatCompletionStreamHandlers = {},
+  options: { signal?: AbortSignal } = {}
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/openai/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...input,
+      stream: true,
+    }),
+    signal: options.signal,
+  })
+
+  if (!response.ok) {
+    throw new APIError(response.status, `API error: ${response.statusText}`)
+  }
+
+  if (!response.body) {
+    throw new APIError(500, "Streaming response body was not available")
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const buffer = { current: "" }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+
+      const chunk = decoder.decode(value, { stream: true })
+      const events = parseSseEvents(chunk, buffer)
+
+      for (const event of events) {
+        if (event === "[DONE]") {
+          handlers.onDone?.()
+          return
+        }
+
+        const payload = JSON.parse(event) as ChatCompletionChunk | ChatCompletionStreamError
+        handlers.onEvent?.(payload)
+
+        if (isStreamError(payload)) {
+          handlers.onError?.(payload)
+          continue
+        }
+
+        handlers.onChunk?.(payload)
+      }
+    }
+
+    handlers.onDone?.()
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 // Categories API
@@ -298,6 +397,9 @@ export async function deleteEdge(id: string): Promise<void> {
 export const api = {
   categories: {
     list: getCategories,
+  },
+  chat: {
+    stream: streamChatCompletions,
   },
   graph: {
     status: getGraphStatus,

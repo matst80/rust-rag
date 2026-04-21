@@ -32,6 +32,30 @@ All configuration is via environment variables passed to the bridge process.
 | `RAG_MCP_SERVER_VERSION` | crate version | Reported during MCP initialization |
 | `RAG_MCP_SERVER_INSTRUCTIONS` | built-in | Server instructions text |
 
+Authentication is configured only through environment variables. The bridge does not currently support a dedicated command-line flag for `x-api-key` or bearer auth.
+
+If the Rust API expects `x-api-key`, set:
+
+```bash
+RAG_MCP_HEADERS=x-api-key=your-key
+```
+
+If the Rust API expects bearer auth, set:
+
+```bash
+RAG_MCP_AUTH_BEARER=your-key
+```
+
+For a local backend started from this repo with auth enabled and the default shared key from the Makefile:
+
+```bash
+RAG_MCP_API_BASE_URL=http://127.0.0.1:4001 \
+RAG_MCP_TOOL_GROUPS=core,graph \
+RAG_MCP_SEARCH_FORMAT=markdown \
+RAG_MCP_HEADERS=x-api-key=replace-with-shared-frontend-backend-key \
+./mcp-stdio/target/release/mcp-stdio
+```
+
 ### Tool groups
 
 - `core` — `health_status`, `store_entry`, `search_entries`
@@ -54,7 +78,10 @@ Register the bridge with Claude Code using the CLI:
 
 ```bash
 claude mcp add rust-rag \
+  --env RAG_MCP_API_BASE_URL=http://127.0.0.1:4001 \
+  --env RAG_MCP_TOOL_GROUPS=core,graph \
   --env RAG_MCP_SEARCH_FORMAT=markdown \
+  --env RAG_MCP_HEADERS=x-api-key=replace-with-shared-frontend-backend-key \
   -- /absolute/path/to/mcp-stdio/target/release/mcp-stdio
 ```
 
@@ -67,8 +94,10 @@ Or add it manually to `~/.claude.json` (user scope) or `.mcp.json` (project scop
       "command": "/home/mats/github.com/matst80/rust-rag/mcp-stdio/target/release/mcp-stdio",
       "args": [],
       "env": {
+        "RAG_MCP_API_BASE_URL": "http://127.0.0.1:4001",
         "RAG_MCP_SEARCH_FORMAT": "markdown",
-        "RAG_MCP_TOOL_GROUPS": "core,graph"
+        "RAG_MCP_TOOL_GROUPS": "core,graph",
+        "RAG_MCP_HEADERS": "x-api-key=replace-with-shared-frontend-backend-key"
       }
     }
   }

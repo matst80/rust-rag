@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { useCategories } from "@/lib/api"
+import { useMemo, useState } from "react"
 
 interface CategorySidebarProps {
   selectedCategory: string | null
@@ -16,6 +17,10 @@ export function CategorySidebar({
   onSelectCategory,
 }: CategorySidebarProps) {
   const { data: categories, isLoading } = useCategories()
+  const [filterText, setFilterText] = useState("")
+  const filteredCategories = useMemo(()=>categories?.filter(category =>
+    filterText ? category.name.toLowerCase().includes(filterText.toLowerCase()) : true
+  ), [categories, filterText])
 
   return (
     <aside className="flex w-full flex-col bg-muted/5 p-6 md:w-80 md:min-h-[calc(100vh-3.5rem)] border-r border-muted/20 backdrop-blur-sm">
@@ -31,6 +36,8 @@ export function CategorySidebar({
           </div>
           <input 
             type="text" 
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
             placeholder="collection..." 
             className="w-full bg-muted/20 border border-muted-foreground/10 rounded-xl py-2 pl-14 pr-4 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all placeholder:text-muted-foreground/30 placeholder:uppercase placeholder:font-bold"
           />
@@ -67,7 +74,7 @@ export function CategorySidebar({
             ))}
           </div>
         ) : (
-          categories?.map((category) => (
+          filteredCategories?.map((category) => (
             <Button
               key={category.id}
               variant="ghost"

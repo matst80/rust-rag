@@ -19,7 +19,7 @@ data:
   RAG_GRAPH_CROSS_SOURCE: "false"
   RAG_AUTH_ENABLED: "true"
   ZITADEL_ISSUER: "https://auth.k6n.net"
-  ZITADEL_CLIENT_ID: "369392141752927246@rag"
+  ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"
 ---
 apiVersion: v1
