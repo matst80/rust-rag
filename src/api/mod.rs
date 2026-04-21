@@ -1,9 +1,9 @@
 use crate::{
     config::{AuthConfig, OpenAiChatConfig},
     db::{
-        CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
-        GraphStatus,
-        ItemRecord, ListItemsRequest, ManualEdgeInput, SearchHit, SortOrder, VectorStore,
+        AuthStore, CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
+        GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, SearchHit,
+        SortOrder, VectorStore,
     },
     embedding::EmbeddingService,
 };
@@ -30,21 +30,27 @@ use std::{
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod auth;
 mod openai;
+
+pub use auth::SessionSubject;
 
 #[derive(Clone)]
 pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
     pub store: Arc<dyn VectorStore>,
+    pub auth_store: Arc<dyn AuthStore>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
     pub http_client: reqwest::Client,
+    pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
 impl AppState {
     pub fn new(
         embedder: Arc<EmbedderHandle>,
         store: Arc<dyn VectorStore>,
+        auth_store: Arc<dyn AuthStore>,
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
     ) -> Self {
@@ -52,17 +58,27 @@ impl AppState {
         Self {
             embedder,
             store,
+            auth_store,
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
                 .expect("http client should build"),
+            pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
 
+    pub fn mcp_allowed_hosts(&self) -> Vec<String> {
+        self.auth.mcp_allowed_hosts.clone()
+    }
+
     #[cfg(test)]
-    pub fn new_ready(embedder: Arc<dyn EmbeddingService>, store: Arc<dyn VectorStore>) -> Self {
+    pub fn new_ready(
+        embedder: Arc<dyn EmbeddingService>,
+        store: Arc<dyn VectorStore>,
+        auth_store: Arc<dyn AuthStore>,
+    ) -> Self {
         let openai_chat = OpenAiChatConfig {
             timeout_secs: 60,
             ..OpenAiChatConfig::default()
@@ -70,12 +86,14 @@ impl AppState {
         Self {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
             store,
+            auth_store,
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("http client should build"),
+            pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
 }
@@ -111,7 +129,7 @@ impl EmbedderHandle {
         *self.inner.write().expect("embedder state lock poisoned") = EmbedderState::Failed(error);
     }
 
-    fn get_ready(&self) -> Result<Arc<dyn EmbeddingService>, ApiError> {
+    pub(crate) fn get_ready(&self) -> Result<Arc<dyn EmbeddingService>, ApiError> {
         match &*self.inner.read().expect("embedder state lock poisoned") {
             EmbedderState::Loading => Err(ApiError::ServiceUnavailable(
                 "embedder is still loading".to_owned(),
@@ -123,7 +141,7 @@ impl EmbedderHandle {
         }
     }
 
-    fn health(&self) -> (StatusCode, Json<HealthResponse>) {
+    pub(crate) fn health(&self) -> (StatusCode, Json<HealthResponse>) {
         match &*self.inner.read().expect("embedder state lock poisoned") {
             EmbedderState::Loading => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -413,7 +431,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/store", post(store))
         .route("/search", post(search))
         .route("/api/search", post(search))
-        .route("/api/openai/v1/chat/completions", post(openai::chat_completions))
+        .route(
+            "/api/openai/v1/chat/completions",
+            post(openai::chat_completions),
+        )
         .route("/graph/status", get(graph_status))
         .route("/api/graph/status", get(graph_status))
         .route("/graph/edges", get(list_graph_edges))
@@ -422,10 +443,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
-        .route("/admin/items/{id}", get(get_item).put(update_item).delete(delete_item))
+        .route(
+            "/admin/items/{id}",
+            get(get_item).put(update_item).delete(delete_item),
+        )
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -434,6 +459,8 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(health))
+        .merge(auth::public_routes())
+        .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
@@ -470,10 +497,44 @@ async fn require_api_key(
         if state.auth.matches_api_key(key) {
             return Ok(next.run(request).await);
         }
+
+        if key.starts_with(auth::MCP_TOKEN_PREFIX) {
+            let hash = auth::hash_token(key);
+            let auth_store = state.auth_store.clone();
+            let record =
+                tokio::task::spawn_blocking(move || auth_store.find_mcp_token_by_hash(&hash))
+                    .await
+                    .map_err(ApiError::TaskJoin)?
+                    .map_err(ApiError::Internal)?;
+            if let Some(record) = record {
+                let now = current_timestamp_millis()?;
+                if record
+                    .expires_at
+                    .map(|expiry| expiry <= now)
+                    .unwrap_or(false)
+                {
+                    tracing::warn!(token_id = %record.id, "rejecting expired MCP token");
+                } else {
+                    let touch_store = state.auth_store.clone();
+                    let touch_id = record.id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(error) = touch_store.touch_mcp_token(&touch_id, now) {
+                            tracing::warn!(error = %error, "failed to update token last_used_at");
+                        }
+                    });
+                    tracing::debug!(token_id = %record.id, "authorized via MCP token");
+                    return Ok(next.run(request).await);
+                }
+            }
+        }
     }
 
     if let Some(secret) = state.auth.session_secret.as_deref() {
-        if let Some(cookies) = request.headers().get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()) {
+        if let Some(cookies) = request
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+        {
             for cookie in cookies.split(';') {
                 let mut parts = cookie.trim().splitn(2, '=');
                 if let (Some(name), Some(value)) = (parts.next(), parts.next()) {
@@ -501,7 +562,9 @@ async fn require_api_key(
             tracing::info!("no cookie header found in request");
         }
     } else {
-        tracing::warn!("AUTH_SESSION_SECRET not configured in backend - session cookies will be ignored");
+        tracing::warn!(
+            "AUTH_SESSION_SECRET not configured in backend - session cookies will be ignored"
+        );
     }
 
     tracing::warn!(
@@ -523,6 +586,21 @@ async fn store(
     State(state): State<AppState>,
     Json(request): Json<StoreRequest>,
 ) -> Result<(StatusCode, Json<StoreResponse>), ApiError> {
+    let response = store_entry_core(&state, request).await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn search(
+    State(state): State<AppState>,
+    Json(request): Json<SearchRequest>,
+) -> Result<Json<SearchResponse>, ApiError> {
+    search_core(&state, request).await.map(Json)
+}
+
+pub(crate) async fn store_entry_core(
+    state: &AppState,
+    request: StoreRequest,
+) -> Result<StoreResponse, ApiError> {
     let id = resolve_store_id(request.id);
     validate_non_empty("text", &request.text)?;
     validate_metadata(&request.metadata)?;
@@ -531,11 +609,12 @@ async fn store(
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
+    let source_id = request.source_id.clone();
     let item = ItemRecord {
         id: id.clone(),
         text: request.text.clone(),
         metadata: request.metadata,
-        source_id: request.source_id.clone(),
+        source_id: request.source_id,
         created_at,
     };
 
@@ -548,20 +627,17 @@ async fn store(
     .map_err(ApiError::TaskJoin)?
     .map_err(ApiError::Internal)?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(StoreResponse {
-            id,
-            source_id: request.source_id,
-            created_at,
-        }),
-    ))
+    Ok(StoreResponse {
+        id,
+        source_id,
+        created_at,
+    })
 }
 
-async fn search(
-    State(state): State<AppState>,
-    Json(request): Json<SearchRequest>,
-) -> Result<Json<SearchResponse>, ApiError> {
+pub(crate) async fn search_core(
+    state: &AppState,
+    request: SearchRequest,
+) -> Result<SearchResponse, ApiError> {
     if request.top_k == 0 {
         return Err(ApiError::BadRequest(
             "top_k must be greater than zero".to_owned(),
@@ -578,8 +654,8 @@ async fn search(
     let source_id = request.source_id;
     let max_distance = request.max_distance;
 
-    let (results, related) =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
+    let (results, related) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
             let embedding = embedder.embed(&query)?;
             let hits = if request.hybrid {
                 store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
@@ -596,8 +672,7 @@ async fn search(
                     .list_graph_edges(Some(&top.id), Some(GraphEdgeType::Manual))
                     .ok()
                     .unwrap_or_default();
-                let existing: HashSet<&str> =
-                    filtered.iter().map(|hit| hit.id.as_str()).collect();
+                let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
                 let mut relations: HashMap<String, Option<String>> = HashMap::new();
                 for edge in edges {
                     let neighbor_id = if edge.from_item_id == top.id {
@@ -632,12 +707,13 @@ async fn search(
             };
 
             Ok((filtered, related))
-        })
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(ApiError::Internal)?;
+        },
+    )
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
 
-    Ok(Json(SearchResponse {
+    Ok(SearchResponse {
         results: results.into_iter().map(Into::into).collect(),
         related: related
             .into_iter()
@@ -651,7 +727,7 @@ async fn search(
                 relation,
             })
             .collect(),
-    }))
+    })
 }
 
 async fn graph_status(
@@ -873,7 +949,7 @@ async fn delete_graph_edge(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ApiError {
+pub enum ApiError {
     #[error("{0}")]
     Unauthorized(String),
     #[error("{0}")]
@@ -907,7 +983,13 @@ impl IntoResponse for ApiError {
             );
         }
 
-        (status, Json(ErrorResponse { error: error_message })).into_response()
+        (
+            status,
+            Json(ErrorResponse {
+                error: error_message,
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -984,7 +1066,11 @@ impl From<GraphNeighborhood> for GraphNeighborhoodResponse {
             center_id: value.center_id,
             nodes: value.nodes.into_iter().map(Into::into).collect(),
             edges: value.edges.into_iter().map(Into::into).collect(),
-            pairwise_distances: value.pairwise_distances.into_iter().map(Into::into).collect(),
+            pairwise_distances: value
+                .pairwise_distances
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -1060,7 +1146,7 @@ fn default_metadata() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-fn current_timestamp_millis() -> Result<i64, ApiError> {
+pub(super) fn current_timestamp_millis() -> Result<i64, ApiError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| ApiError::Internal(anyhow::Error::new(error)))?;
@@ -1130,6 +1216,9 @@ mod tests {
         graph_enabled: bool,
         graph_edges: Mutex<Vec<GraphEdgeRecord>>,
         graph_rebuilds: Mutex<usize>,
+        mcp_tokens: Mutex<Vec<crate::db::McpTokenRecord>>,
+        mcp_token_hashes: Mutex<HashMap<String, String>>,
+        device_auths: Mutex<Vec<crate::db::DeviceAuthRecord>>,
     }
 
     impl Default for MockStore {
@@ -1141,6 +1230,9 @@ mod tests {
                 graph_enabled: false,
                 graph_edges: Mutex::new(Vec::new()),
                 graph_rebuilds: Mutex::new(0),
+                mcp_tokens: Mutex::new(Vec::new()),
+                mcp_token_hashes: Mutex::new(HashMap::new()),
+                device_auths: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1269,7 +1361,10 @@ mod tests {
             let total_count = items.len() as i64;
 
             items.sort_by(|a, b| {
-                let ordering = b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id));
+                let ordering = b
+                    .created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| a.id.cmp(&b.id));
                 match request.sort_order {
                     SortOrder::Asc => ordering.reverse(),
                     SortOrder::Desc => ordering,
@@ -1278,11 +1373,7 @@ mod tests {
 
             let offset = request.offset.unwrap_or(0);
             let limit = request.limit.unwrap_or(100);
-            let paged_items = items
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .collect();
+            let paged_items = items.into_iter().skip(offset).take(limit).collect();
 
             Ok((paged_items, total_count))
         }
@@ -1485,6 +1576,171 @@ mod tests {
         }
     }
 
+    impl AuthStore for MockStore {
+        fn create_mcp_token(
+            &self,
+            token: crate::db::NewMcpToken,
+        ) -> Result<crate::db::McpTokenRecord> {
+            let record = crate::db::McpTokenRecord {
+                id: token.id.clone(),
+                name: token.name.clone(),
+                subject: token.subject.clone(),
+                created_at: token.created_at,
+                last_used_at: None,
+                expires_at: token.expires_at,
+            };
+            self.mcp_token_hashes
+                .lock()
+                .expect("store mutex poisoned")
+                .insert(token.token_hash, token.id);
+            self.mcp_tokens
+                .lock()
+                .expect("store mutex poisoned")
+                .push(record.clone());
+            Ok(record)
+        }
+
+        fn find_mcp_token_by_hash(&self, hash: &str) -> Result<Option<crate::db::McpTokenRecord>> {
+            let hashes = self.mcp_token_hashes.lock().expect("store mutex poisoned");
+            let tokens = self.mcp_tokens.lock().expect("store mutex poisoned");
+            Ok(hashes
+                .get(hash)
+                .and_then(|id| tokens.iter().find(|record| record.id == *id).cloned()))
+        }
+
+        fn touch_mcp_token(&self, id: &str, now: i64) -> Result<()> {
+            let mut tokens = self.mcp_tokens.lock().expect("store mutex poisoned");
+            for record in tokens.iter_mut() {
+                if record.id == id {
+                    record.last_used_at = Some(now);
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn list_mcp_tokens(&self, subject: Option<&str>) -> Result<Vec<crate::db::McpTokenRecord>> {
+            let tokens = self.mcp_tokens.lock().expect("store mutex poisoned");
+            Ok(tokens
+                .iter()
+                .filter(|record| match subject {
+                    Some(subject) => record.subject.as_deref() == Some(subject),
+                    None => true,
+                })
+                .cloned()
+                .collect())
+        }
+
+        fn delete_mcp_token(&self, id: &str, subject: Option<&str>) -> Result<bool> {
+            let mut tokens = self.mcp_tokens.lock().expect("store mutex poisoned");
+            let before = tokens.len();
+            tokens.retain(|record| {
+                record.id != id
+                    || match subject {
+                        Some(subject) => record.subject.as_deref() != Some(subject),
+                        None => false,
+                    }
+            });
+            Ok(tokens.len() != before)
+        }
+
+        fn create_device_auth(
+            &self,
+            request: crate::db::NewDeviceAuth,
+        ) -> Result<crate::db::DeviceAuthRecord> {
+            let record = crate::db::DeviceAuthRecord {
+                device_code: request.device_code,
+                user_code: request.user_code,
+                status: crate::db::DeviceAuthStatus::Pending,
+                token_id: None,
+                subject: None,
+                client_name: request.client_name,
+                created_at: request.created_at,
+                expires_at: request.expires_at,
+                interval_secs: request.interval_secs,
+                last_polled_at: None,
+            };
+            self.device_auths
+                .lock()
+                .expect("store mutex poisoned")
+                .push(record.clone());
+            Ok(record)
+        }
+
+        fn find_device_auth_by_device_code(
+            &self,
+            device_code: &str,
+        ) -> Result<Option<crate::db::DeviceAuthRecord>> {
+            Ok(self
+                .device_auths
+                .lock()
+                .expect("store mutex poisoned")
+                .iter()
+                .find(|record| record.device_code == device_code)
+                .cloned())
+        }
+
+        fn find_device_auth_by_user_code(
+            &self,
+            user_code: &str,
+        ) -> Result<Option<crate::db::DeviceAuthRecord>> {
+            Ok(self
+                .device_auths
+                .lock()
+                .expect("store mutex poisoned")
+                .iter()
+                .find(|record| record.user_code == user_code)
+                .cloned())
+        }
+
+        fn approve_device_auth(
+            &self,
+            user_code: &str,
+            token_id: &str,
+            subject: Option<&str>,
+            now: i64,
+        ) -> Result<bool> {
+            let mut auths = self.device_auths.lock().expect("store mutex poisoned");
+            for record in auths.iter_mut() {
+                if record.user_code == user_code
+                    && matches!(record.status, crate::db::DeviceAuthStatus::Pending)
+                    && record.expires_at > now
+                {
+                    record.status = crate::db::DeviceAuthStatus::Approved;
+                    record.token_id = Some(token_id.to_owned());
+                    record.subject = subject.map(str::to_owned);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        fn touch_device_poll(&self, device_code: &str, now: i64) -> Result<()> {
+            let mut auths = self.device_auths.lock().expect("store mutex poisoned");
+            for record in auths.iter_mut() {
+                if record.device_code == device_code {
+                    record.last_polled_at = Some(now);
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn expire_device_auths(&self, now: i64) -> Result<usize> {
+            let mut auths = self.device_auths.lock().expect("store mutex poisoned");
+            let mut expired = 0;
+            for record in auths.iter_mut() {
+                if matches!(record.status, crate::db::DeviceAuthStatus::Pending)
+                    && record.expires_at <= now
+                {
+                    record.status = crate::db::DeviceAuthStatus::Expired;
+                    expired += 1;
+                }
+            }
+            Ok(expired)
+        }
+    }
+
     fn manual_edge(id: &str, from: &str, to: &str) -> GraphEdgeRecord {
         GraphEdgeRecord {
             id: id.to_owned(),
@@ -1519,7 +1775,11 @@ mod tests {
     async fn store_route_embeds_and_persists_payload() {
         let embedder = Arc::new(MockEmbedder::new(vec![0.25, 0.75]));
         let store = Arc::new(MockStore::default());
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server
             .post("/store")
@@ -1550,7 +1810,11 @@ mod tests {
     async fn store_route_generates_id_when_missing() {
         let embedder = Arc::new(MockEmbedder::new(vec![0.25, 0.75]));
         let store = Arc::new(MockStore::default());
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server
             .post("/store")
@@ -1575,7 +1839,11 @@ mod tests {
     async fn store_route_generates_id_when_blank() {
         let embedder = Arc::new(MockEmbedder::new(vec![0.25, 0.75]));
         let store = Arc::new(MockStore::default());
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server
             .post("/store")
@@ -1607,7 +1875,11 @@ mod tests {
             created_at: 1234,
             distance: 0.0125,
         }]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server
             .post("/search")
@@ -1659,7 +1931,7 @@ mod tests {
                 distance: 1.5,
             },
         ]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server
             .post("/search")
@@ -1723,8 +1995,11 @@ mod tests {
                 similarity_edge("sim-1", "doc-top", "doc-similar"),
             ]),
             graph_rebuilds: Mutex::new(0),
+            mcp_tokens: Mutex::new(Vec::new()),
+            mcp_token_hashes: Mutex::new(HashMap::new()),
+            device_auths: Mutex::new(Vec::new()),
         });
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server
             .post("/search")
@@ -1751,9 +2026,12 @@ mod tests {
             created_at: 1,
             distance: 0.1,
         }]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
-        let response = server.post("/search").json(&json!({ "query": "hello" })).await;
+        let response = server
+            .post("/search")
+            .json(&json!({ "query": "hello" }))
+            .await;
 
         response.assert_status_ok();
         let body = response.json::<SearchResponse>();
@@ -1808,8 +2086,11 @@ mod tests {
             graph_enabled: true,
             graph_edges: Mutex::new(vec![manual_edge("manual-1", "doc-top", "doc-linked")]),
             graph_rebuilds: Mutex::new(0),
+            mcp_tokens: Mutex::new(Vec::new()),
+            mcp_token_hashes: Mutex::new(HashMap::new()),
+            device_auths: Mutex::new(Vec::new()),
         });
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server
             .post("/search")
@@ -1843,7 +2124,7 @@ mod tests {
                 distance: 1.5,
             },
         ]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server
             .post("/search")
@@ -1859,7 +2140,7 @@ mod tests {
     async fn graph_status_route_reports_disabled_state() {
         let store = Arc::new(MockStore::seed(vec![]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server.get("/graph/status").await;
 
@@ -1909,7 +2190,7 @@ mod tests {
             ],
         ));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server
             .get("/graph/neighborhood/doc-2?depth=1&limit=10")
@@ -1993,7 +2274,11 @@ mod tests {
             vec![],
         ));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let created = server
             .post("/admin/graph/edges")
@@ -2040,7 +2325,11 @@ mod tests {
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server.post("/admin/graph/rebuild").await;
 
@@ -2080,7 +2369,7 @@ mod tests {
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server.get("/admin/categories").await;
 
@@ -2112,7 +2401,7 @@ mod tests {
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server.get("/admin/items?source_id=memory").await;
 
@@ -2139,7 +2428,7 @@ mod tests {
             created_at: 42,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server.get("/admin/items/doc-1").await;
         response.assert_status_ok();
@@ -2156,7 +2445,7 @@ mod tests {
     async fn get_item_route_returns_404_when_missing() {
         let store = Arc::new(MockStore::seed(vec![]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store)));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
         let response = server.get("/admin/items/nope").await;
         assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
@@ -2172,7 +2461,11 @@ mod tests {
             created_at: 123,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server
             .put("/admin/items/doc-1")
@@ -2208,7 +2501,11 @@ mod tests {
             created_at: 123,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
-        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone())));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
 
         let response = server.delete("/admin/items/doc-1").await;
 
@@ -2231,9 +2528,13 @@ mod tests {
         let store = Arc::new(MockStore::default());
         let server = TestServer::new(router(AppState::new(
             Arc::new(EmbedderHandle::loading()),
+            store.clone(),
             store,
-            AuthConfig { enabled: false, api_keys: vec![], frontend_api_key: None, session_secret: None },
-            OpenAiChatConfig { timeout_secs: 60, ..OpenAiChatConfig::default() },
+            AuthConfig::default(),
+            OpenAiChatConfig {
+                timeout_secs: 60,
+                ..OpenAiChatConfig::default()
+            },
         )));
 
         let response = server.get("/healthz").await;
@@ -2250,12 +2551,12 @@ mod tests {
         let store = Arc::new(MockStore::default());
         let server = TestServer::new(router(AppState::new(
             Arc::new(EmbedderHandle::loading()),
+            store.clone(),
             store,
             AuthConfig {
                 enabled: true,
                 frontend_api_key: Some("expected-key".to_owned()),
-                session_secret: None,
-                api_keys: vec![],
+                ..AuthConfig::default()
             },
             OpenAiChatConfig {
                 base_url: Some("http://127.0.0.1:8081".to_owned()),
@@ -2279,5 +2580,261 @@ mod tests {
         response.assert_json(&json!({
             "error": "missing x-api-key header, bearer token or valid session cookie"
         }));
+    }
+
+    fn mint_session_cookie(secret: &str, sub: &str) -> String {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        #[derive(serde::Serialize)]
+        struct Claims<'a> {
+            sub: &'a str,
+            exp: usize,
+        }
+
+        let exp = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600) as usize;
+        let token = encode(
+            &Header::new(jsonwebtoken::Algorithm::HS256),
+            &Claims { sub, exp },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        format!("rag_session={token}")
+    }
+
+    fn auth_test_state() -> (AppState, Arc<MockStore>) {
+        let store = Arc::new(MockStore::default());
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
+        let auth_store: Arc<dyn AuthStore> = store.clone();
+        let vector_store: Arc<dyn VectorStore> = store.clone();
+        let state = AppState::new(
+            Arc::new(EmbedderHandle::ready(embedder)),
+            vector_store,
+            auth_store,
+            AuthConfig {
+                enabled: true,
+                session_secret: Some("test-session-secret".to_owned()),
+                app_base_url: Some("http://localhost:3000".to_owned()),
+                device_code_ttl_secs: 120,
+                device_code_interval_secs: 0,
+                ..AuthConfig::default()
+            },
+            OpenAiChatConfig {
+                timeout_secs: 60,
+                ..OpenAiChatConfig::default()
+            },
+        );
+        (state, store)
+    }
+
+    #[tokio::test]
+    async fn device_flow_end_to_end_mints_bearer_usable_on_protected_routes() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+
+        let code_response = server
+            .post("/auth/device/code")
+            .json(&json!({"client_name": "unit-test"}))
+            .await;
+        code_response.assert_status_ok();
+        let code_body = code_response.json::<auth::DeviceCodeResponse>();
+
+        let pending = server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code_body.device_code}))
+            .await;
+        assert_eq!(pending.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            pending.json::<Value>()["error"],
+            json!("authorization_pending")
+        );
+
+        let unauth_approve = server
+            .post("/auth/device/approve")
+            .json(&json!({"user_code": code_body.user_code}))
+            .await;
+        assert_eq!(unauth_approve.status_code(), StatusCode::UNAUTHORIZED);
+
+        let cookie = mint_session_cookie(&secret, "user-123");
+        let approve = server
+            .post("/auth/device/approve")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .json(&json!({"user_code": code_body.user_code}))
+            .await;
+        approve.assert_status_ok();
+
+        let granted = server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code_body.device_code}))
+            .await;
+        granted.assert_status_ok();
+        let token_body = granted.json::<auth::DeviceTokenResponse>();
+        assert!(token_body.access_token.starts_with("rag_mcp_"));
+
+        let search = server
+            .post("/search")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", token_body.access_token)
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .json(&json!({"query": "x"}))
+            .await;
+        assert_ne!(
+            search.status_code(),
+            StatusCode::UNAUTHORIZED,
+            "minted MCP token should be accepted by protected route"
+        );
+
+        let again = server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code_body.device_code}))
+            .await;
+        assert_eq!(
+            again.status_code(),
+            StatusCode::BAD_REQUEST,
+            "token plaintext should only be fetchable once"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoint_rejects_unauthenticated_requests() {
+        let (state, _store) = auth_test_state();
+        let server = TestServer::new(router(state));
+
+        let unauth = server.post("/mcp").json(&json!({"jsonrpc": "2.0"})).await;
+        assert_eq!(unauth.status_code(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoint_accepts_authenticated_requests() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+
+        let code = server
+            .post("/auth/device/code")
+            .json(&json!({}))
+            .await
+            .json::<auth::DeviceCodeResponse>();
+        let cookie = mint_session_cookie(&secret, "user-mcp");
+        server
+            .post("/auth/device/approve")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .json(&json!({"user_code": code.user_code}))
+            .await
+            .assert_status_ok();
+        let token = server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code.device_code}))
+            .await
+            .json::<auth::DeviceTokenResponse>();
+
+        let response = server
+            .post("/mcp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", token.access_token)
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .add_header(
+                axum::http::header::HOST,
+                "localhost".parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .add_header(
+                axum::http::header::ACCEPT,
+                "application/json, text/event-stream"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": { "name": "rust-rag-test", "version": "0.0.1" }
+                }
+            }))
+            .await;
+        assert_ne!(
+            response.status_code(),
+            StatusCode::UNAUTHORIZED,
+            "MCP endpoint should accept the minted bearer",
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_token_is_rejected() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+
+        let code = server
+            .post("/auth/device/code")
+            .json(&json!({}))
+            .await
+            .json::<auth::DeviceCodeResponse>();
+        let cookie = mint_session_cookie(&secret, "user-123");
+        server
+            .post("/auth/device/approve")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .json(&json!({"user_code": code.user_code}))
+            .await
+            .assert_status_ok();
+        let token = server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code.device_code}))
+            .await
+            .json::<auth::DeviceTokenResponse>();
+
+        let listed = server
+            .get("/auth/tokens")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .await;
+        listed.assert_status_ok();
+        let tokens = listed.json::<auth::ListTokensResponse>();
+        assert_eq!(tokens.tokens.len(), 1);
+        assert_eq!(tokens.tokens[0].id, token.token_id);
+
+        server
+            .delete(&format!("/auth/tokens/{}", token.token_id))
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .await
+            .assert_status_ok();
+
+        let search = server
+            .post("/search")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {}", token.access_token)
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .json(&json!({"query": "x"}))
+            .await;
+        assert_eq!(search.status_code(), StatusCode::UNAUTHORIZED);
     }
 }

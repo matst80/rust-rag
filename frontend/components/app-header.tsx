@@ -9,6 +9,7 @@ import {
 	FolderOpen,
 	GitBranch,
 	Github,
+	KeyRound,
 	LogIn,
 	LogOut,
 	MessageSquare,
@@ -88,6 +89,19 @@ export function AppHeader() {
 				<div className="flex items-center gap-2">
 					{session?.authenticated ? (
 						<>
+							<Link
+								href="/auth/tokens"
+								className={cn(
+									"flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+									pathname.startsWith("/auth/tokens") || pathname.startsWith("/auth/device")
+										? "bg-accent text-accent-foreground"
+										: "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+								)}
+								title="MCP tokens"
+							>
+								<KeyRound className="size-4" />
+								<span className="hidden sm:inline">Tokens</span>
+							</Link>
 							<span className="hidden items-center gap-2 rounded-md px-3 py-2 text-sm text-muted-foreground md:flex">
 								<User className="size-4" />
 								<span>{displayName}</span>

@@ -3,14 +3,11 @@ use reqwest::{
     Client, Method, StatusCode, Url,
     header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
 };
-use rust_rag::{
-    api::{
-        AdminItemPayload, AdminItemsResponse, CategoriesResponse, CreateManualEdgeRequest,
-        DeleteResponse, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
-        GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
-        ListItemsQuery, SearchRequest, SearchResponse, StoreRequest, StoreResponse,
-        UpdateItemRequest,
-    },
+use rust_rag::api::{
+    AdminItemPayload, AdminItemsResponse, CategoriesResponse, CreateManualEdgeRequest,
+    DeleteResponse, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
+    GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery, ListItemsQuery,
+    SearchRequest, SearchResponse, StoreRequest, StoreResponse, UpdateItemRequest,
 };
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -113,14 +110,28 @@ impl RustRagHttpClient {
         .await
     }
 
-    pub async fn update_item(&self, id: &str, request: &UpdateItemRequest) -> Result<AdminItemPayload> {
-        self.send_json(Method::PUT, &format!("admin/items/{id}"), Some(request), None::<&()>)
-            .await
+    pub async fn update_item(
+        &self,
+        id: &str,
+        request: &UpdateItemRequest,
+    ) -> Result<AdminItemPayload> {
+        self.send_json(
+            Method::PUT,
+            &format!("admin/items/{id}"),
+            Some(request),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn delete_item(&self, id: &str) -> Result<DeleteResponse> {
-        self.send_json::<(), (), DeleteResponse>(Method::DELETE, &format!("admin/items/{id}"), None, None)
-            .await
+        self.send_json::<(), (), DeleteResponse>(
+            Method::DELETE,
+            &format!("admin/items/{id}"),
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn graph_status(&self) -> Result<GraphStatusResponse> {
@@ -128,7 +139,10 @@ impl RustRagHttpClient {
             .await
     }
 
-    pub async fn list_graph_edges(&self, query: &ListGraphEdgesQuery) -> Result<GraphEdgesResponse> {
+    pub async fn list_graph_edges(
+        &self,
+        query: &ListGraphEdgesQuery,
+    ) -> Result<GraphEdgesResponse> {
         self.send_json(Method::GET, "api/graph/edges", None::<&()>, Some(query))
             .await
     }
@@ -148,21 +162,36 @@ impl RustRagHttpClient {
     }
 
     pub async fn rebuild_graph(&self) -> Result<GraphRebuildResponse> {
-        self.send_json::<(), (), GraphRebuildResponse>(Method::POST, "admin/graph/rebuild", None, None)
-            .await
+        self.send_json::<(), (), GraphRebuildResponse>(
+            Method::POST,
+            "admin/graph/rebuild",
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn create_manual_edge(
         &self,
         request: &CreateManualEdgeRequest,
     ) -> Result<rust_rag::api::GraphEdgePayload> {
-        self.send_json(Method::POST, "admin/graph/edges", Some(request), None::<&()>)
-            .await
+        self.send_json(
+            Method::POST,
+            "admin/graph/edges",
+            Some(request),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn delete_graph_edge(&self, id: &str) -> Result<DeleteResponse> {
-        self.send_json::<(), (), DeleteResponse>(Method::DELETE, &format!("admin/graph/edges/{id}"), None, None)
-            .await
+        self.send_json::<(), (), DeleteResponse>(
+            Method::DELETE,
+            &format!("admin/graph/edges/{id}"),
+            None,
+            None,
+        )
+        .await
     }
 
     async fn send_json<Body, Query, Response>(
@@ -242,7 +271,11 @@ mod tests {
         StoreRequest, StoreResponse, UpdateItemRequest,
     };
     use serde_json::{Value, json};
-    use std::{net::SocketAddr, sync::{Arc, Mutex}, time::Duration};
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     use tokio::{net::TcpListener, task::JoinHandle};
 
     #[derive(Clone, Default)]
@@ -264,28 +297,26 @@ mod tests {
     #[tokio::test]
     async fn store_posts_json_body() {
         let state = TestState::default();
-        let server = spawn_server(
-            Router::new().route(
-                "/api/store",
-                post({
+        let server = spawn_server(Router::new().route(
+            "/api/store",
+            post({
+                let state = state.clone();
+                move |Json(request): Json<StoreRequest>| {
                     let state = state.clone();
-                    move |Json(request): Json<StoreRequest>| {
-                        let state = state.clone();
-                        async move {
-                            state.requests.lock().unwrap().push(request.text.clone());
-                            (
-                                StatusCode::CREATED,
-                                Json(StoreResponse {
-                                    id: request.id.unwrap_or_else(|| "generated".to_owned()),
-                                    source_id: request.source_id,
-                                    created_at: 123,
-                                }),
-                            )
-                        }
+                    async move {
+                        state.requests.lock().unwrap().push(request.text.clone());
+                        (
+                            StatusCode::CREATED,
+                            Json(StoreResponse {
+                                id: request.id.unwrap_or_else(|| "generated".to_owned()),
+                                source_id: request.source_id,
+                                created_at: 123,
+                            }),
+                        )
                     }
-                }),
-            ),
-        )
+                }
+            }),
+        ))
         .await;
 
         let client = client_for(&server);
@@ -307,7 +338,12 @@ mod tests {
     async fn update_item_surfaces_api_errors() {
         let server = spawn_server(Router::new().route(
             "/admin/items/{id}",
-            put(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "item missing"}))) }),
+            put(|| async {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "item missing"})),
+                )
+            }),
         ))
         .await;
 
@@ -330,30 +366,28 @@ mod tests {
     #[tokio::test]
     async fn graph_neighborhood_serializes_query_string() {
         let state = TestState::default();
-        let server = spawn_server(
-            Router::new().route(
-                "/api/graph/neighborhood/{id}",
-                get({
+        let server = spawn_server(Router::new().route(
+            "/api/graph/neighborhood/{id}",
+            get({
+                let state = state.clone();
+                move |Path(id): Path<String>, Query(query): Query<GraphNeighborhoodQuery>| {
                     let state = state.clone();
-                    move |Path(id): Path<String>, Query(query): Query<GraphNeighborhoodQuery>| {
-                        let state = state.clone();
-                        async move {
-                            state
-                                .requests
-                                .lock()
-                                .unwrap()
-                                .push(format!("{id}:{}:{}", query.depth.unwrap_or_default(), query.limit.unwrap_or_default()));
-                            Json(GraphNeighborhoodResponse {
-                                center_id: id,
-                                nodes: Vec::new(),
-                                edges: Vec::new(),
-                                pairwise_distances: Vec::new(),
-                            })
-                        }
+                    async move {
+                        state.requests.lock().unwrap().push(format!(
+                            "{id}:{}:{}",
+                            query.depth.unwrap_or_default(),
+                            query.limit.unwrap_or_default()
+                        ));
+                        Json(GraphNeighborhoodResponse {
+                            center_id: id,
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                            pairwise_distances: Vec::new(),
+                        })
                     }
-                }),
-            ),
-        )
+                }
+            }),
+        ))
         .await;
 
         let client = client_for(&server);

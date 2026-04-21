@@ -1,4 +1,5 @@
 import { jwtVerify, SignJWT } from "jose"
+import { cookies } from "next/headers"
 import type { NextRequest, NextResponse } from "next/server"
 import { getAuthConfig } from "@/lib/auth/config"
 
@@ -33,13 +34,23 @@ export async function createSessionToken(user: UserSession, maxAge: number): Pro
 
 export async function readSessionFromRequest(request: NextRequest): Promise<UserSession | null> {
 	const cookie = request.cookies.get(SESSION_COOKIE_NAME)
-	if (!cookie?.value) {
+	return verifySessionCookieValue(cookie?.value)
+}
+
+export async function readSessionFromCookies(): Promise<UserSession | null> {
+	const cookieStore = await cookies()
+	const cookie = cookieStore.get(SESSION_COOKIE_NAME)
+	return verifySessionCookieValue(cookie?.value)
+}
+
+async function verifySessionCookieValue(value: string | undefined): Promise<UserSession | null> {
+	if (!value) {
 		return null
 	}
 
 	try {
 		const secret = getSessionSecret()
-		const { payload } = await jwtVerify(cookie.value, secret, {
+		const { payload } = await jwtVerify(value, secret, {
 			algorithms: ["HS256"],
 		})
 

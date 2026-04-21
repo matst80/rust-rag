@@ -7,7 +7,7 @@ use rust_rag::{
     api::{AppState, EmbedderHandle},
     build_app,
     config::AppConfig,
-    db::{SqliteVectorStore, VectorStore},
+    db::{AuthStore, SqliteVectorStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
 };
 
@@ -33,7 +33,8 @@ async fn main() -> Result<()> {
         config.graph_cross_source
     );
     println!("loading sqlite store");
-    println!("config: auth enabled={} (frontend_key={}, session_secret={}, api_keys={})", 
+    println!(
+        "config: auth enabled={} (frontend_key={}, session_secret={}, api_keys={})",
         config.auth.enabled,
         config.auth.frontend_api_key.is_some(),
         config.auth.session_secret.is_some(),
@@ -52,10 +53,12 @@ async fn main() -> Result<()> {
     }
 
     let store_service: Arc<dyn VectorStore> = store.clone();
+    let auth_store: Arc<dyn AuthStore> = store.clone();
     let embedder_handle = Arc::new(EmbedderHandle::loading());
     let state = AppState::new(
         embedder_handle.clone(),
         store_service,
+        auth_store,
         config.auth.clone(),
         config.openai_chat.clone(),
     );

@@ -122,6 +122,94 @@ pub struct GraphStatus {
     pub manual_edge_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpTokenRecord {
+    pub id: String,
+    pub name: String,
+    pub subject: Option<String>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewMcpToken {
+    pub id: String,
+    pub token_hash: String,
+    pub name: String,
+    pub subject: Option<String>,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAuthStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+impl DeviceAuthStatus {
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "denied" => Ok(Self::Denied),
+            "expired" => Ok(Self::Expired),
+            other => anyhow::bail!("unsupported device auth status {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthRecord {
+    pub device_code: String,
+    pub user_code: String,
+    pub status: DeviceAuthStatus,
+    pub token_id: Option<String>,
+    pub subject: Option<String>,
+    pub client_name: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub interval_secs: i64,
+    pub last_polled_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDeviceAuth {
+    pub device_code: String,
+    pub user_code: String,
+    pub client_name: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub interval_secs: i64,
+}
+
+pub trait AuthStore: Send + Sync {
+    fn create_mcp_token(&self, token: NewMcpToken) -> Result<McpTokenRecord>;
+    fn find_mcp_token_by_hash(&self, hash: &str) -> Result<Option<McpTokenRecord>>;
+    fn touch_mcp_token(&self, id: &str, now: i64) -> Result<()>;
+    fn list_mcp_tokens(&self, subject: Option<&str>) -> Result<Vec<McpTokenRecord>>;
+    fn delete_mcp_token(&self, id: &str, subject: Option<&str>) -> Result<bool>;
+
+    fn create_device_auth(&self, request: NewDeviceAuth) -> Result<DeviceAuthRecord>;
+    fn find_device_auth_by_device_code(
+        &self,
+        device_code: &str,
+    ) -> Result<Option<DeviceAuthRecord>>;
+    fn find_device_auth_by_user_code(&self, user_code: &str) -> Result<Option<DeviceAuthRecord>>;
+    fn approve_device_auth(
+        &self,
+        user_code: &str,
+        token_id: &str,
+        subject: Option<&str>,
+        now: i64,
+    ) -> Result<bool>;
+    fn touch_device_poll(&self, device_code: &str, now: i64) -> Result<()>;
+    fn expire_device_auths(&self, now: i64) -> Result<usize>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
@@ -172,11 +260,7 @@ pub trait VectorStore: Send + Sync {
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
     fn delete_item(&self, id: &str) -> Result<bool>;
-    fn distances_for_ids(
-        &self,
-        query_embedding: &[f32],
-        ids: &[String],
-    ) -> Result<Vec<SearchHit>>;
+    fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>>;
     fn graph_status(&self) -> Result<GraphStatus>;
     fn graph_neighborhood(
         &self,
@@ -441,9 +525,8 @@ impl VectorStore for SqliteVectorStore {
                 ",
             )?;
 
-            let rows = fts_stmt.query_map(
-                params![fts_query, source_id, (top_k * 2) as i64],
-                |row| {
+            let rows =
+                fts_stmt.query_map(params![fts_query, source_id, (top_k * 2) as i64], |row| {
                     Ok(SearchHit {
                         id: row.get(0)?,
                         text: row.get(1)?,
@@ -452,8 +535,7 @@ impl VectorStore for SqliteVectorStore {
                         created_at: row.get(4)?,
                         distance: row.get::<_, f32>(5)?,
                     })
-                },
-            )?;
+                })?;
 
             for row in rows {
                 keyword_hits.push(row?);
@@ -502,11 +584,7 @@ impl VectorStore for SqliteVectorStore {
         Ok(results)
     }
 
-    fn distances_for_ids(
-        &self,
-        query_embedding: &[f32],
-        ids: &[String],
-    ) -> Result<Vec<SearchHit>> {
+    fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -543,8 +621,7 @@ impl VectorStore for SqliteVectorStore {
         for id in ids {
             params_vec.push(id);
         }
-        let rows =
-            statement.query_map(rusqlite::params_from_iter(params_vec), map_search_row)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(params_vec), map_search_row)?;
         let mut results = Vec::new();
         for row in rows {
             results.push(row?);
@@ -840,6 +917,261 @@ impl VectorStore for SqliteVectorStore {
     }
 }
 
+impl AuthStore for SqliteVectorStore {
+    fn create_mcp_token(&self, token: NewMcpToken) -> Result<McpTokenRecord> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        connection.execute(
+            "
+            INSERT INTO mcp_tokens (id, token_hash, name, subject, created_at, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                token.id,
+                token.token_hash,
+                token.name,
+                token.subject,
+                token.created_at,
+                token.expires_at,
+            ],
+        )?;
+
+        Ok(McpTokenRecord {
+            id: token.id,
+            name: token.name,
+            subject: token.subject,
+            created_at: token.created_at,
+            last_used_at: None,
+            expires_at: token.expires_at,
+        })
+    }
+
+    fn find_mcp_token_by_hash(&self, hash: &str) -> Result<Option<McpTokenRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        let mut statement = connection.prepare(
+            "
+            SELECT id, name, subject, created_at, last_used_at, expires_at
+            FROM mcp_tokens
+            WHERE token_hash = ?1
+            ",
+        )?;
+        let record = statement
+            .query_row(params![hash], map_mcp_token_row)
+            .optional()?;
+        Ok(record)
+    }
+
+    fn touch_mcp_token(&self, id: &str, now: i64) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "UPDATE mcp_tokens SET last_used_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    fn list_mcp_tokens(&self, subject: Option<&str>) -> Result<Vec<McpTokenRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        let mut statement = connection.prepare(
+            "
+            SELECT id, name, subject, created_at, last_used_at, expires_at
+            FROM mcp_tokens
+            WHERE (?1 IS NULL OR subject = ?1)
+            ORDER BY created_at DESC
+            ",
+        )?;
+        let rows = statement.query_map(params![subject], map_mcp_token_row)?;
+        let mut tokens = Vec::new();
+        for row in rows {
+            tokens.push(row?);
+        }
+        Ok(tokens)
+    }
+
+    fn delete_mcp_token(&self, id: &str, subject: Option<&str>) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let affected = connection.execute(
+            "DELETE FROM mcp_tokens WHERE id = ?1 AND (?2 IS NULL OR subject = ?2)",
+            params![id, subject],
+        )?;
+        Ok(affected > 0)
+    }
+
+    fn create_device_auth(&self, request: NewDeviceAuth) -> Result<DeviceAuthRecord> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+
+        connection.execute(
+            "
+            INSERT INTO device_auth_requests
+                (device_code, user_code, status, client_name, created_at, expires_at, interval_secs)
+            VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6)
+            ",
+            params![
+                request.device_code,
+                request.user_code,
+                request.client_name,
+                request.created_at,
+                request.expires_at,
+                request.interval_secs,
+            ],
+        )?;
+
+        Ok(DeviceAuthRecord {
+            device_code: request.device_code,
+            user_code: request.user_code,
+            status: DeviceAuthStatus::Pending,
+            token_id: None,
+            subject: None,
+            client_name: request.client_name,
+            created_at: request.created_at,
+            expires_at: request.expires_at,
+            interval_secs: request.interval_secs,
+            last_polled_at: None,
+        })
+    }
+
+    fn find_device_auth_by_device_code(
+        &self,
+        device_code: &str,
+    ) -> Result<Option<DeviceAuthRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "
+            SELECT device_code, user_code, status, token_id, subject, client_name,
+                   created_at, expires_at, interval_secs, last_polled_at
+            FROM device_auth_requests
+            WHERE device_code = ?1
+            ",
+        )?;
+        let record = statement
+            .query_row(params![device_code], map_device_auth_row)
+            .optional()?;
+        Ok(record)
+    }
+
+    fn find_device_auth_by_user_code(&self, user_code: &str) -> Result<Option<DeviceAuthRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "
+            SELECT device_code, user_code, status, token_id, subject, client_name,
+                   created_at, expires_at, interval_secs, last_polled_at
+            FROM device_auth_requests
+            WHERE user_code = ?1
+            ",
+        )?;
+        let record = statement
+            .query_row(params![user_code], map_device_auth_row)
+            .optional()?;
+        Ok(record)
+    }
+
+    fn approve_device_auth(
+        &self,
+        user_code: &str,
+        token_id: &str,
+        subject: Option<&str>,
+        now: i64,
+    ) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let affected = connection.execute(
+            "
+            UPDATE device_auth_requests
+            SET status = 'approved', token_id = ?1, subject = ?2
+            WHERE user_code = ?3 AND status = 'pending' AND expires_at > ?4
+            ",
+            params![token_id, subject, user_code, now],
+        )?;
+        Ok(affected > 0)
+    }
+
+    fn touch_device_poll(&self, device_code: &str, now: i64) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "UPDATE device_auth_requests SET last_polled_at = ?1 WHERE device_code = ?2",
+            params![now, device_code],
+        )?;
+        Ok(())
+    }
+
+    fn expire_device_auths(&self, now: i64) -> Result<usize> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let affected = connection.execute(
+            "
+            UPDATE device_auth_requests
+            SET status = 'expired'
+            WHERE status = 'pending' AND expires_at <= ?1
+            ",
+            params![now],
+        )?;
+        Ok(affected)
+    }
+}
+
+fn map_mcp_token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpTokenRecord> {
+    Ok(McpTokenRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        subject: row.get(2)?,
+        created_at: row.get(3)?,
+        last_used_at: row.get(4)?,
+        expires_at: row.get(5)?,
+    })
+}
+
+fn map_device_auth_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceAuthRecord> {
+    let status: String = row.get(2)?;
+    let status = DeviceAuthStatus::from_str(&status).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, error.into())
+    })?;
+    Ok(DeviceAuthRecord {
+        device_code: row.get(0)?,
+        user_code: row.get(1)?,
+        status,
+        token_id: row.get(3)?,
+        subject: row.get(4)?,
+        client_name: row.get(5)?,
+        created_at: row.get(6)?,
+        expires_at: row.get(7)?,
+        interval_secs: row.get(8)?,
+        last_polled_at: row.get(9)?,
+    })
+}
+
 fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Result<()> {
     connection.execute_batch(
         "
@@ -899,6 +1231,32 @@ fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Res
         CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_similarity_pair
             ON graph_edges(from_item_id, to_item_id, edge_type)
             WHERE edge_type = 'similarity';
+
+        CREATE TABLE IF NOT EXISTS mcp_tokens (
+            id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            subject TEXT,
+            created_at INTEGER NOT NULL,
+            last_used_at INTEGER,
+            expires_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_tokens_subject ON mcp_tokens(subject);
+
+        CREATE TABLE IF NOT EXISTS device_auth_requests (
+            device_code TEXT PRIMARY KEY,
+            user_code TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+            token_id TEXT REFERENCES mcp_tokens(id) ON DELETE SET NULL,
+            subject TEXT,
+            client_name TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            interval_secs INTEGER NOT NULL DEFAULT 5,
+            last_polled_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_device_auth_status ON device_auth_requests(status);
+        CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth_requests(expires_at);
         ",
     )?;
     ensure_column_exists(

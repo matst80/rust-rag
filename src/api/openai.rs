@@ -1,12 +1,11 @@
 use super::{
-    AdminItemPayload, AdminItemsResponse, ApiError, AppState,
-    CategoriesResponse, GraphNeighborhoodResponse, GraphStatusResponse, SearchResultPayload,
-    current_timestamp_millis, map_graph_error, resolve_store_id, validate_graph_depth,
-    validate_graph_limit, validate_metadata, validate_non_empty, validate_source_id,
+    AdminItemPayload, AdminItemsResponse, ApiError, AppState, CategoriesResponse,
+    GraphNeighborhoodResponse, GraphStatusResponse, SearchResultPayload, current_timestamp_millis,
+    map_graph_error, resolve_store_id, validate_graph_depth, validate_graph_limit,
+    validate_metadata, validate_non_empty, validate_source_id,
 };
 use crate::db::{ItemRecord, ListItemsRequest, SortOrder};
 use anyhow::{Context, anyhow};
-use scraper::{Html, Selector};
 use async_stream::stream;
 use axum::{
     Json,
@@ -16,6 +15,7 @@ use axum::{
     response::Response,
 };
 use futures_util::StreamExt;
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, convert::Infallible};
@@ -477,14 +477,16 @@ fn build_upstream_payload(
     object.insert("model".to_owned(), Value::String(model.to_owned()));
     object.insert(
         "messages".to_owned(),
-        serde_json::to_value(messages)
-            .map_err(|error| ApiError::Internal(anyhow!(error).context("failed to encode messages")))?,
+        serde_json::to_value(messages).map_err(|error| {
+            ApiError::Internal(anyhow!(error).context("failed to encode messages"))
+        })?,
     );
     object.insert("stream".to_owned(), Value::Bool(true));
     object.insert(
         "tools".to_owned(),
-        serde_json::to_value(server_tool_definitions())
-            .map_err(|error| ApiError::Internal(anyhow!(error).context("failed to encode tools")))?,
+        serde_json::to_value(server_tool_definitions()).map_err(|error| {
+            ApiError::Internal(anyhow!(error).context("failed to encode tools"))
+        })?,
     );
 
     match sanitize_tool_choice(request.tool_choice.clone()) {
@@ -741,10 +743,12 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
 
 async fn execute_server_tool(state: &AppState, tool_call: &AssistantToolCall) -> String {
     match tool_call.function.name.as_str() {
-        SEARCH_ENTRIES_TOOL => match search_entries_tool(state, &tool_call.function.arguments).await {
-            Ok(result) => result,
-            Err(error) => json!({ "error": error.to_string() }).to_string(),
-        },
+        SEARCH_ENTRIES_TOOL => {
+            match search_entries_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
         STORE_ENTRY_TOOL => match store_entry_tool(state, &tool_call.function.arguments).await {
             Ok(result) => result,
             Err(error) => json!({ "error": error.to_string() }).to_string(),
@@ -783,14 +787,18 @@ async fn execute_server_tool(state: &AppState, tool_call: &AssistantToolCall) ->
             Ok(result) => result,
             Err(error) => json!({ "error": error.to_string() }).to_string(),
         },
-        CREATE_GRAPH_EDGE_TOOL => match create_graph_edge_tool(state, &tool_call.function.arguments).await {
-            Ok(result) => result,
-            Err(error) => json!({ "error": error.to_string() }).to_string(),
-        },
-        DELETE_GRAPH_EDGE_TOOL => match delete_graph_edge_tool(state, &tool_call.function.arguments).await {
-            Ok(result) => result,
-            Err(error) => json!({ "error": error.to_string() }).to_string(),
-        },
+        CREATE_GRAPH_EDGE_TOOL => {
+            match create_graph_edge_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
+        DELETE_GRAPH_EDGE_TOOL => {
+            match delete_graph_edge_tool(state, &tool_call.function.arguments).await {
+                Ok(result) => result,
+                Err(error) => json!({ "error": error.to_string() }).to_string(),
+            }
+        }
         INGEST_WEB_CONTENT_TOOL => {
             match ingest_web_content_tool(state, &tool_call.function.arguments).await {
                 Ok(result) => result,
@@ -838,32 +846,37 @@ async fn search_entries_tool(
     let query = arguments.query;
     let source_id = arguments.source_id;
 
-    let results = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
-        let embedding = embedder.embed(&query)?;
-        let hits = if hybrid {
-            store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
-        } else {
-            store.search(&embedding, top_k, source_id.as_deref())?
-        };
+    let results =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
+            let embedding = embedder.embed(&query)?;
+            let hits = if hybrid {
+                store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
+            } else {
+                store.search(&embedding, top_k, source_id.as_deref())?
+            };
 
-        Ok(hits
-            .into_iter()
-            .filter(|hit| hit.distance <= max_distance)
-            .map(SearchResultPayload::from)
-            .collect())
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+            Ok(hits
+                .into_iter()
+                .filter(|hit| hit.distance <= max_distance)
+                .map(SearchResultPayload::from)
+                .collect())
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
 
     Ok(serde_json::to_string(&SearchToolResponse {
-        generated_at: current_timestamp_millis().map_err(|error| ApiError::Internal(anyhow!(error.to_string())))?,
+        generated_at: current_timestamp_millis()
+            .map_err(|error| ApiError::Internal(anyhow!(error.to_string())))?,
         results,
     })
     .map_err(|error| ApiError::Internal(anyhow!(error).context("failed to encode tool result")))?)
 }
 
-async fn store_entry_tool(state: &AppState, arguments: &str) -> std::result::Result<String, ApiError> {
+async fn store_entry_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
     let arguments: StoreEntryArguments = serde_json::from_str(arguments)
         .with_context(|| format!("invalid arguments for {STORE_ENTRY_TOOL}"))
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
@@ -910,7 +923,10 @@ async fn list_categories_tool(state: &AppState) -> std::result::Result<String, A
     .map_err(|error| ApiError::Internal(anyhow!(error)))?)
 }
 
-async fn list_items_tool(state: &AppState, arguments: &str) -> std::result::Result<String, ApiError> {
+async fn list_items_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
     let arguments: ListItemsArguments = serde_json::from_str(arguments)
         .with_context(|| format!("invalid arguments for {LIST_ITEMS_TOOL}"))
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
@@ -1145,7 +1161,10 @@ async fn read_file_range_tool(
 
     let file_id = arguments.file_id;
     // Basic path traversal protection: only allow alphanumeric + dashes/underscores
-    if !file_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !file_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ApiError::BadRequest("invalid file_id".to_owned()));
     }
 
@@ -1160,7 +1179,7 @@ async fn read_file_range_tool(
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
-    
+
     let start = arguments.start_line.saturating_sub(1);
     let end = arguments.end_line.min(total_lines);
 
@@ -1170,7 +1189,8 @@ async fn read_file_range_tool(
             "total_lines": total_lines,
             "message": "requested range is out of bounds or empty",
             "content": ""
-        }).to_string());
+        })
+        .to_string());
     }
 
     let range_content = lines[start..end].join("\n");
@@ -1181,7 +1201,8 @@ async fn read_file_range_tool(
         "end_line": end,
         "total_lines": total_lines,
         "content": range_content
-    }).to_string())
+    })
+    .to_string())
 }
 
 async fn ingest_web_content_tool(
@@ -1196,11 +1217,12 @@ async fn ingest_web_content_tool(
     validate_non_empty("url", &arguments.url)?;
 
     let html_content = if let Some(cdp_url) = state.openai_chat.cdp_url.as_deref() {
-        // Simple CDP-like fetch via reqwest if CDP_URL is provided, 
-        // otherwise fallback to normal fetch. 
+        // Simple CDP-like fetch via reqwest if CDP_URL is provided,
+        // otherwise fallback to normal fetch.
         // For simplicity and to avoid complex CDP implementation, we fetch directly for now.
         tracing::info!(url = %arguments.url, cdp_url = %cdp_url, "fetching via CDP (simulated)");
-        state.http_client
+        state
+            .http_client
             .get(&arguments.url)
             .send()
             .await
@@ -1209,7 +1231,8 @@ async fn ingest_web_content_tool(
             .await
             .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to read response text")))?
     } else {
-        state.http_client
+        state
+            .http_client
             .get(&arguments.url)
             .send()
             .await
@@ -1221,26 +1244,31 @@ async fn ingest_web_content_tool(
 
     let cleaned_markdown = tokio::task::spawn_blocking(move || {
         let document = Html::parse_document(&html_content);
-        
+
         // Actually, html2md is quite good. Let's try to refine the HTML before passing it.
         // We can use scraper to get the main content area if possible (main, article, or body).
         let main_selector = Selector::parse("main, [role='main'], article, body").unwrap();
-        let content_html = document.select(&main_selector)
+        let content_html = document
+            .select(&main_selector)
             .next()
             .map(|el| el.html())
             .unwrap_or_else(|| document.html());
 
         let markdown = html2md::parse_html(&content_html);
         markdown
-    }).await.map_err(ApiError::TaskJoin)?;
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?;
 
     let id = resolve_store_id(None);
     let (is_large, file_id) = if cleaned_markdown.len() > 20000 {
         let file_id = id.clone();
         let path = format!("data/research/{}.md", file_id);
-        tokio::fs::write(&path, &cleaned_markdown).await.map_err(|e| {
-            ApiError::Internal(anyhow!(e).context("failed to save large research file"))
-        })?;
+        tokio::fs::write(&path, &cleaned_markdown)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(anyhow!(e).context("failed to save large research file"))
+            })?;
         (true, Some(file_id))
     } else {
         (false, None)
@@ -1251,7 +1279,7 @@ async fn ingest_web_content_tool(
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
-    
+
     let mut metadata = arguments.metadata.unwrap_or_else(|| json!({}));
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("source_url".to_owned(), json!(arguments.url));
@@ -1263,8 +1291,8 @@ async fn ingest_web_content_tool(
 
     let text_for_rag = if is_large {
         format!(
-            "Large content ingested from {}. Saved to research file: {}. \n\nPreview:\n{}", 
-            arguments.url, 
+            "Large content ingested from {}. Saved to research file: {}. \n\nPreview:\n{}",
+            arguments.url,
             file_id.as_ref().unwrap(),
             &cleaned_markdown[..2000.min(cleaned_markdown.len())]
         )
@@ -1304,7 +1332,8 @@ async fn ingest_web_content_tool(
             "url": arguments.url,
             "content": cleaned_markdown,
             "markdown_length": cleaned_markdown.len()
-        }).to_string())
+        })
+        .to_string())
     }
 }
 
@@ -1411,13 +1440,15 @@ fn encode_done_event() -> Bytes {
 }
 
 fn encode_error_event(message: &str) -> Bytes {
-    encode_data_event(&json!({
-        "error": {
-            "message": message,
-            "type": "server_error"
-        }
-    })
-    .to_string())
+    encode_data_event(
+        &json!({
+            "error": {
+                "message": message,
+                "type": "server_error"
+            }
+        })
+        .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -1426,7 +1457,7 @@ mod tests {
     use crate::{
         api::EmbedderHandle,
         config::{AuthConfig, OpenAiChatConfig},
-        db::{GraphConfig, ItemRecord, SqliteVectorStore, VectorStore},
+        db::{AuthStore, GraphConfig, ItemRecord, SqliteVectorStore, VectorStore},
         embedding::EmbeddingService,
     };
     use std::sync::Arc;
@@ -1499,7 +1530,10 @@ mod tests {
             parallel_tool_calls: None,
             extra: HashMap::from([
                 ("return_progress".to_owned(), Value::Bool(true)),
-                ("reasoning_format".to_owned(), Value::String("auto".to_owned())),
+                (
+                    "reasoning_format".to_owned(),
+                    Value::String("auto".to_owned()),
+                ),
             ]),
         };
 
@@ -1510,7 +1544,10 @@ mod tests {
             .expect("message should be object");
 
         assert_eq!(message.get("role"), Some(&Value::String("user".to_owned())));
-        assert_eq!(message.get("content"), Some(&Value::String("hi".to_owned())));
+        assert_eq!(
+            message.get("content"),
+            Some(&Value::String("hi".to_owned()))
+        );
         assert_eq!(message.get("name"), None);
         assert_eq!(message.get("tool_call_id"), None);
         assert_eq!(message.get("tool_calls"), None);
@@ -1518,7 +1555,10 @@ mod tests {
         assert_eq!(payload.get("max_completion_tokens"), None);
         assert_eq!(payload.get("parallel_tool_calls"), None);
         assert_eq!(payload["return_progress"], Value::Bool(true));
-        assert_eq!(payload["reasoning_format"], Value::String("auto".to_owned()));
+        assert_eq!(
+            payload["reasoning_format"],
+            Value::String("auto".to_owned())
+        );
     }
 
     #[test]
@@ -1581,7 +1621,8 @@ mod tests {
 
         let state = AppState::new(
             Arc::new(EmbedderHandle::ready(Arc::new(MockEmbedder))),
-            store as Arc<dyn VectorStore>,
+            store.clone() as Arc<dyn VectorStore>,
+            store as Arc<dyn AuthStore>,
             AuthConfig::default(),
             OpenAiChatConfig {
                 timeout_secs: 60,
@@ -1598,6 +1639,9 @@ mod tests {
 
         let parsed: Value = serde_json::from_str(&result).expect("tool output should be JSON");
         assert_eq!(parsed["results"].as_array().map(Vec::len), Some(1));
-        assert_eq!(parsed["results"][0]["id"], Value::String("doc-1".to_owned()));
+        assert_eq!(
+            parsed["results"][0]["id"],
+            Value::String("doc-1".to_owned())
+        );
     }
 }

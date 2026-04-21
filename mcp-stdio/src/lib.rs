@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+pub mod login;
 pub mod server;
 
 pub use client::RustRagHttpClient;

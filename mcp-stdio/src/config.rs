@@ -1,9 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use std::{
-    collections::BTreeSet,
-    env,
-    time::Duration,
-};
+use std::{collections::BTreeSet, env, time::Duration};
 
 const DEFAULT_API_BASE_URL: &str = "https://rag.k6n.net";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -264,11 +260,13 @@ mod tests {
 
     #[test]
     fn rejects_empty_tool_group_set() {
-        let error = BridgeConfig::from_env_map(vars(&[("RAG_MCP_TOOL_GROUPS", " , ")]))
-            .unwrap_err();
+        let error =
+            BridgeConfig::from_env_map(vars(&[("RAG_MCP_TOOL_GROUPS", " , ")])).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("at least one MCP tool group must be enabled"));
+        assert!(
+            error
+                .to_string()
+                .contains("at least one MCP tool group must be enabled")
+        );
     }
 }

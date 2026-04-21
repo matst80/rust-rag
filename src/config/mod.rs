@@ -13,12 +13,37 @@ pub struct ApiKeyConfig {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub enabled: bool,
     pub frontend_api_key: Option<String>,
     pub session_secret: Option<String>,
     pub api_keys: Vec<ApiKeyConfig>,
+    pub app_base_url: Option<String>,
+    pub device_code_ttl_secs: u64,
+    pub device_code_interval_secs: u64,
+    pub mcp_token_ttl_days: Option<u64>,
+    pub mcp_allowed_hosts: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frontend_api_key: None,
+            session_secret: None,
+            api_keys: Vec::new(),
+            app_base_url: None,
+            device_code_ttl_secs: 600,
+            device_code_interval_secs: 5,
+            mcp_token_ttl_days: None,
+            mcp_allowed_hosts: default_mcp_allowed_hosts(),
+        }
+    }
+}
+
+fn default_mcp_allowed_hosts() -> Vec<String> {
+    vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
 }
 
 #[derive(Debug, Clone, Default)]
@@ -78,7 +103,11 @@ impl AppConfig {
         let api_keys = parse_api_keys(env::var("RAG_API_KEYS").ok())?;
         let openai_api_key = non_empty_var("RAG_OPENAI_API_KEY");
         let openai_base_url = non_empty_var("RAG_OPENAI_API_BASE_URL")
-            .or_else(|| openai_api_key.as_ref().map(|_| "https://api.openai.com/v1".to_owned()))
+            .or_else(|| {
+                openai_api_key
+                    .as_ref()
+                    .map(|_| "https://api.openai.com/v1".to_owned())
+            })
             .map(|value| value.trim_end_matches('/').to_owned());
         let openai_default_model = non_empty_var("RAG_OPENAI_MODEL");
         let openai_timeout_secs = parse_env("RAG_OPENAI_TIMEOUT_SECS", "60")?;
@@ -113,6 +142,20 @@ impl AppConfig {
                 frontend_api_key,
                 session_secret,
                 api_keys,
+                app_base_url: non_empty_var("RAG_APP_BASE_URL")
+                    .or_else(|| non_empty_var("APP_BASE_URL"))
+                    .map(|value| value.trim_end_matches('/').to_owned()),
+                device_code_ttl_secs: parse_env("RAG_DEVICE_CODE_TTL_SECS", "600")?,
+                device_code_interval_secs: parse_env("RAG_DEVICE_CODE_INTERVAL_SECS", "5")?,
+                mcp_token_ttl_days: non_empty_var("RAG_MCP_TOKEN_TTL_DAYS")
+                    .map(|raw| {
+                        raw.parse::<u64>().map_err(|error| {
+                            anyhow!("failed to parse RAG_MCP_TOKEN_TTL_DAYS={raw:?}: {error}")
+                        })
+                    })
+                    .transpose()?,
+                mcp_allowed_hosts: parse_csv_env("RAG_MCP_ALLOWED_HOSTS")
+                    .unwrap_or_else(default_mcp_allowed_hosts),
             },
             openai_chat: OpenAiChatConfig {
                 base_url: openai_base_url,
@@ -185,4 +228,14 @@ fn non_empty_var(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn parse_csv_env(name: &str) -> Option<Vec<String>> {
+    let raw = non_empty_var(name)?;
+    let parts: Vec<String> = raw
+        .split(',')
+        .map(|part| part.trim().to_owned())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() { None } else { Some(parts) }
 }

@@ -1,9 +1,15 @@
-use crate::{client::RustRagHttpClient, config::{SearchFormat, ToolGroup}};
+use crate::{
+    client::RustRagHttpClient,
+    config::{SearchFormat, ToolGroup},
+};
 use rmcp::{
-    ServerHandler, tool,
-    handler::server::{router::tool::ToolRouter, wrapper::{Json, Parameters}},
+    ServerHandler,
+    handler::server::{
+        router::tool::ToolRouter,
+        wrapper::{Json, Parameters},
+    },
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
-    tool_handler,
+    tool, tool_handler,
 };
 use rust_rag::{
     api::{
@@ -62,11 +68,10 @@ impl RustRagMcpServer {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RustRagMcpServer {
     fn get_info(&self) -> ServerInfo {
-        let info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                self.info.name.clone(),
-                self.info.version.clone(),
-            ));
+        let info =
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+                Implementation::new(self.info.name.clone(), self.info.version.clone()),
+            );
 
         match &self.info.instructions {
             Some(instructions) => info.with_instructions(instructions.clone()),
@@ -111,7 +116,11 @@ impl From<UpdateItemParams> for UpdateItemRequest {
 impl RustRagMcpServer {
     #[tool(description = "Return rust-rag service health and embedder readiness.")]
     async fn health_status(&self) -> Result<Json<rust_rag::api::HealthResponse>, String> {
-        self.client.health().await.map(Json).map_err(stringify_error)
+        self.client
+            .health()
+            .await
+            .map(Json)
+            .map_err(stringify_error)
     }
 
     #[tool(description = "Store a text entry with metadata and source_id in rust-rag.")]
@@ -119,7 +128,11 @@ impl RustRagMcpServer {
         &self,
         Parameters(request): Parameters<StoreRequest>,
     ) -> Result<Json<rust_rag::api::StoreResponse>, String> {
-        self.client.store(&request).await.map(Json).map_err(stringify_error)
+        self.client
+            .store(&request)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
     }
 
     #[tool(
@@ -129,8 +142,16 @@ impl RustRagMcpServer {
         &self,
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
-        let response = self.client.search(&request).await.map_err(stringify_error)?;
-        Ok(format_search_response(&response, &request.query, self.search_format))
+        let response = self
+            .client
+            .search(&request)
+            .await
+            .map_err(stringify_error)?;
+        Ok(format_search_response(
+            &response,
+            &request.query,
+            self.search_format,
+        ))
     }
 
     #[tool(
@@ -287,9 +308,9 @@ fn format_search_response(
             let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
             CallToolResult::structured(value)
         }
-        SearchFormat::Markdown => CallToolResult::success(vec![Content::text(
-            format_search_markdown(response, query),
-        )]),
+        SearchFormat::Markdown => {
+            CallToolResult::success(vec![Content::text(format_search_markdown(response, query))])
+        }
         SearchFormat::Both => {
             let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
             let mut result = CallToolResult::success(vec![Content::text(format_search_markdown(
