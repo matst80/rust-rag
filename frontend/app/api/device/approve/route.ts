@@ -28,12 +28,12 @@ export async function POST(request: NextRequest) {
 			body,
 		})
 
+		const text = await upstream.text()
+
 		if (!upstream.ok) {
-			const errorText = await upstream.text().catch(() => "no body")
-			console.error(`Upstream error (${upstream.status}) from backend: ${errorText}`)
+			console.error(`Upstream error (${upstream.status}) from backend: ${text}`)
 		}
 
-		const text = await upstream.text()
 		return new NextResponse(text, {
 			status: upstream.status,
 			headers: {
