@@ -1472,12 +1472,6 @@ impl ToolCallAccumulator {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct ChatCompletionToolResult {
-    tool_call_id: String,
-    name: String,
-    content: String,
-}
 
 fn encode_data_event(data: &str) -> Bytes {
     Bytes::from(format!("data: {data}\n\n"))

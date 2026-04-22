@@ -473,6 +473,11 @@ async fn require_api_key(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    tracing::debug!(
+        method = %request.method(),
+        path = %request.uri().path(),
+        "checking api key for request"
+    );
     if !state.auth.is_enabled() {
         return Ok(next.run(request).await);
     }

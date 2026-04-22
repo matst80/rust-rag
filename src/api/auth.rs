@@ -140,6 +140,7 @@ async fn require_session(
         .next();
 
     let Some(token) = token else {
+        tracing::debug!("session cookie 'rag_session' missing in request headers");
         return Err(ApiError::Unauthorized("session cookie required".to_owned()));
     };
 
@@ -155,6 +156,8 @@ async fn require_session(
         tracing::warn!(error = %error, "invalid session cookie");
         ApiError::Unauthorized("invalid session cookie".to_owned())
     })?;
+
+    tracing::info!(sub = %claims.claims.sub, "session identified via cookie");
 
     request
         .extensions_mut()
@@ -403,12 +406,25 @@ async fn verify_device(
         return Err(ApiError::BadRequest("user_code required".to_owned()));
     }
     let auth_store = state.auth_store.clone();
+    tracing::debug!(user_code = %user_code, "verifying device auth request");
+
+    let lookup_code = user_code.clone();
     let record =
-        tokio::task::spawn_blocking(move || auth_store.find_device_auth_by_user_code(&user_code))
+        tokio::task::spawn_blocking(move || auth_store.find_device_auth_by_user_code(&lookup_code))
             .await
             .map_err(ApiError::TaskJoin)?
             .map_err(ApiError::Internal)?
-            .ok_or_else(|| ApiError::NotFound("user code not found".to_owned()))?;
+            .ok_or_else(|| {
+                tracing::warn!(user_code = %user_code, "device auth request not found");
+                ApiError::NotFound("user code not found".to_owned())
+            })?;
+
+    tracing::info!(
+        user_code = %record.user_code,
+        status = ?record.status,
+        client_name = ?record.client_name,
+        "device auth request verified"
+    );
 
     Ok(Json(VerifyDeviceResponse {
         user_code: record.user_code,
@@ -446,11 +462,20 @@ async fn approve_device(
     .ok_or_else(|| ApiError::NotFound("user code not found".to_owned()))?;
 
     if record.expires_at <= now {
+        tracing::warn!(user_code = %user_code, "attempted to approve expired code");
         return Err(ApiError::BadRequest("code expired".to_owned()));
     }
     if !matches!(record.status, DeviceAuthStatus::Pending) {
+        tracing::warn!(user_code = %user_code, status = ?record.status, "attempted to approve non-pending code");
         return Err(ApiError::BadRequest("code already used".to_owned()));
     }
+
+    tracing::info!(
+        user_code = %user_code,
+        subject = ?subject.0,
+        client_name = ?record.client_name,
+        "approving device auth request"
+    );
 
     let plaintext = mint_token_plaintext()?;
     let token_hash = hash_token(&plaintext);
@@ -589,7 +614,10 @@ fn verification_base_url(state: &AppState, headers: &HeaderMap) -> String {
 fn random_base64url(bytes: usize) -> Result<String, ApiError> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf)
-        .map_err(|error| ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}")))?;
+        .map_err(|error| {
+            tracing::error!(error = %error, "getrandom failed in random_base64url");
+            ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
+        })?;
     Ok(URL_SAFE_NO_PAD.encode(&buf))
 }
 
@@ -598,7 +626,10 @@ fn random_user_code() -> Result<String, ApiError> {
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut buf = [0u8; 8];
     getrandom::fill(&mut buf)
-        .map_err(|error| ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}")))?;
+        .map_err(|error| {
+            tracing::error!(error = %error, "getrandom failed in random_user_code");
+            ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
+        })?;
     let chars: Vec<char> = buf
         .iter()
         .map(|byte| ALPHABET[(*byte as usize) % ALPHABET.len()] as char)

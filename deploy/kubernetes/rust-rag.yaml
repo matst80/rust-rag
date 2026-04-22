@@ -98,7 +98,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: rust-rag
+  name: rag-service
   labels:
     app.kubernetes.io/name: rust-rag
 spec:

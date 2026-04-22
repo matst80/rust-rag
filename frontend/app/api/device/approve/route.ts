@@ -18,20 +18,30 @@ export async function POST(request: NextRequest) {
 	}
 
 	const body = await request.text()
-	const upstream = await fetch(`${config.backendApiUrl}/auth/device/approve`, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			cookie: `${SESSION_COOKIE_NAME}=${sessionCookie}`,
-		},
-		body,
-	})
+	try {
+		const upstream = await fetch(`${config.backendApiUrl}/auth/device/approve`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				cookie: `${SESSION_COOKIE_NAME}=${sessionCookie}`,
+			},
+			body,
+		})
 
-	const text = await upstream.text()
-	return new NextResponse(text, {
-		status: upstream.status,
-		headers: {
-			"content-type": upstream.headers.get("content-type") ?? "application/json",
-		},
-	})
+		if (!upstream.ok) {
+			const errorText = await upstream.text().catch(() => "no body")
+			console.error(`Upstream error (${upstream.status}) from backend: ${errorText}`)
+		}
+
+		const text = await upstream.text()
+		return new NextResponse(text, {
+			status: upstream.status,
+			headers: {
+				"content-type": upstream.headers.get("content-type") ?? "application/json",
+			},
+		})
+	} catch (error) {
+		console.error("Backend fetch failed in /api/device/approve:", error)
+		return NextResponse.json({ error: "Backend communication failed" }, { status: 500 })
+	}
 }
