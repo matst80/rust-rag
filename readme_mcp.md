@@ -199,11 +199,15 @@ preserved:
 
 - `POST /api/device/approve` → backend `/auth/device/approve`
 - `GET  /api/device/verify` → backend `/auth/device/verify`
-- `GET  /api/tokens` → backend `/auth/tokens`
-- `DELETE /api/tokens/[id]` → backend `/auth/tokens/{id}`
 
-This avoids opening a blanket `/auth/*` rewrite in `next.config.mjs` — the
-auth path prefix stays owned by Next (callback, login, logout, session).
+Token management (`/auth/tokens`, `/auth/tokens/{id}`) is routed directly to
+the backend via the ingress — the browser talks to the backend same-origin
+and the session cookie rides along. The backend route also handles its own
+session validation, so no Next.js proxy layer is needed.
+
+The auth path prefix otherwise stays owned by Next (callback, login, logout,
+session) — only the explicitly-listed `/auth/*` paths are forwarded by the
+ingress.
 
 ## Token format and lifecycle
 
@@ -290,5 +294,7 @@ checker doesn't.
   token file fallback.
 - `frontend/app/auth/device/`, `frontend/app/auth/tokens/`,
   `frontend/components/auth/` — Next.js UI.
-- `frontend/app/api/device/`, `frontend/app/api/tokens/` — session-aware
-  proxies to the backend auth endpoints.
+- `frontend/app/api/device/` — session-aware proxies to the backend device-
+  auth endpoints (approve/verify).
+- `deploy/kubernetes/rust-rag-ingress.yaml` — routes `/auth/tokens*` and
+  selected `/auth/device/*` paths straight to the backend.

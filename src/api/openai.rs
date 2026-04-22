@@ -1211,16 +1211,54 @@ async fn read_file_range_tool(
         .to_string());
     }
 
-    let range_content = lines[start..end].join("\n");
+    const MAX_LINES: usize = 500;
+    const MAX_BYTES: usize = 40_000;
 
-    Ok(json!({
+    let mut effective_end = end.min(start + MAX_LINES);
+    let mut range_content = lines[start..effective_end].join("\n");
+    let mut truncated_reason: Option<&str> = if effective_end < end {
+        Some("line_cap")
+    } else {
+        None
+    };
+
+    if range_content.len() > MAX_BYTES {
+        let mut byte_budget = MAX_BYTES;
+        let mut new_end = start;
+        for line in &lines[start..effective_end] {
+            let needed = line.len() + 1;
+            if needed > byte_budget {
+                break;
+            }
+            byte_budget -= needed;
+            new_end += 1;
+        }
+        if new_end <= start {
+            new_end = start + 1;
+        }
+        effective_end = new_end;
+        range_content = lines[start..effective_end].join("\n");
+        truncated_reason = Some("byte_cap");
+    }
+
+    let mut response = json!({
         "file_id": file_id,
         "start_line": start + 1,
-        "end_line": end,
+        "end_line": effective_end,
         "total_lines": total_lines,
-        "content": range_content
-    })
-    .to_string())
+        "content": range_content,
+    });
+    if let Some(reason) = truncated_reason {
+        response["truncated"] = json!(true);
+        response["truncation_reason"] = json!(reason);
+        response["message"] = json!(format!(
+            "Range truncated (cap: {} lines / {} bytes). Request a smaller range to continue reading from line {}.",
+            MAX_LINES,
+            MAX_BYTES,
+            effective_end + 1
+        ));
+    }
+    Ok(response.to_string())
 }
 
 async fn ingest_web_content_tool(
@@ -1281,7 +1319,11 @@ async fn ingest_web_content_tool(
     let id = resolve_store_id(None);
     let (is_large, file_id) = if cleaned_markdown.len() > 20000 {
         let file_id = id.clone();
-        let path = format!("data/research/{}.md", file_id);
+        let dir = std::path::Path::new("data/research");
+        tokio::fs::create_dir_all(dir).await.map_err(|e| {
+            ApiError::Internal(anyhow!(e).context("failed to create research directory"))
+        })?;
+        let path = dir.join(format!("{}.md", file_id));
         tokio::fs::write(&path, &cleaned_markdown)
             .await
             .map_err(|e| {

@@ -7,6 +7,10 @@ name = "rust-rag"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+cuda = ["ort/cuda"]
+
 [dependencies]
 anyhow = "1.0.102"
 async-stream = "0.3.6"

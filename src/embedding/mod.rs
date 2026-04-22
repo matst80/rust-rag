@@ -165,7 +165,7 @@ impl OrtBackend {
         println!("embedder: creating session builder");
         let mut builder = Session::builder()
             .map_err(ort_error)?
-            .with_execution_providers([CPUExecutionProvider::default().build()])
+            .with_execution_providers(execution_providers())
             .map_err(ort_error)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(ort_error)?
@@ -214,6 +214,38 @@ impl InferenceBackend for OrtBackend {
             .to_owned()
             .into_dimensionality::<ndarray::Ix3>()?)
     }
+}
+
+#[cfg(feature = "cuda")]
+fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    use ort::ep::{ArenaExtendStrategy, CUDA, cuda::ConvAlgorithmSearch};
+
+    let mem_limit_mb: usize = std::env::var("RAG_CUDA_MEM_LIMIT_MB")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2048);
+    let device_id: i32 = std::env::var("RAG_CUDA_DEVICE_ID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+
+    let cuda = CUDA::default()
+        .with_device_id(device_id)
+        .with_memory_limit(mem_limit_mb * 1024 * 1024)
+        .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+        .with_conv_algorithm_search(ConvAlgorithmSearch::Heuristic)
+        .with_conv_max_workspace(false)
+        .build();
+
+    println!(
+        "embedder: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB) with CPU fallback"
+    );
+    vec![cuda, CPUExecutionProvider::default().build()]
+}
+
+#[cfg(not(feature = "cuda"))]
+fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    vec![CPUExecutionProvider::default().build()]
 }
 
 fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {

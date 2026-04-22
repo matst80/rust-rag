@@ -18,7 +18,7 @@ interface ListTokensResponse {
 	tokens: TokenSummary[]
 }
 
-const TOKENS_ENDPOINT = "/api/tokens"
+const TOKENS_ENDPOINT = "/auth/tokens"
 
 async function fetcher(url: string): Promise<ListTokensResponse> {
 	const response = await fetch(url)
@@ -47,7 +47,7 @@ export function TokensList() {
 		}
 		setRevoking(id)
 		try {
-			const response = await fetch(`/api/tokens/${encodeURIComponent(id)}`, {
+			const response = await fetch(`/auth/tokens/${encodeURIComponent(id)}`, {
 				method: "DELETE",
 			})
 			if (!response.ok) {

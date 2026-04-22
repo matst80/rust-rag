@@ -1,14 +1,29 @@
+mod auth;
+mod graph;
+mod schema;
+
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlite_vec::sqlite3_vec_init;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Mutex, Once},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use graph::{
+    list_graph_edges_internal, list_pairwise_distances_for_ids, rebuild_similarity_graph_locked,
+};
+use schema::{initialize_schema, register_sqlite_vec};
+
+/// Reciprocal Rank Fusion ranking constant. 60 is the value from the original
+/// RRF paper (Cormack et al.) and is the de-facto default across search systems.
+const RRF_K: f32 = 60.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemRecord {
@@ -282,6 +297,10 @@ pub trait VectorStore: Send + Sync {
 pub struct SqliteVectorStore {
     connection: Mutex<Option<Connection>>,
     graph_config: GraphConfig,
+    /// Set on every write that invalidates the similarity graph. The graph is
+    /// rebuilt lazily on the next graph read (or explicit rebuild call) so
+    /// bulk imports don't pay O(N²) graph work per row.
+    graph_dirty: AtomicBool,
 }
 
 impl SqliteVectorStore {
@@ -341,7 +360,30 @@ impl SqliteVectorStore {
         Ok(Self {
             connection: Mutex::new(Some(connection)),
             graph_config,
+            graph_dirty: AtomicBool::new(false),
         })
+    }
+
+    /// If the graph is dirty and enabled, rebuild it now. Must not be called
+    /// while holding `self.connection` — takes the lock itself.
+    fn ensure_graph_fresh(&self) -> Result<()> {
+        if !self.graph_config.enabled {
+            return Ok(());
+        }
+        if !self.graph_dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        // Re-check under the lock — another caller may have just flushed.
+        if !self.graph_dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        rebuild_similarity_graph_locked(connection, self.graph_config)?;
+        self.graph_dirty.store(false, Ordering::Release);
+        Ok(())
     }
 
     fn ensure_graph_enabled(&self) -> Result<()> {
@@ -397,7 +439,7 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.commit()?;
         if self.graph_config.enabled {
-            rebuild_similarity_graph_locked(connection, self.graph_config)?;
+            self.graph_dirty.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -525,17 +567,10 @@ impl VectorStore for SqliteVectorStore {
                 ",
             )?;
 
-            let rows =
-                fts_stmt.query_map(params![fts_query, source_id, (top_k * 2) as i64], |row| {
-                    Ok(SearchHit {
-                        id: row.get(0)?,
-                        text: row.get(1)?,
-                        metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
-                        source_id: row.get(3)?,
-                        created_at: row.get(4)?,
-                        distance: row.get::<_, f32>(5)?,
-                    })
-                })?;
+            let rows = fts_stmt.query_map(
+                params![fts_query, source_id, (top_k * 2) as i64],
+                map_search_row,
+            )?;
 
             for row in rows {
                 keyword_hits.push(row?);
@@ -543,8 +578,8 @@ impl VectorStore for SqliteVectorStore {
         }
 
         // 3. Reciprocal Rank Fusion (RRF)
-        // score = 1 / (k + rank_vector) + 1 / (k + rank_keyword)
-        let k = 60.0;
+        // score = 1 / (RRF_K + rank_vector) + 1 / (RRF_K + rank_keyword)
+        let k = RRF_K;
         let mut rrf_scores: HashMap<String, f32> = HashMap::new();
         let mut hit_map: HashMap<String, SearchHit> = HashMap::new();
 
@@ -684,13 +719,14 @@ impl VectorStore for SqliteVectorStore {
         transaction.commit()?;
 
         if deleted > 0 && self.graph_config.enabled {
-            rebuild_similarity_graph_locked(connection, self.graph_config)?;
+            self.graph_dirty.store(true, Ordering::Release);
         }
 
         Ok(deleted > 0)
     }
 
     fn graph_status(&self) -> Result<GraphStatus> {
+        self.ensure_graph_fresh()?;
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -729,6 +765,7 @@ impl VectorStore for SqliteVectorStore {
         if limit == 0 {
             anyhow::bail!("limit must be greater than zero");
         }
+        self.ensure_graph_fresh()?;
 
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
@@ -797,6 +834,7 @@ impl VectorStore for SqliteVectorStore {
         edge_type: Option<GraphEdgeType>,
     ) -> Result<Vec<GraphEdgeRecord>> {
         self.ensure_graph_enabled()?;
+        self.ensure_graph_fresh()?;
 
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
@@ -812,7 +850,9 @@ impl VectorStore for SqliteVectorStore {
         let connection = guard
             .as_mut()
             .context("sqlite connection has already been closed")?;
-        rebuild_similarity_graph_locked(connection, self.graph_config)
+        let rebuilt = rebuild_similarity_graph_locked(connection, self.graph_config)?;
+        self.graph_dirty.store(false, Ordering::Release);
+        Ok(rebuilt)
     }
 
     fn add_manual_edge(&self, mut input: ManualEdgeInput) -> Result<GraphEdgeRecord> {
@@ -917,372 +957,6 @@ impl VectorStore for SqliteVectorStore {
     }
 }
 
-impl AuthStore for SqliteVectorStore {
-    fn create_mcp_token(&self, token: NewMcpToken) -> Result<McpTokenRecord> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-
-        connection.execute(
-            "
-            INSERT INTO mcp_tokens (id, token_hash, name, subject, created_at, expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ",
-            params![
-                token.id,
-                token.token_hash,
-                token.name,
-                token.subject,
-                token.created_at,
-                token.expires_at,
-            ],
-        )?;
-
-        Ok(McpTokenRecord {
-            id: token.id,
-            name: token.name,
-            subject: token.subject,
-            created_at: token.created_at,
-            last_used_at: None,
-            expires_at: token.expires_at,
-        })
-    }
-
-    fn find_mcp_token_by_hash(&self, hash: &str) -> Result<Option<McpTokenRecord>> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-
-        let mut statement = connection.prepare(
-            "
-            SELECT id, name, subject, created_at, last_used_at, expires_at
-            FROM mcp_tokens
-            WHERE token_hash = ?1
-            ",
-        )?;
-        let record = statement
-            .query_row(params![hash], map_mcp_token_row)
-            .optional()?;
-        Ok(record)
-    }
-
-    fn touch_mcp_token(&self, id: &str, now: i64) -> Result<()> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        connection.execute(
-            "UPDATE mcp_tokens SET last_used_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )?;
-        Ok(())
-    }
-
-    fn list_mcp_tokens(&self, subject: Option<&str>) -> Result<Vec<McpTokenRecord>> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-
-        let mut statement = connection.prepare(
-            "
-            SELECT id, name, subject, created_at, last_used_at, expires_at
-            FROM mcp_tokens
-            WHERE (?1 IS NULL OR subject = ?1)
-            ORDER BY created_at DESC
-            ",
-        )?;
-        let rows = statement.query_map(params![subject], map_mcp_token_row)?;
-        let mut tokens = Vec::new();
-        for row in rows {
-            tokens.push(row?);
-        }
-        Ok(tokens)
-    }
-
-    fn delete_mcp_token(&self, id: &str, subject: Option<&str>) -> Result<bool> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let affected = connection.execute(
-            "DELETE FROM mcp_tokens WHERE id = ?1 AND (?2 IS NULL OR subject = ?2)",
-            params![id, subject],
-        )?;
-        Ok(affected > 0)
-    }
-
-    fn create_device_auth(&self, request: NewDeviceAuth) -> Result<DeviceAuthRecord> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-
-        connection.execute(
-            "
-            INSERT INTO device_auth_requests
-                (device_code, user_code, status, client_name, created_at, expires_at, interval_secs)
-            VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6)
-            ",
-            params![
-                request.device_code,
-                request.user_code,
-                request.client_name,
-                request.created_at,
-                request.expires_at,
-                request.interval_secs,
-            ],
-        )?;
-
-        Ok(DeviceAuthRecord {
-            device_code: request.device_code,
-            user_code: request.user_code,
-            status: DeviceAuthStatus::Pending,
-            token_id: None,
-            subject: None,
-            client_name: request.client_name,
-            created_at: request.created_at,
-            expires_at: request.expires_at,
-            interval_secs: request.interval_secs,
-            last_polled_at: None,
-        })
-    }
-
-    fn find_device_auth_by_device_code(
-        &self,
-        device_code: &str,
-    ) -> Result<Option<DeviceAuthRecord>> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let mut statement = connection.prepare(
-            "
-            SELECT device_code, user_code, status, token_id, subject, client_name,
-                   created_at, expires_at, interval_secs, last_polled_at
-            FROM device_auth_requests
-            WHERE device_code = ?1
-            ",
-        )?;
-        let record = statement
-            .query_row(params![device_code], map_device_auth_row)
-            .optional()?;
-        Ok(record)
-    }
-
-    fn find_device_auth_by_user_code(&self, user_code: &str) -> Result<Option<DeviceAuthRecord>> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let mut statement = connection.prepare(
-            "
-            SELECT device_code, user_code, status, token_id, subject, client_name,
-                   created_at, expires_at, interval_secs, last_polled_at
-            FROM device_auth_requests
-            WHERE user_code = ?1
-            ",
-        )?;
-        let record = statement
-            .query_row(params![user_code], map_device_auth_row)
-            .optional()?;
-        Ok(record)
-    }
-
-    fn approve_device_auth(
-        &self,
-        user_code: &str,
-        token_id: &str,
-        subject: Option<&str>,
-        now: i64,
-    ) -> Result<bool> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let affected = connection.execute(
-            "
-            UPDATE device_auth_requests
-            SET status = 'approved', token_id = ?1, subject = ?2
-            WHERE user_code = ?3 AND status = 'pending' AND expires_at > ?4
-            ",
-            params![token_id, subject, user_code, now],
-        )?;
-        Ok(affected > 0)
-    }
-
-    fn touch_device_poll(&self, device_code: &str, now: i64) -> Result<()> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        connection.execute(
-            "UPDATE device_auth_requests SET last_polled_at = ?1 WHERE device_code = ?2",
-            params![now, device_code],
-        )?;
-        Ok(())
-    }
-
-    fn expire_device_auths(&self, now: i64) -> Result<usize> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let affected = connection.execute(
-            "
-            UPDATE device_auth_requests
-            SET status = 'expired'
-            WHERE status = 'pending' AND expires_at <= ?1
-            ",
-            params![now],
-        )?;
-        Ok(affected)
-    }
-}
-
-fn map_mcp_token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpTokenRecord> {
-    Ok(McpTokenRecord {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        subject: row.get(2)?,
-        created_at: row.get(3)?,
-        last_used_at: row.get(4)?,
-        expires_at: row.get(5)?,
-    })
-}
-
-fn map_device_auth_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceAuthRecord> {
-    let status: String = row.get(2)?;
-    let status = DeviceAuthStatus::from_str(&status).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, error.into())
-    })?;
-    Ok(DeviceAuthRecord {
-        device_code: row.get(0)?,
-        user_code: row.get(1)?,
-        status,
-        token_id: row.get(3)?,
-        subject: row.get(4)?,
-        client_name: row.get(5)?,
-        created_at: row.get(6)?,
-        expires_at: row.get(7)?,
-        interval_secs: row.get(8)?,
-        last_polled_at: row.get(9)?,
-    })
-}
-
-fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Result<()> {
-    connection.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS items (
-            id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            metadata TEXT NOT NULL CHECK (json_valid(metadata)),
-            source_id TEXT NOT NULL DEFAULT 'default',
-            created_at INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_items_source_id ON items(source_id);
-        CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at DESC);
-
-        -- FTS5 virtual table for keyword search
-        CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-            id UNINDEXED,
-            text,
-            content='items',
-            content_rowid='rowid'
-        );
-
-        -- Triggers to keep FTS in sync with items table
-        CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
-            INSERT INTO items_fts(rowid, id, text) VALUES (new.rowid, new.id, new.text);
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, id, text) VALUES('delete', old.rowid, old.id, old.text);
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, id, text) VALUES('delete', old.rowid, old.id, old.text);
-            INSERT INTO items_fts(rowid, id, text) VALUES (new.rowid, new.id, new.text);
-        END;
-
-        -- Backfill FTS if it's empty but items has data
-        INSERT OR IGNORE INTO items_fts(rowid, id, text)
-        SELECT rowid, id, text FROM items WHERE rowid NOT IN (SELECT rowid FROM items_fts);
-
-        CREATE TABLE IF NOT EXISTS graph_edges (
-            id TEXT PRIMARY KEY,
-            from_item_id TEXT NOT NULL,
-            to_item_id TEXT NOT NULL,
-            edge_type TEXT NOT NULL CHECK (edge_type IN ('similarity', 'manual')),
-            relation TEXT,
-            weight REAL NOT NULL,
-            directed INTEGER NOT NULL DEFAULT 0 CHECK (directed IN (0, 1)),
-            metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata)),
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            FOREIGN KEY(from_item_id) REFERENCES items(id) ON DELETE CASCADE,
-            FOREIGN KEY(to_item_id) REFERENCES items(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_item_id);
-        CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_item_id);
-        CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_similarity_pair
-            ON graph_edges(from_item_id, to_item_id, edge_type)
-            WHERE edge_type = 'similarity';
-
-        CREATE TABLE IF NOT EXISTS mcp_tokens (
-            id TEXT PRIMARY KEY,
-            token_hash TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL,
-            subject TEXT,
-            created_at INTEGER NOT NULL,
-            last_used_at INTEGER,
-            expires_at INTEGER
-        );
-        CREATE INDEX IF NOT EXISTS idx_mcp_tokens_subject ON mcp_tokens(subject);
-
-        CREATE TABLE IF NOT EXISTS device_auth_requests (
-            device_code TEXT PRIMARY KEY,
-            user_code TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
-            token_id TEXT REFERENCES mcp_tokens(id) ON DELETE SET NULL,
-            subject TEXT,
-            client_name TEXT,
-            created_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL,
-            interval_secs INTEGER NOT NULL DEFAULT 5,
-            last_polled_at INTEGER
-        );
-        CREATE INDEX IF NOT EXISTS idx_device_auth_status ON device_auth_requests(status);
-        CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth_requests(expires_at);
-        ",
-    )?;
-    ensure_column_exists(
-        connection,
-        "items",
-        "source_id",
-        "TEXT NOT NULL DEFAULT 'default'",
-    )?;
-    ensure_column_exists(
-        connection,
-        "items",
-        "created_at",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-
-    connection.execute_batch(&format!(
-        "
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
-            id TEXT PRIMARY KEY,
-            embedding FLOAT[{embedding_dimension}]
-        );
-        "
-    ))?;
-
-    Ok(())
-}
 
 fn list_items_internal(
     connection: &Connection,
@@ -1340,216 +1014,6 @@ fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRec
     }
 }
 
-fn list_graph_edges_internal(
-    connection: &Connection,
-    item_id: Option<&str>,
-    edge_type: Option<GraphEdgeType>,
-) -> Result<Vec<GraphEdgeRecord>> {
-    let edge_type = edge_type.map(GraphEdgeType::as_str);
-    let mut statement = connection.prepare(
-        "
-        SELECT
-            id,
-            from_item_id,
-            to_item_id,
-            edge_type,
-            relation,
-            weight,
-            directed,
-            metadata,
-            created_at,
-            updated_at
-        FROM graph_edges
-        WHERE (?1 IS NULL OR from_item_id = ?1 OR to_item_id = ?1)
-          AND (?2 IS NULL OR edge_type = ?2)
-        ORDER BY updated_at DESC, id ASC
-        ",
-    )?;
-    let rows = statement.query_map(params![item_id, edge_type], map_graph_edge_row)?;
-
-    let mut edges = Vec::new();
-    for row in rows {
-        edges.push(row?);
-    }
-    Ok(edges)
-}
-
-fn list_pairwise_distances_for_ids(
-    connection: &Connection,
-    ids: &[String],
-) -> Result<Vec<GraphNodeDistance>> {
-    if ids.len() < 2 {
-        return Ok(Vec::new());
-    }
-
-    let placeholders = std::iter::repeat("?")
-        .take(ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "
-        SELECT
-            left_vec.id,
-            right_vec.id,
-            CAST(vec_distance_L2(left_vec.embedding, right_vec.embedding) AS REAL) AS distance
-        FROM vec_items AS left_vec
-        JOIN vec_items AS right_vec ON left_vec.id < right_vec.id
-        WHERE left_vec.id IN ({placeholders})
-          AND right_vec.id IN ({placeholders})
-        ORDER BY left_vec.id ASC, right_vec.id ASC
-        "
-    );
-
-    let mut statement = connection.prepare(&sql)?;
-    let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(ids.len() * 2);
-    for id in ids {
-        params_vec.push(id);
-    }
-    for id in ids {
-        params_vec.push(id);
-    }
-
-    let rows = statement.query_map(rusqlite::params_from_iter(params_vec), |row| {
-        Ok(GraphNodeDistance {
-            from_item_id: row.get(0)?,
-            to_item_id: row.get(1)?,
-            distance: row.get(2)?,
-        })
-    })?;
-
-    let mut distances = Vec::new();
-    for row in rows {
-        distances.push(row?);
-    }
-    Ok(distances)
-}
-
-fn rebuild_similarity_graph_locked(
-    connection: &mut Connection,
-    graph_config: GraphConfig,
-) -> Result<usize> {
-    if !graph_config.enabled {
-        return Ok(0);
-    }
-
-    let mut item_statement = connection.prepare(
-        "
-        SELECT items.id
-        FROM items
-        JOIN vec_items ON vec_items.id = items.id
-        ORDER BY items.id ASC
-        ",
-    )?;
-    let item_ids = item_statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(item_statement);
-
-    let transaction = connection.transaction()?;
-    transaction.execute("DELETE FROM graph_edges WHERE edge_type = 'similarity'", [])?;
-
-    let mut inserted_pairs = HashSet::new();
-    let timestamp = current_timestamp_millis()?;
-    let mut inserted = 0usize;
-
-    for item_id in item_ids {
-        let candidates = {
-            let mut statement = transaction.prepare(
-                "
-                SELECT
-                    other.id,
-                    CAST(vec_distance_L2(base.embedding, other_vec.embedding) AS REAL) AS distance
-                FROM vec_items AS base
-                JOIN items AS base_item ON base_item.id = base.id
-                JOIN vec_items AS other_vec ON other_vec.id != base.id
-                JOIN items AS other ON other.id = other_vec.id
-                WHERE base.id = ?1
-                  AND (?2 = 1 OR other.source_id = base_item.source_id)
-                ORDER BY distance ASC, other.id ASC
-                LIMIT ?3
-                ",
-            )?;
-            let rows = statement.query_map(
-                params![
-                    item_id,
-                    bool_to_sqlite(graph_config.cross_source),
-                    graph_config.similarity_top_k as i64
-                ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?)),
-            )?;
-
-            let mut candidates = Vec::new();
-            for row in rows {
-                candidates.push(row?);
-            }
-            candidates
-        };
-
-        for (other_id, distance) in candidates {
-            if distance > graph_config.similarity_max_distance {
-                continue;
-            }
-            let (from_item_id, to_item_id) = canonical_edge_pair(&item_id, &other_id);
-            if !inserted_pairs.insert((from_item_id.clone(), to_item_id.clone())) {
-                continue;
-            }
-
-            let weight = 1.0 / (1.0 + distance);
-            let metadata = serde_json::json!({ "distance": distance });
-            transaction.execute(
-                "
-                INSERT INTO graph_edges (
-                    id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
-                )
-                VALUES (?1, ?2, ?3, 'similarity', NULL, ?4, 0, ?5, ?6, ?6)
-                ",
-                params![
-                    format!("similarity:{from_item_id}:{to_item_id}"),
-                    from_item_id,
-                    to_item_id,
-                    weight,
-                    serde_json::to_string(&metadata)?,
-                    timestamp
-                ],
-            )?;
-            inserted += 1;
-        }
-    }
-
-    transaction.commit()?;
-    Ok(inserted)
-}
-
-fn ensure_column_exists(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> Result<()> {
-    if table_has_column(connection, table, column)? {
-        return Ok(());
-    }
-
-    connection.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
-        [],
-    )?;
-    Ok(())
-}
-
-fn table_has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
         id: row.get(0)?,
@@ -1571,33 +1035,6 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
     })
 }
 
-fn map_graph_edge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphEdgeRecord> {
-    let edge_type_raw = row.get::<_, String>(3)?;
-    let edge_type = GraphEdgeType::from_str(&edge_type_raw).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                error.to_string(),
-            )),
-        )
-    })?;
-
-    Ok(GraphEdgeRecord {
-        id: row.get(0)?,
-        from_item_id: row.get(1)?,
-        to_item_id: row.get(2)?,
-        edge_type,
-        relation: row.get(4)?,
-        weight: row.get(5)?,
-        directed: row.get::<_, i64>(6)? != 0,
-        metadata: parse_json_column(row.get::<_, String>(7)?, 7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-    })
-}
-
 fn parse_json_column(raw: String, column_index: usize) -> rusqlite::Result<Value> {
     serde_json::from_str(&raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -1606,16 +1043,6 @@ fn parse_json_column(raw: String, column_index: usize) -> rusqlite::Result<Value
             Box::new(error),
         )
     })
-}
-
-fn register_sqlite_vec() {
-    static SQLITE_VEC_INIT: Once = Once::new();
-
-    SQLITE_VEC_INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
-        )));
-    });
 }
 
 fn embedding_to_json(embedding: &[f32]) -> String {
@@ -1643,14 +1070,6 @@ fn current_timestamp_millis() -> Result<i64> {
 
 fn bool_to_sqlite(value: bool) -> i64 {
     if value { 1 } else { 0 }
-}
-
-fn canonical_edge_pair(left: &str, right: &str) -> (String, String) {
-    if left <= right {
-        (left.to_owned(), right.to_owned())
-    } else {
-        (right.to_owned(), left.to_owned())
-    }
 }
 
 #[cfg(test)]

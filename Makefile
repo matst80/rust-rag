@@ -20,6 +20,8 @@ RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:8081/v1
 RAG_OPENAI_API_KEY ?=
 RAG_OPENAI_MODEL ?= current_model.gguf
 RAG_OPENAI_TIMEOUT_SECS ?= 60
+RAG_CUDA_MEM_LIMIT_MB ?= 2048
+RAG_CUDA_DEVICE_ID ?= 0
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
 RAG_CDP_URL ?= ws://127.0.0.1:9222
 ZITADEL_ISSUER ?= https://auth.k6n.net
@@ -37,7 +39,7 @@ K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets print-env fmt test verify check-env build build-mcp run run-mcp docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets print-env fmt test verify check-env build build-cuda build-mcp run run-cuda run-mcp docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -49,8 +51,10 @@ help:
 		'  make verify           Run formatting check and tests' \
 		'  make check-env        Verify required runtime env vars are set' \
 		'  make build            Build the rust-rag binary in release mode' \
+		'  make build-cuda       Build the rust-rag binary with the cuda feature enabled' \
 		'  make build-mcp        Build the mcp-stdio binary in release mode' \
 		'  make run              Start the service locally' \
+		'  make run-cuda         Start the service locally with the cuda feature enabled' \
 		'  make run-mcp          Start the stdio MCP bridge locally' \
 		'  make docker-build     Build the server container image' \
 		'  make docker-push      Push the server container image' \
@@ -124,10 +128,13 @@ check-env: fetch-assets
 build:
 	cargo build --release --bin rust-rag
 
+build-cuda:
+	cargo build --release --features cuda --bin rust-rag
+
 build-mcp:
 	cargo build --release --manifest-path mcp-stdio/Cargo.toml
 
-run: 
+run:
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
 	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
 	RAG_DB_PATH="$(RAG_DB_PATH)" \
@@ -150,6 +157,32 @@ run:
 	RAG_OPENAI_MODEL="$(RAG_OPENAI_MODEL)" \
 	RAG_OPENAI_TIMEOUT_SECS="$(RAG_OPENAI_TIMEOUT_SECS)" \
 	cargo run
+
+run-cuda:
+	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
+	RAG_DB_PATH="$(RAG_DB_PATH)" \
+	RAG_PORT="$(RAG_PORT)" \
+	RAG_GRAPH_ENABLED="$(RAG_GRAPH_ENABLED)" \
+	RAG_GRAPH_BUILD_ON_STARTUP="$(RAG_GRAPH_BUILD_ON_STARTUP)" \
+	RAG_GRAPH_K="$(RAG_GRAPH_K)" \
+	RAG_GRAPH_MAX_DISTANCE="$(RAG_GRAPH_MAX_DISTANCE)" \
+	RAG_GRAPH_CROSS_SOURCE="$(RAG_GRAPH_CROSS_SOURCE)" \
+	RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
+	RAG_FRONTEND_API_KEY="$(RAG_FRONTEND_API_KEY)" \
+	AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
+	ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
+	ZITADEL_CLIENT_ID="$(ZITADEL_CLIENT_ID)" \
+	ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
+	ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
+	ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
+	RAG_OPENAI_API_BASE_URL="$(RAG_OPENAI_API_BASE_URL)" \
+	RAG_OPENAI_API_KEY="$(RAG_OPENAI_API_KEY)" \
+	RAG_OPENAI_MODEL="$(RAG_OPENAI_MODEL)" \
+	RAG_OPENAI_TIMEOUT_SECS="$(RAG_OPENAI_TIMEOUT_SECS)" \
+	RAG_CUDA_MEM_LIMIT_MB="$(RAG_CUDA_MEM_LIMIT_MB)" \
+	RAG_CUDA_DEVICE_ID="$(RAG_CUDA_DEVICE_ID)" \
+	cargo run --features cuda
 
 run-mcp:
 	RAG_MCP_API_BASE_URL="$(API_URL)" \

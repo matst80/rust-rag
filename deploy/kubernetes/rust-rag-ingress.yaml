@@ -1,0 +1,87 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rag-ingress
+  namespace: home
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: rag.k6n.net
+      http:
+        paths:
+          - path: /api/store
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /api/search
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /api/openai
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /api/query
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /api/graph
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /auth/device/code
+            pathType: Exact
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /auth/device/token
+            pathType: Exact
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /auth/tokens
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rust-rag-frontend
+                port:
+                  number: 3000
+  tls:
+    - hosts:
+        - rag.k6n.net
+      secretName: rag-k6n-net-tls
