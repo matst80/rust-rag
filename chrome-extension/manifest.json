@@ -22,8 +22,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"]
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ]
     }
   ],
   "commands": {
@@ -36,6 +40,6 @@
     }
   },
   "host_permissions": [
-    "http://localhost:4001/*"
+    "https://rag.k6n.net/*"
   ]
 }

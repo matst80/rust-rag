@@ -171,6 +171,7 @@ struct SessionClaims {
 
 async fn device_code(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Option<Json<DeviceCodeRequest>>,
 ) -> Result<Json<DeviceCodeResponse>, ApiError> {
     let client_name = body
@@ -198,7 +199,7 @@ async fn device_code(
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?;
 
-    let base = verification_base_url(&state);
+    let base = verification_base_url(&state, &headers);
     let verification_uri = format!("{base}/auth/device");
     let verification_uri_complete = format!("{verification_uri}?user_code={user_code}");
 
@@ -568,12 +569,21 @@ fn device_status_name(status: DeviceAuthStatus) -> &'static str {
     }
 }
 
-fn verification_base_url(state: &AppState) -> String {
-    state
-        .auth
-        .app_base_url
-        .clone()
-        .unwrap_or_else(|| "/".trim_end_matches('/').to_owned())
+fn verification_base_url(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(base) = &state.auth.app_base_url {
+        return base.trim_end_matches('/').to_owned();
+    }
+
+    // Try to guess from Host header
+    if let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        let proto = headers
+            .get("x-forwarded-proto")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("http");
+        return format!("{}://{}", proto, host);
+    }
+
+    "".to_owned()
 }
 
 fn random_base64url(bytes: usize) -> Result<String, ApiError> {

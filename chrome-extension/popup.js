@@ -8,18 +8,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     closeSettings: document.getElementById('close-settings'),
     apiBaseUrlInput: document.getElementById('api-base-url'),
     apiTokenInput: document.getElementById('api-token'),
-    
+
     tabBtns: document.querySelectorAll('.tab-btn'),
     tabContents: document.querySelectorAll('.tab-content'),
-    
+
     searchInput: document.getElementById('search-input'),
     searchBtn: document.getElementById('search-btn'),
     searchResults: document.getElementById('search-results'),
-    
+
     storeInput: document.getElementById('store-input'),
     sourceSelect: document.getElementById('source-select'),
     storeBtn: document.getElementById('store-btn'),
-    
+
     startAuthBtn: document.getElementById('start-auth-btn'),
     codeDisplay: document.getElementById('code-display'),
     userCodeSpan: document.getElementById('user-code'),
@@ -28,14 +28,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     mainSection: document.getElementById('main-section'),
     authStatus: document.getElementById('auth-status'),
     logoutBtn: document.getElementById('logout-btn'),
-    
+    deviceCodeFlow: document.getElementById('device-code-flow'),
+
     connectionStatus: document.getElementById('connection-status'),
     apiUrlDisplay: document.getElementById('api-url-display')
   };
 
   let config = await chrome.storage.local.get(['apiBaseUrl', 'apiToken']);
-  const defaultUrl = 'http://localhost:4001';
-  
+  const defaultUrl = 'https://rag.k6n.net';
+
   if (!config.apiBaseUrl) {
     config.apiBaseUrl = defaultUrl;
     await chrome.storage.local.set({ apiBaseUrl: defaultUrl });
@@ -48,13 +49,46 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize status
   checkConnection();
 
+  // Helper to setup verification link
+  function setupVerificationLink(url, text) {
+    elements.verificationUrlA.href = url;
+    elements.verificationUrlA.textContent = text;
+    elements.verificationUrlA.onclick = (e) => {
+      e.preventDefault();
+      chrome.tabs.create({ url: url });
+    };
+  }
+
+  // Check if background is already polling
+  chrome.runtime.sendMessage({ type: 'GET_POLLING_STATUS' }, (status) => {
+    if (status && status.isPolling) {
+      elements.userCodeSpan.textContent = status.userCode;
+      setupVerificationLink(status.verificationUriComplete, status.verificationUri);
+      elements.codeDisplay.classList.remove('hidden');
+      elements.startAuthBtn.classList.add('hidden');
+    }
+  });
+
+  // Listen for auth events from background
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'AUTH_SUCCESS') {
+      config.apiToken = message.token;
+      elements.apiTokenInput.value = message.token;
+      showAuthorized();
+    } else if (message.type === 'AUTH_ERROR') {
+      alert(`Auth Error: ${message.error}`);
+      elements.startAuthBtn.classList.remove('hidden');
+      elements.codeDisplay.classList.add('hidden');
+    }
+  });
+
   // Tab switching
   elements.tabBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const tabId = btn.getAttribute('data-tab');
       elements.tabBtns.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      
+
       elements.tabContents.forEach(content => {
         if (content.id === `${tabId}-tab`) {
           content.classList.remove('hidden');
@@ -70,8 +104,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.settingsModal.classList.remove('hidden');
     // If not authorized, show auth section in main
     if (!config.apiToken) {
-        elements.authSection.classList.remove('hidden');
-        elements.mainSection.classList.add('hidden');
+      elements.authSection.classList.remove('hidden');
+      elements.mainSection.classList.add('hidden');
     }
   });
 
@@ -82,11 +116,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   elements.saveSettings.addEventListener('click', async () => {
     const url = elements.apiBaseUrlInput.value.trim().replace(/\/$/, "");
     const token = elements.apiTokenInput.value.trim();
-    
+
     await chrome.storage.local.set({ apiBaseUrl: url, apiToken: token });
     config.apiBaseUrl = url;
     config.apiToken = token;
-    
+
     elements.apiUrlDisplay.textContent = url;
     elements.settingsModal.classList.add('hidden');
     checkConnection();
@@ -193,56 +227,32 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const data = await response.json();
       elements.userCodeSpan.textContent = data.user_code;
-      elements.verificationUrlA.href = data.verification_uri_complete;
-      elements.verificationUrlA.textContent = data.verification_uri;
+      
+      let completeUrl = data.verification_uri_complete;
+      if (completeUrl.startsWith('/')) {
+        completeUrl = config.apiBaseUrl + completeUrl;
+      }
+      
+      setupVerificationLink(completeUrl, data.verification_uri);
+
       elements.codeDisplay.classList.remove('hidden');
       elements.startAuthBtn.classList.add('hidden');
 
-      pollForToken(data.device_code, data.interval);
+      // Start polling in background
+      chrome.runtime.sendMessage({
+        type: 'START_POLLING',
+        deviceCode: data.device_code,
+        userCode: data.user_code,
+        verificationUri: data.verification_uri,
+        verificationUriComplete: completeUrl,
+        interval: data.interval,
+        apiBaseUrl: config.apiBaseUrl
+      });
+
     } catch (error) {
       alert(`Auth Error: ${error.message}`);
     }
   });
-
-  async function pollForToken(deviceCode, interval) {
-    const pollInterval = (interval || 5) * 1000;
-    
-    const poll = async () => {
-      try {
-        const response = await fetch(`${config.apiBaseUrl}/auth/device/token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device_code: deviceCode })
-        });
-
-        const data = await response.json();
-
-        if (response.ok && data.access_token) {
-          await chrome.storage.local.set({ apiToken: data.access_token });
-          config.apiToken = data.access_token;
-          elements.apiTokenInput.value = data.access_token;
-          showAuthorized();
-          return;
-        }
-
-        if (data.error === 'authorization_pending') {
-          setTimeout(poll, pollInterval);
-        } else {
-          throw new Error(data.error || 'Auth failed');
-        }
-      } catch (error) {
-        if (error.message === 'slow_down') {
-            setTimeout(poll, pollInterval + 2000);
-        } else {
-            alert(`Polling Error: ${error.message}`);
-            elements.startAuthBtn.classList.remove('hidden');
-            elements.codeDisplay.classList.add('hidden');
-        }
-      }
-    };
-
-    setTimeout(poll, pollInterval);
-  }
 
   function showAuthorized() {
     elements.authStatus.classList.remove('hidden');
@@ -273,14 +283,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (response.ok) {
         elements.connectionStatus.textContent = 'Online';
         elements.connectionStatus.className = 'status-indicator online';
-        
+
         // If we have a token and connection is ok, make sure main section is visible
         if (config.apiToken) {
-            elements.authSection.classList.add('hidden');
-            elements.mainSection.classList.remove('hidden');
+          elements.authSection.classList.add('hidden');
+          elements.mainSection.classList.remove('hidden');
         } else {
-            elements.authSection.classList.remove('hidden');
-            elements.mainSection.classList.add('hidden');
+          elements.authSection.classList.remove('hidden');
+          elements.mainSection.classList.add('hidden');
         }
       } else {
         throw new Error();

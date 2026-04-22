@@ -80,3 +80,86 @@ async function storeSelection(text, url, title) {
     });
   }
 }
+
+// Device Auth Polling in Background
+let pollingState = {
+  isPolling: false,
+  deviceCode: null,
+  userCode: null,
+  verificationUri: null,
+  verificationUriComplete: null,
+  interval: 5,
+  apiBaseUrl: null
+};
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'START_POLLING') {
+    startBackgroundPolling(message);
+    sendResponse({ status: 'started' });
+  } else if (message.type === 'GET_POLLING_STATUS') {
+    sendResponse(pollingState);
+  }
+});
+
+async function startBackgroundPolling(data) {
+  if (pollingState.isPolling) return;
+  
+  pollingState = {
+    isPolling: true,
+    deviceCode: data.deviceCode,
+    userCode: data.userCode,
+    verificationUri: data.verificationUri,
+    verificationUriComplete: data.verificationUriComplete,
+    interval: data.interval || 5,
+    apiBaseUrl: data.apiBaseUrl
+  };
+
+  const pollInterval = (pollingState.interval) * 1000;
+  const apiBaseUrl = pollingState.apiBaseUrl;
+  const deviceCode = pollingState.deviceCode;
+
+  const poll = async () => {
+    if (!pollingState.isPolling || pollingState.deviceCode !== deviceCode) return;
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/device/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_code: deviceCode })
+      });
+
+      const resData = await response.json();
+
+      if (response.ok && resData.access_token) {
+        await chrome.storage.local.set({ apiToken: resData.access_token });
+        pollingState.isPolling = false;
+        
+        chrome.notifications.create({
+          type: "basic",
+          iconUrl: "icons/icon48.png",
+          title: "rust-rag",
+          message: "Device successfully authorized!"
+        });
+        
+        // Notify popup if it's open
+        chrome.runtime.sendMessage({ type: 'AUTH_SUCCESS', token: resData.access_token });
+        return;
+      }
+
+      if (resData.error === 'authorization_pending') {
+        setTimeout(poll, pollInterval);
+      } else {
+        throw new Error(resData.error || 'Auth failed');
+      }
+    } catch (error) {
+      if (error.message === 'slow_down') {
+        setTimeout(poll, pollInterval + 2000);
+      } else {
+        pollingState.isPolling = false;
+        chrome.runtime.sendMessage({ type: 'AUTH_ERROR', error: error.message });
+      }
+    }
+  };
+
+  setTimeout(poll, pollInterval);
+}
