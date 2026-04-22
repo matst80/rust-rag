@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rust-rag Collector</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="dark-mode">
+  <div class="container">
+    <header>
+      <h1>rust-rag</h1>
+      <button id="settings-btn" class="icon-btn">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.35 19.43,11.03L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11.03C4.53,11.35 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.68 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z"/></svg>
+      </button>
+    </header>
+
+    <div id="auth-section" class="section hidden">
+      <h2>Device Login</h2>
+      <div id="device-code-flow">
+        <p class="instruction">To connect this extension, click "Start" and enter the code on the device approval page.</p>
+        <button id="start-auth-btn" class="primary-btn">Start Authorization</button>
+        
+        <div id="code-display" class="hidden">
+          <div class="user-code-box">
+            <span id="user-code">XXXX-XXXX</span>
+          </div>
+          <p class="small">Enter this code at:</p>
+          <a id="verification-url" href="#" target="_blank">...</a>
+          <div class="polling-status">
+            <div class="spinner"></div>
+            <span>Waiting for approval...</span>
+          </div>
+        </div>
+      </div>
+      <div id="auth-status" class="hidden">
+        <p class="success-msg">✓ Authorized</p>
+        <button id="logout-btn" class="secondary-btn">Logout</button>
+      </div>
+    </div>
+
+    <div id="main-section" class="section">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="search">Search</button>
+        <button class="tab-btn" data-tab="store">Store</button>
+      </div>
+
+      <div id="search-tab" class="tab-content">
+        <div class="search-box">
+          <input type="text" id="search-input" placeholder="Search knowledge base...">
+          <button id="search-btn">
+            <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z"/></svg>
+          </button>
+        </div>
+        <div id="search-results" class="results-list">
+          <!-- Results will be injected here -->
+          <p class="placeholder">Type to search your RAG...</p>
+        </div>
+      </div>
+
+      <div id="store-tab" class="tab-content hidden">
+        <textarea id="store-input" placeholder="Enter text to store in RAG..."></textarea>
+        <div class="form-footer">
+          <select id="source-select">
+            <option value="chrome-extension">Chrome Extension</option>
+            <option value="notes">Notes</option>
+            <option value="knowledge">Knowledge</option>
+          </select>
+          <button id="store-btn" class="primary-btn">Store Entry</button>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div id="status-bar">
+        <span id="connection-status" class="status-indicator offline">Offline</span>
+        <span id="api-url-display">http://localhost:4001</span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2>Settings</h2>
+      <div class="field">
+        <label for="api-base-url">API Base URL</label>
+        <input type="text" id="api-base-url" placeholder="http://localhost:4001">
+      </div>
+      <div class="field">
+        <label for="api-token">API Token (Manual)</label>
+        <input type="password" id="api-token" placeholder="Optional if using Device Flow">
+      </div>
+      <div class="modal-actions">
+        <button id="close-settings" class="secondary-btn">Close</button>
+        <button id="save-settings" class="primary-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
