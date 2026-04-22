@@ -46,19 +46,43 @@ fn default_mcp_allowed_hosts() -> Vec<String> {
     vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpenAiChatConfig {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub default_model: Option<String>,
     pub timeout_secs: u64,
     pub cdp_url: Option<String>,
+    pub retrieval_system_prompt: String,
+    pub query_expansion_prompt: String,
+}
+
+impl Default for OpenAiChatConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            api_key: None,
+            default_model: None,
+            timeout_secs: 60,
+            cdp_url: None,
+            retrieval_system_prompt: default_retrieval_system_prompt().to_owned(),
+            query_expansion_prompt: default_query_expansion_prompt().to_owned(),
+        }
+    }
 }
 
 impl OpenAiChatConfig {
     pub fn is_configured(&self) -> bool {
         self.base_url.is_some()
     }
+}
+
+pub const fn default_retrieval_system_prompt() -> &'static str {
+    "You are a RAG Intelligence Assistant. Your goal is to build and query a high-quality knowledge base.\n\nCORE GUIDELINES:\n1. CRAWLING: Use 'ingest_web_content' to research new information.\n2. LARGE PAGES: If a page is too large (>20k chars), it will be saved to disk. Use 'read_file_range' to read it line-by-line.\n3. CHUNKING: NEVER store a whole page as a single entry. It ruins embedding quality.\n4. EXTRACTION: When you ingest a page, extract specific, meaningful sections.\n5. STORAGE: Use 'store_entry' to save focused chunks of 1000-1500 characters.\n6. CONTEXT: Ensure each stored chunk is self-contained (include relevant titles/context in the text).\n7. RETRIEVAL: When a user asks a question, decompose it into multiple focused 'search_entries' calls from different angles (synonyms, sub-topics, related concepts) rather than a single literal query. Prefer hybrid search. Merge and cite the best results.\n\nBe concise and analytical."
+}
+
+pub const fn default_query_expansion_prompt() -> &'static str {
+    "You expand a user's natural-language information need into a diverse set of focused search queries for a hybrid vector + BM25 search engine over a private knowledge base.\n\nRULES:\n- Return ONLY a JSON array of strings, no prose, no code fences.\n- Produce 3-6 queries.\n- Cover different angles: literal rewording, key entities, synonyms, related sub-topics, and one broader conceptual query.\n- Each query must be self-contained (no pronouns, no references to prior queries).\n- Keep each query concise (under 15 words) and in the language the user wrote in.\n\nExample output: [\"first query\", \"second query\", \"third query\"]"
 }
 
 impl AuthConfig {
@@ -163,6 +187,10 @@ impl AppConfig {
                 default_model: openai_default_model,
                 timeout_secs: openai_timeout_secs,
                 cdp_url,
+                retrieval_system_prompt: non_empty_var("RAG_RETRIEVAL_SYSTEM_PROMPT")
+                    .unwrap_or_else(|| default_retrieval_system_prompt().to_owned()),
+                query_expansion_prompt: non_empty_var("RAG_QUERY_EXPANSION_PROMPT")
+                    .unwrap_or_else(|| default_query_expansion_prompt().to_owned()),
             },
         })
     }

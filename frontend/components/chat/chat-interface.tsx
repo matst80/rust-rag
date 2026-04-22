@@ -25,21 +25,6 @@ interface ExtendedMessage extends ChatCompletionMessage {
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<ExtendedMessage[]>([
-    { 
-      role: "system", 
-      content: `You are a RAG Intelligence Assistant. Your goal is to build and query a high-quality knowledge base.
-
-CORE GUIDELINES:
-1. CRAWLING: Use 'ingest_web_content' to research new information.
-2. LARGE PAGES: If a page is too large (>20k chars), it will be saved to disk. Use 'read_file_range' to read it line-by-line.
-3. CHUNKING: NEVER store a whole page as a single entry. It ruins embedding quality.
-4. EXTRACTION: When you ingest a page, extract specific, meaningful sections.
-5. STORAGE: Use 'store_entry' to save focused chunks of 1000-1500 characters.
-6. CONTEXT: Ensure each stored chunk is self-contained (include relevant titles/context in the text).
-7. HYBRID SEARCH: Use 'search_entries' to find information you've already stored.
-
-Be concise and analytical.`
-    },
     { role: "assistant", content: "Hello! I'm your RAG assistant. How can I help you build your intelligence repository today?" }
   ])
   const [input, setInput] = useState("")

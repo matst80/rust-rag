@@ -275,8 +275,26 @@ pub(super) async fn chat_completions(
             )
         })?;
 
+    let mut messages: Vec<ChatMessage> = request
+        .messages
+        .iter()
+        .filter(|message| message.role != "system")
+        .cloned()
+        .collect();
+    messages.insert(
+        0,
+        ChatMessage {
+            role: "system".to_owned(),
+            content: Some(Value::String(openai_config.retrieval_system_prompt.clone())),
+            reasoning_content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    );
+
     let body_stream = Body::from_stream(stream! {
-        let mut messages = request.messages.clone();
+        let mut messages = messages;
 
         loop {
             let upstream_payload = match build_upstream_payload(&request, &messages, &model) {

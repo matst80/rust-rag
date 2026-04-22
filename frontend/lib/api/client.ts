@@ -20,6 +20,11 @@ import type {
   ChatCompletionsRequest,
   ChatCompletionStreamError,
   ChatCompletionStreamHandlers,
+  AssistedQueryRequest,
+  AssistedQueryHandlers,
+  AssistedQueryQueriesEvent,
+  AssistedQueryResultEvent,
+  AssistedQueryMergedEvent,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -271,6 +276,84 @@ export async function streamChatCompletions(
   }
 }
 
+function isAssistedQueriesEvent(value: unknown): value is AssistedQueryQueriesEvent {
+  return typeof value === "object" && value !== null && (value as any).object === "assisted_query.queries"
+}
+
+function isAssistedResultEvent(value: unknown): value is AssistedQueryResultEvent {
+  return typeof value === "object" && value !== null && (value as any).object === "assisted_query.result"
+}
+
+function isAssistedMergedEvent(value: unknown): value is AssistedQueryMergedEvent {
+  return typeof value === "object" && value !== null && (value as any).object === "assisted_query.merged"
+}
+
+export async function streamAssistedQuery(
+  input: AssistedQueryRequest,
+  handlers: AssistedQueryHandlers = {},
+  options: { signal?: AbortSignal } = {}
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/query/assisted`, {
+    method: "POST",
+    headers: {
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+    signal: options.signal,
+  })
+
+  if (!response.ok) {
+    throw new APIError(response.status, `API error: ${response.statusText}`)
+  }
+  if (!response.body) {
+    throw new APIError(500, "Streaming response body was not available")
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  const buffer = { current: "" }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      const events = parseSseEvents(chunk, buffer)
+
+      for (const event of events) {
+        if (event === "[DONE]") {
+          handlers.onDone?.()
+          return
+        }
+
+        const payload = JSON.parse(event) as unknown
+        if (isStreamError(payload)) {
+          handlers.onError?.(payload)
+          continue
+        }
+        if (isAssistedQueriesEvent(payload)) {
+          handlers.onQueries?.(payload)
+          continue
+        }
+        if (isAssistedResultEvent(payload)) {
+          handlers.onResult?.(payload)
+          continue
+        }
+        if (isAssistedMergedEvent(payload)) {
+          handlers.onMerged?.(payload)
+          continue
+        }
+      }
+    }
+
+    handlers.onDone?.()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 // Categories API
 export async function getCategories(): Promise<Category[]> {
   const response = await request<CategoriesResponse>("/admin/categories")
@@ -417,6 +500,9 @@ export const api = {
   },
   chat: {
     stream: streamChatCompletions,
+  },
+  query: {
+    assisted: streamAssistedQuery,
   },
   graph: {
     status: getGraphStatus,

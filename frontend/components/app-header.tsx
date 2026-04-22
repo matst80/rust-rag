@@ -14,6 +14,7 @@ import {
 	LogOut,
 	MessageSquare,
 	Search,
+	Sparkles,
 	User,
 } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -23,6 +24,7 @@ const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
 const navigation = [
 	{ name: "Search", href: "/", icon: Search },
+	{ name: "Assisted", href: "/assisted", icon: Sparkles },
 	{ name: "Chat", href: "/chat", icon: MessageSquare },
 	{ name: "Docs", href: "/start-guide", icon: BookOpen },
 	{ name: "Entries", href: "/entries", icon: FolderOpen },

@@ -213,3 +213,52 @@ export interface ChatCompletionStreamHandlers {
   onDone?: () => void
   onEvent?: (payload: ChatCompletionChunk | ChatCompletionToolResult | ChatCompletionStreamError) => void
 }
+
+// LLM-assisted query (multi-query expansion) endpoint
+export interface AssistedQueryRequest {
+  query: string
+  source_id?: string
+  top_k?: number
+  max_distance?: number
+  model?: string
+}
+
+export interface AssistedQueryRawResult {
+  id: string
+  text: string
+  metadata: EntryMetadata
+  source_id: string
+  created_at: number
+  distance: number
+}
+
+export interface AssistedQueryQueriesEvent {
+  object: "assisted_query.queries"
+  queries: string[]
+}
+
+export interface AssistedQueryResultEvent {
+  object: "assisted_query.result"
+  query: string
+  index: number
+  results: AssistedQueryRawResult[]
+}
+
+export interface AssistedQueryMergedEvent {
+  object: "assisted_query.merged"
+  results: AssistedQueryRawResult[]
+}
+
+export type AssistedQueryEvent =
+  | AssistedQueryQueriesEvent
+  | AssistedQueryResultEvent
+  | AssistedQueryMergedEvent
+  | ChatCompletionStreamError
+
+export interface AssistedQueryHandlers {
+  onQueries?: (event: AssistedQueryQueriesEvent) => void
+  onResult?: (event: AssistedQueryResultEvent) => void
+  onMerged?: (event: AssistedQueryMergedEvent) => void
+  onError?: (error: ChatCompletionStreamError) => void
+  onDone?: () => void
+}

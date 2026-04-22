@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 mod auth;
 mod openai;
+mod query;
 
 pub use auth::SessionSubject;
 
@@ -281,7 +282,7 @@ pub struct DeleteResponse {
     pub deleted: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct SearchResultPayload {
     pub id: String,
     pub text: String,
@@ -435,6 +436,7 @@ pub fn router(state: AppState) -> Router {
             "/api/openai/v1/chat/completions",
             post(openai::chat_completions),
         )
+        .route("/api/query/assisted", post(query::assisted_query))
         .route("/graph/status", get(graph_status))
         .route("/api/graph/status", get(graph_status))
         .route("/graph/edges", get(list_graph_edges))
