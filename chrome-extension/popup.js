@@ -16,6 +16,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     searchBtn: document.getElementById('search-btn'),
     searchResults: document.getElementById('search-results'),
 
+    chatInput: document.getElementById('chat-input'),
+    chatSendBtn: document.getElementById('chat-send-btn'),
+    chatMessages: document.getElementById('chat-messages'),
+
     storeInput: document.getElementById('store-input'),
     sourceSelect: document.getElementById('source-select'),
     storeBtn: document.getElementById('store-btn'),
@@ -136,7 +140,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const query = elements.searchInput.value.trim();
     if (!query) return;
 
-    elements.searchResults.innerHTML = '<div class="polling-status"><div class="spinner"></div><span>Searching...</span></div>';
+    elements.searchResults.innerHTML = '<div class="polling-status"><div class="spinner"></div><span style="font-family: var(--font-mono); font-size: 12px; text-transform: uppercase;">> Executing Search...</span></div>';
 
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/search`, {
@@ -163,15 +167,131 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    elements.searchResults.innerHTML = results.map(res => `
-      <div class="result-item">
-        <div class="result-text">${escapeHtml(res.text)}</div>
-        <div class="result-meta">
-          <span>${res.source_id}</span>
-          <span>${Math.round(res.score * 100)}% match</span>
+    elements.searchResults.innerHTML = results.map(res => {
+      const score = res.score !== undefined && res.score !== null ? Math.round(res.score * 100) : null;
+      
+      let scoreColor = 'var(--text-secondary)';
+      if (score !== null) {
+        if (score >= 80) scoreColor = 'var(--success-color)';
+        else if (score >= 50) scoreColor = 'var(--accent-color)';
+        else scoreColor = 'var(--text-secondary)';
+      }
+
+      const scoreHtml = score !== null 
+        ? `<span style="color: ${scoreColor}; font-weight: 700;">${score}% match</span>` 
+        : '<span>Score unavailable</span>';
+      
+      return `
+        <div class="result-item">
+          <div class="result-text">${escapeHtml(res.text)}</div>
+          <div class="result-meta">
+            <span class="source-tag">${escapeHtml(res.source_id)}</span>
+            ${scoreHtml}
+          </div>
         </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
+  }
+
+  // Chat
+  elements.chatSendBtn.addEventListener('click', performChat);
+  elements.chatInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') performChat();
+  });
+
+  async function performChat() {
+    const message = elements.chatInput.value.trim();
+    if (!message) return;
+
+    elements.chatInput.value = '';
+    const placeholder = elements.chatMessages.querySelector('.placeholder');
+    if (placeholder) placeholder.remove();
+
+    appendMessage('user', message);
+
+    const aiMsgDiv = appendMessage('ai', '');
+    const thinkingDiv = aiMsgDiv.querySelector('.thinking');
+    const contentDiv = aiMsgDiv.querySelector('.chat-content');
+    const cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    contentDiv.appendChild(cursor);
+    
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/openai/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': config.apiToken ? `Bearer ${config.apiToken}` : ''
+        },
+        body: JSON.stringify({ 
+          messages: [{ role: "user", content: message }],
+          stream: true 
+        })
+      });
+
+      if (!response.ok) throw new Error(`Chat failed: ${response.status} ${response.statusText}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Split by OpenAI's double newline SSE separator
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+
+        for (const part of parts) {
+          const lines = part.split('\n');
+          const dataStr = lines
+            .filter(line => line.trim().startsWith('data:'))
+            .map(line => line.trim().slice(6).trim())
+            .join('\n');
+
+          if (!dataStr || dataStr === '[DONE]') continue;
+
+          try {
+            const data = JSON.parse(dataStr);
+            const delta = data.choices?.[0]?.delta;
+            if (!delta) continue;
+
+            const reasoning = delta.reasoning_content || delta.reasoning;
+            if (reasoning) {
+              thinkingDiv.classList.remove('hidden');
+              thinkingDiv.textContent += reasoning;
+            }
+            if (delta.content) {
+              const textNode = document.createTextNode(delta.content);
+              contentDiv.insertBefore(textNode, cursor);
+            }
+            elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+          } catch (e) {
+            console.error('Error parsing chunk:', e, dataStr);
+          }
+        }
+      }
+      cursor.remove();
+    } catch (error) {
+      cursor.remove();
+      contentDiv.innerHTML += `<div style="color: var(--error-color); margin-top: 8px; font-family: var(--font-mono); font-size: 11px;">[ERROR]: ${error.message}</div>`;
+    }
+  }
+
+  function appendMessage(role, text) {
+    const div = document.createElement('div');
+    div.className = `chat-message ${role}-message`;
+    div.innerHTML = `
+      <div class="message-header">${role === 'user' ? 'YOU' : 'AI'}</div>
+      ${role === 'ai' ? '<div class="thinking hidden"></div>' : ''}
+      <div class="chat-content">${escapeHtml(text)}</div>
+    `;
+    elements.chatMessages.appendChild(div);
+    elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+    return div;
   }
 
   // Store
@@ -282,7 +402,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       if (response.ok) {
         elements.connectionStatus.textContent = 'Online';
-        elements.connectionStatus.className = 'status-indicator online';
+        elements.connectionStatus.className = 'online';
 
         // If we have a token and connection is ok, make sure main section is visible
         if (config.apiToken) {
@@ -297,7 +417,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } catch (e) {
       elements.connectionStatus.textContent = 'Offline';
-      elements.connectionStatus.className = 'status-indicator offline';
+      elements.connectionStatus.className = 'offline';
     }
   }
 
