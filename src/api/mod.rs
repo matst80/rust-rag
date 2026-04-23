@@ -32,6 +32,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod auth;
+mod chunking;
 mod openai;
 mod query;
 
@@ -186,6 +187,24 @@ pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ChunkConfig {
+    /// Maximum characters per chunk (≈ max_chars/4 tokens). Default 1024 (~256 tokens).
+    #[serde(default = "default_chunk_max_chars")]
+    pub max_chars: usize,
+    /// Characters of previous-chunk tail prepended to each chunk's embedding for
+    /// contextual awareness. The stored text is NOT affected. Default 200 (~50 tokens).
+    #[serde(default = "default_chunk_overlap_chars")]
+    pub overlap_chars: usize,
+}
+
+fn default_chunk_max_chars() -> usize {
+    1024
+}
+fn default_chunk_overlap_chars() -> usize {
+    200
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StoreRequest {
     /// Optional stable identifier. If omitted, a UUIDv7 is generated.
     pub id: Option<String>,
@@ -197,6 +216,10 @@ pub struct StoreRequest {
     /// Entries sharing a source_id are grouped together; search and listing can filter on it.
     /// Pick a short, lowercase, stable identifier per logical bucket of content.
     pub source_id: String,
+    /// If provided, the text is split into overlapping chunks before embedding.
+    /// Each chunk is stored as a separate item keyed `{id}:c:{index}`.
+    /// Omit for short texts or when you want the entry treated as a single unit.
+    pub chunk: Option<ChunkConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -279,6 +302,10 @@ pub struct StoreResponse {
     pub id: String,
     pub source_id: String,
     pub created_at: i64,
+    /// IDs of stored chunks, present only when the request included a `chunk` config
+    /// and the text was long enough to require splitting (≥ 2 chunks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -296,6 +323,10 @@ pub struct SearchResultPayload {
     pub source_id: String,
     pub created_at: i64,
     pub distance: f32,
+    /// Stitched context window for chunk results: the matched chunk surrounded by
+    /// its immediate neighbours. Null for non-chunk entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_context: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -473,10 +504,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
+        .route("/admin/items/oversized", get(list_large_items))
         .route(
             "/admin/items/{id}",
             get(get_item).put(update_item).delete(delete_item),
         )
+        .route("/admin/items/{id}/rechunk", post(rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
@@ -656,23 +689,93 @@ pub(crate) async fn store_entry_core(
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
     let source_id = request.source_id.clone();
-    let item_id = id.clone();
-    let item = ItemRecord {
-        id: id.clone(),
-        text: request.text.clone(),
-        metadata: request.metadata,
-        source_id: request.source_id,
-        created_at,
+
+    let chunk_ids = if let Some(ref cfg) = request.chunk {
+        // Build chunk slices (returns 1 slice if text fits in one chunk).
+        let slices =
+            chunking::chunk_document(&request.text, cfg.max_chars, cfg.overlap_chars);
+        let n = slices.len();
+
+        if n <= 1 {
+            // Text fits in a single chunk — store as a normal entry, no chunking metadata.
+            let item = ItemRecord {
+                id: id.clone(),
+                text: request.text.clone(),
+                metadata: request.metadata.clone(),
+                source_id: source_id.clone(),
+                created_at,
+            };
+            let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let embedding = embedder.embed(&embed_text)?;
+                store.upsert_item(item, &embedding)?;
+                Ok(())
+            })
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+            None
+        } else {
+            let parent_id = id.clone();
+            let mut ids: Vec<String> = Vec::with_capacity(n);
+
+            for (i, slice) in slices.into_iter().enumerate() {
+                let chunk_id = format!("{parent_id}:c:{i}");
+                ids.push(chunk_id.clone());
+
+                let mut meta = request.metadata.clone();
+                if let Value::Object(ref mut map) = meta {
+                    map.insert(
+                        "_chunk".to_owned(),
+                        serde_json::json!({ "parent": parent_id, "i": i, "n": n }),
+                    );
+                }
+
+                let item = ItemRecord {
+                    id: chunk_id,
+                    text: slice.text,
+                    metadata: meta,
+                    source_id: source_id.clone(),
+                    created_at,
+                };
+                let embed_text = slice.embed_text;
+                let emb = embedder.clone();
+                let st = store.clone();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let embedding = emb.embed(&embed_text)?;
+                    st.upsert_item(item, &embedding)?;
+                    Ok(())
+                })
+                .await
+                .map_err(ApiError::TaskJoin)?
+                .map_err(ApiError::Internal)?;
+            }
+            Some(ids)
+        }
+    } else {
+        // No chunking requested.
+        let item = ItemRecord {
+            id: id.clone(),
+            text: request.text.clone(),
+            metadata: request.metadata,
+            source_id: source_id.clone(),
+            created_at,
+        };
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let embedding = embedder.embed(&item.text)?;
+            store.upsert_item(item, &embedding)?;
+            Ok(())
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+        None
     };
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let embedding = embedder.embed(&item.text)?;
-        store.upsert_item(item, &embedding)?;
-        Ok(())
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let stored_ids: Vec<String> = chunk_ids
+        .as_deref()
+        .unwrap_or(&[id.clone()])
+        .to_vec();
 
     if let Some(sub) = subject {
         let memory = state.user_memory.clone();
@@ -684,7 +787,7 @@ pub(crate) async fn store_entry_core(
                 event_type: UserEventType::Store,
                 query: None,
                 query_embedding: None,
-                item_ids: vec![item_id],
+                item_ids: stored_ids,
                 created_at,
             }) {
                 tracing::warn!(error = %e, "failed to log store event");
@@ -696,6 +799,7 @@ pub(crate) async fn store_entry_core(
         id,
         source_id,
         created_at,
+        chunk_ids,
     })
 }
 
@@ -839,8 +943,25 @@ pub(crate) async fn search_core(
         });
     }
 
+    // Enrich chunk results with adjacent-chunk context (best-effort).
+    let store_for_chunks = state.store.clone();
+    let result_payloads: Vec<SearchResultPayload> = tokio::task::spawn_blocking(move || {
+        results
+            .into_iter()
+            .map(|hit| {
+                let ctx = chunk_context_for_hit(&*store_for_chunks, &hit);
+                SearchResultPayload {
+                    chunk_context: ctx,
+                    ..SearchResultPayload::from(hit)
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?;
+
     Ok(SearchResponse {
-        results: results.into_iter().map(Into::into).collect(),
+        results: result_payloads,
         related: related
             .into_iter()
             .map(|(hit, relation)| RelatedResultPayload {
@@ -854,6 +975,50 @@ pub(crate) async fn search_core(
             })
             .collect(),
     })
+}
+
+/// If `hit` is a chunk (metadata contains `_chunk.parent`), fetch the previous
+/// and next sibling chunks and stitch them together as a context window.
+/// Returns `None` for non-chunk entries or when neighbours can't be fetched.
+fn chunk_context_for_hit(store: &dyn VectorStore, hit: &SearchHit) -> Option<String> {
+    let chunk_meta = hit.metadata.get("_chunk")?;
+    let parent = chunk_meta.get("parent")?.as_str()?;
+    let index = chunk_meta.get("i")?.as_u64()? as usize;
+    let total = chunk_meta.get("n")?.as_u64()? as usize;
+
+    let prev_text = if index > 0 {
+        store
+            .get_item(&format!("{parent}:c:{}", index - 1))
+            .ok()
+            .flatten()
+            .map(|r| r.text)
+    } else {
+        None
+    };
+    let next_text = if index + 1 < total {
+        store
+            .get_item(&format!("{parent}:c:{}", index + 1))
+            .ok()
+            .flatten()
+            .map(|r| r.text)
+    } else {
+        None
+    };
+
+    // Only build context if at least one neighbour exists.
+    if prev_text.is_none() && next_text.is_none() {
+        return None;
+    }
+
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if let Some(ref p) = prev_text {
+        parts.push(p.as_str());
+    }
+    parts.push(hit.text.as_str());
+    if let Some(ref n) = next_text {
+        parts.push(n.as_str());
+    }
+    Some(parts.join("\n\n"))
 }
 
 /// Returns a sort key that adds a mild time-decay penalty to the semantic
@@ -1096,6 +1261,81 @@ async fn delete_item(
     Ok(Json(DeleteResponse { id, deleted }))
 }
 
+#[derive(Debug, Deserialize)]
+struct LargeItemsQuery {
+    min_chars: Option<usize>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn list_large_items(
+    State(state): State<AppState>,
+    Query(query): Query<LargeItemsQuery>,
+) -> Result<Json<AdminItemsResponse>, ApiError> {
+    let min_chars = query.min_chars.unwrap_or(1024);
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    let store = state.store.clone();
+    let (items, total_count) =
+        tokio::task::spawn_blocking(move || store.list_large_items(min_chars, limit, offset))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+    Ok(Json(AdminItemsResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        total_count,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RechunkRequest {
+    max_chars: Option<usize>,
+    overlap_chars: Option<usize>,
+}
+
+async fn rechunk_item(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Path(id): Path<String>,
+    Json(body): Json<RechunkRequest>,
+) -> Result<Json<StoreResponse>, ApiError> {
+    let embedder = state.embedder.get_ready()?;
+    let store = state.store.clone();
+
+    let item = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || store.get_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?
+    .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
+
+    let max_chars = body.max_chars.unwrap_or(1024);
+    let overlap_chars = body.overlap_chars.unwrap_or(200);
+
+    let request = StoreRequest {
+        id: Some(item.id.clone()),
+        text: item.text,
+        metadata: item.metadata,
+        source_id: item.source_id,
+        chunk: Some(ChunkConfig { max_chars, overlap_chars }),
+    };
+    let response = store_entry_core(&state, request, subject.0).await?;
+
+    // Delete the original unchunked item if chunking produced multiple chunks.
+    if response.chunk_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        let store = state.store.clone();
+        let parent_id = id.clone();
+        tokio::task::spawn_blocking(move || store.delete_item(&parent_id))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+    }
+
+    Ok(Json(response))
+}
+
 async fn rebuild_graph(
     State(state): State<AppState>,
 ) -> Result<Json<GraphRebuildResponse>, ApiError> {
@@ -1208,6 +1448,7 @@ impl From<SearchHit> for SearchResultPayload {
             source_id: value.source_id,
             created_at: value.created_at,
             distance: value.distance,
+            chunk_context: None,
         }
     }
 }
@@ -1549,6 +1790,20 @@ mod tests {
                     item_count,
                 })
                 .collect())
+        }
+
+        fn list_large_items(&self, min_chars: usize, _limit: usize, _offset: usize) -> Result<(Vec<ItemRecord>, i64)> {
+            let stored = self.stored.lock().expect("store mutex poisoned");
+            let items: Vec<_> = stored
+                .iter()
+                .filter(|(item, _)| {
+                    item.text.len() > min_chars
+                        && item.metadata.get("_chunk").is_none()
+                })
+                .map(|(item, _)| item.clone())
+                .collect();
+            let total = items.len() as i64;
+            Ok((items, total))
         }
 
         fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {

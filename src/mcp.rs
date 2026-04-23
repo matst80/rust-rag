@@ -376,6 +376,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
                 distance: related.distance,
+                chunk_context: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

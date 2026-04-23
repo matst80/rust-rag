@@ -12,6 +12,9 @@ import type {
   GraphNeighborhood,
   GraphStatus,
   ListItemsRequest,
+  LargeItemsRequest,
+  RechunkRequest,
+  RechunkResponse,
   PagedItems,
 } from "./types"
 
@@ -53,6 +56,20 @@ export function useDeleteItem() {
   return useSWRMutation<void, Error, string, string>(
     "items",
     (_, { arg }) => api.items.delete(arg)
+  )
+}
+
+export function useLargeItems(options: LargeItemsRequest = {}) {
+  return useSWR<PagedItems>(
+    ["large-items", options],
+    () => api.items.listLarge(options)
+  )
+}
+
+export function useRechunkItem(id: string) {
+  return useSWRMutation<RechunkResponse, Error, string, RechunkRequest>(
+    `rechunk-${id}`,
+    (_, { arg }) => api.items.rechunk(id, arg)
   )
 }
 

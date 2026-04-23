@@ -108,6 +108,24 @@ export interface ListItemsRequest {
   sort_order?: SortOrder
 }
 
+export interface LargeItemsRequest {
+  min_chars?: number
+  limit?: number
+  offset?: number
+}
+
+export interface RechunkRequest {
+  max_chars?: number
+  overlap_chars?: number
+}
+
+export interface RechunkResponse {
+  id: string
+  source_id: string
+  created_at: number
+  chunk_ids?: string[]
+}
+
 export interface PagedItems {
   items: Entry[]
   total_count: number

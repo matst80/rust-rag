@@ -140,6 +140,12 @@ pub(super) fn initialize_schema(
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column_exists(connection, "items", "last_accessed", "INTEGER")?;
+    ensure_column_exists(
+        connection,
+        "items",
+        "ontology_status",
+        "TEXT NOT NULL DEFAULT 'pending'",
+    )?;
 
     connection.execute_batch(&format!(
         "

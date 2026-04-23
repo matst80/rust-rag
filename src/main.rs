@@ -9,6 +9,7 @@ use rust_rag::{
     config::AppConfig,
     db::{AuthStore, SqliteVectorStore, UserMemoryStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
+    ontology,
 };
 
 #[tokio::main]
@@ -70,6 +71,16 @@ async fn main() -> Result<()> {
     let local_addr = listener.local_addr()?;
     println!("rust-rag listening on http://{local_addr}");
     info!("rust-rag listening on http://{local_addr}");
+
+    if config.ontology.enabled {
+        tokio::spawn(ontology::run_ontology_worker(
+            store.clone(),
+            embedder_handle.clone(),
+            reqwest::Client::new(),
+            config.openai_chat.clone(),
+            config.ontology.clone(),
+        ));
+    }
 
     let model_path = config.model_path.clone();
     let tokenizer_path = config.tokenizer_path.clone();

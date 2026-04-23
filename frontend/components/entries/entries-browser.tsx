@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { CategorySidebar } from "./category-sidebar"
 import { EntriesList } from "./entries-list"
+import { LargeItemsPanel } from "./large-items-panel"
 
 export function EntriesBrowser() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
@@ -17,6 +18,7 @@ export function EntriesBrowser() {
         onSelectCategory={setSelectedCategory}
       />
       <div className="flex-1 overflow-y-auto">
+        <LargeItemsPanel />
         <EntriesList selectedCategory={selectedCategory} />
       </div>
     </div>

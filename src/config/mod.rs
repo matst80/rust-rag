@@ -102,6 +102,35 @@ impl AuthConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct OntologyConfig {
+    pub enabled: bool,
+    pub confidence_threshold: f32,
+    pub batch_size: usize,
+    pub interval_secs: u64,
+    /// Number of nearest neighbors to retrieve and send to the LLM per item.
+    /// Reduce for local models with small context windows.
+    pub neighbor_count: usize,
+    /// Max characters of the target item's text to include in the LLM prompt.
+    pub target_preview_chars: usize,
+    /// Max characters of each candidate item's text to include in the LLM prompt.
+    pub candidate_preview_chars: usize,
+}
+
+impl Default for OntologyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            confidence_threshold: 0.7,
+            batch_size: 5,
+            interval_secs: 30,
+            neighbor_count: 8,
+            target_preview_chars: 600,
+            candidate_preview_chars: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
@@ -118,6 +147,7 @@ pub struct AppConfig {
     pub graph_cross_source: bool,
     pub auth: AuthConfig,
     pub openai_chat: OpenAiChatConfig,
+    pub ontology: OntologyConfig,
 }
 
 impl AppConfig {
@@ -191,6 +221,15 @@ impl AppConfig {
                     .unwrap_or_else(|| default_retrieval_system_prompt().to_owned()),
                 query_expansion_prompt: non_empty_var("RAG_QUERY_EXPANSION_PROMPT")
                     .unwrap_or_else(|| default_query_expansion_prompt().to_owned()),
+            },
+            ontology: OntologyConfig {
+                enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,
+                confidence_threshold: parse_env("RAG_ONTOLOGY_CONFIDENCE_THRESHOLD", "0.7")?,
+                batch_size: parse_env("RAG_ONTOLOGY_BATCH_SIZE", "5")?,
+                interval_secs: parse_env("RAG_ONTOLOGY_INTERVAL_SECS", "30")?,
+                neighbor_count: parse_env("RAG_ONTOLOGY_NEIGHBOR_COUNT", "8")?,
+                target_preview_chars: parse_env("RAG_ONTOLOGY_TARGET_PREVIEW_CHARS", "600")?,
+                candidate_preview_chars: parse_env("RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS", "300")?,
             },
         })
     }
