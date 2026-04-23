@@ -7,7 +7,7 @@ use rust_rag::{
     api::{AppState, EmbedderHandle},
     build_app,
     config::AppConfig,
-    db::{AuthStore, SqliteVectorStore, VectorStore},
+    db::{AuthStore, SqliteVectorStore, UserMemoryStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
 };
 
@@ -54,11 +54,13 @@ async fn main() -> Result<()> {
 
     let store_service: Arc<dyn VectorStore> = store.clone();
     let auth_store: Arc<dyn AuthStore> = store.clone();
+    let user_memory: Arc<dyn UserMemoryStore> = store.clone();
     let embedder_handle = Arc::new(EmbedderHandle::loading());
     let state = AppState::new(
         embedder_handle.clone(),
         store_service,
         auth_store,
+        user_memory,
         config.auth.clone(),
         config.openai_chat.clone(),
     );

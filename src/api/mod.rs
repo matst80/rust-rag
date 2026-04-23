@@ -2,15 +2,16 @@ use crate::{
     config::{AuthConfig, OpenAiChatConfig},
     db::{
         AuthStore, CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-        GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, SearchHit,
-        SortOrder, VectorStore,
+        GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput,
+        NewUserEvent, SearchHit, SortOrder, UserEventType, UserMemoryStore, VectorStore,
+        PROFILE_EVENTS_WINDOW, PROFILE_REFRESH_AFTER,
     },
     embedding::EmbeddingService,
 };
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -41,6 +42,7 @@ pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
     pub store: Arc<dyn VectorStore>,
     pub auth_store: Arc<dyn AuthStore>,
+    pub user_memory: Arc<dyn UserMemoryStore>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
     pub http_client: reqwest::Client,
@@ -52,6 +54,7 @@ impl AppState {
         embedder: Arc<EmbedderHandle>,
         store: Arc<dyn VectorStore>,
         auth_store: Arc<dyn AuthStore>,
+        user_memory: Arc<dyn UserMemoryStore>,
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
     ) -> Self {
@@ -60,6 +63,7 @@ impl AppState {
             embedder,
             store,
             auth_store,
+            user_memory,
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
             http_client: reqwest::Client::builder()
@@ -88,6 +92,7 @@ impl AppState {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
             store,
             auth_store,
+            user_memory: Arc::new(NoopUserMemory),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
             http_client: reqwest::Client::builder()
@@ -426,6 +431,29 @@ struct Claims {
     exp: usize,
 }
 
+pub(crate) struct NoopUserMemory;
+
+impl UserMemoryStore for NoopUserMemory {
+    fn log_user_event(&self, _: NewUserEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn touch_item_accesses(&self, _: &[String], _: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn get_user_profile(&self, _: &str) -> anyhow::Result<Option<crate::db::UserProfile>> {
+        Ok(None)
+    }
+    fn upsert_user_profile(&self, _: crate::db::UserProfile) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn get_recent_query_embeddings(&self, _: &str, _: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(Vec::new())
+    }
+    fn count_events_since(&self, _: &str, _: i64) -> anyhow::Result<i64> {
+        Ok(0)
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
@@ -470,7 +498,7 @@ pub fn router(state: AppState) -> Router {
 
 async fn require_api_key(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     tracing::debug!(
@@ -479,6 +507,7 @@ async fn require_api_key(
         "checking api key for request"
     );
     if !state.auth.is_enabled() {
+        request.extensions_mut().insert(SessionSubject(None));
         return Ok(next.run(request).await);
     }
 
@@ -502,6 +531,7 @@ async fn require_api_key(
 
     if let Some(ref key) = provided {
         if state.auth.matches_api_key(key) {
+            request.extensions_mut().insert(SessionSubject(None));
             return Ok(next.run(request).await);
         }
 
@@ -530,6 +560,9 @@ async fn require_api_key(
                         }
                     });
                     tracing::debug!(token_id = %record.id, "authorized via MCP token");
+                    request
+                        .extensions_mut()
+                        .insert(SessionSubject(record.subject));
                     return Ok(next.run(request).await);
                 }
             }
@@ -554,8 +587,11 @@ async fn require_api_key(
                             &DecodingKey::from_secret(secret.as_bytes()),
                             &validation,
                         ) {
-                            Ok(_) => {
+                            Ok(token_data) => {
                                 tracing::info!("authorized via session cookie");
+                                request
+                                    .extensions_mut()
+                                    .insert(SessionSubject(Some(token_data.claims.sub)));
                                 return Ok(next.run(request).await);
                             }
                             Err(err) => {
@@ -591,22 +627,25 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
 
 async fn store(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
     Json(request): Json<StoreRequest>,
 ) -> Result<(StatusCode, Json<StoreResponse>), ApiError> {
-    let response = store_entry_core(&state, request).await?;
+    let response = store_entry_core(&state, request, session.0).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
 async fn search(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    search_core(&state, request).await.map(Json)
+    search_core(&state, request, session.0).await.map(Json)
 }
 
 pub(crate) async fn store_entry_core(
     state: &AppState,
     request: StoreRequest,
+    subject: Option<String>,
 ) -> Result<StoreResponse, ApiError> {
     let id = resolve_store_id(request.id);
     validate_non_empty("text", &request.text)?;
@@ -617,6 +656,7 @@ pub(crate) async fn store_entry_core(
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
     let source_id = request.source_id.clone();
+    let item_id = id.clone();
     let item = ItemRecord {
         id: id.clone(),
         text: request.text.clone(),
@@ -634,6 +674,24 @@ pub(crate) async fn store_entry_core(
     .map_err(ApiError::TaskJoin)?
     .map_err(ApiError::Internal)?;
 
+    if let Some(sub) = subject {
+        let memory = state.user_memory.clone();
+        let event_id = Uuid::now_v7().to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = memory.log_user_event(NewUserEvent {
+                id: event_id,
+                subject: sub,
+                event_type: UserEventType::Store,
+                query: None,
+                query_embedding: None,
+                item_ids: vec![item_id],
+                created_at,
+            }) {
+                tracing::warn!(error = %e, "failed to log store event");
+            }
+        });
+    }
+
     Ok(StoreResponse {
         id,
         source_id,
@@ -644,6 +702,7 @@ pub(crate) async fn store_entry_core(
 pub(crate) async fn search_core(
     state: &AppState,
     request: SearchRequest,
+    subject: Option<String>,
 ) -> Result<SearchResponse, ApiError> {
     if request.top_k == 0 {
         return Err(ApiError::BadRequest(
@@ -654,25 +713,56 @@ pub(crate) async fn search_core(
         validate_source_id(source_id)?;
     }
 
+    // Load user interest profile for personalization (best-effort).
+    let interest_embedding: Option<Vec<f32>> = if let Some(ref sub) = subject {
+        let memory = state.user_memory.clone();
+        let sub = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            memory
+                .get_user_profile(&sub)
+                .ok()
+                .flatten()
+                .and_then(|p| p.interest_embedding)
+        })
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
-    let query = request.query;
+    let query = request.query.clone();
     let top_k = request.top_k;
     let source_id = request.source_id;
     let max_distance = request.max_distance;
+    let now_ms = current_timestamp_millis()?;
 
-    let (results, related) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
-            let embedding = embedder.embed(&query)?;
+    let (results, related, raw_embedding) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+            let raw = embedder.embed(&query)?;
+            let embedding = if let Some(ref interest) = interest_embedding {
+                blend_embeddings(&raw, interest, 0.8)
+            } else {
+                raw.clone()
+            };
             let hits = if request.hybrid {
                 store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
             } else {
                 store.search(&embedding, top_k, source_id.as_deref())?
             };
-            let filtered: Vec<SearchHit> = hits
+            let mut filtered: Vec<SearchHit> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
                 .collect();
+
+            // Sort by decay-adjusted score but keep the raw semantic distance for
+            // the response so the reported values remain pure vector/BM25 distances.
+            filtered.sort_by(|a, b| {
+                decay_sort_key(a, now_ms)
+                    .partial_cmp(&decay_sort_key(b, now_ms))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let related = if let Some(top) = filtered.first() {
                 let edges = store
@@ -713,12 +803,41 @@ pub(crate) async fn search_core(
                 Vec::new()
             };
 
-            Ok((filtered, related))
+            Ok((filtered, related, raw))
         },
     )
     .await
     .map_err(ApiError::TaskJoin)?
     .map_err(ApiError::Internal)?;
+
+    // Fire-and-forget: log the search event and update access counts.
+    if let Some(sub) = subject {
+        let memory = state.user_memory.clone();
+        let hit_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
+        let event_id = Uuid::now_v7().to_string();
+        let query_text = request.query.clone();
+        let profile_memory = memory.clone();
+        let sub_clone = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            let event = NewUserEvent {
+                id: event_id,
+                subject: sub_clone.clone(),
+                event_type: UserEventType::Search,
+                query: Some(query_text),
+                query_embedding: Some(raw_embedding),
+                item_ids: hit_ids.clone(),
+                created_at: now_ms,
+            };
+            if let Err(e) = memory.log_user_event(event) {
+                tracing::warn!(error = %e, "failed to log search event");
+            }
+            if let Err(e) = memory.touch_item_accesses(&hit_ids, now_ms) {
+                tracing::warn!(error = %e, "failed to update item access counts");
+            }
+            // Refresh interest profile if enough new events have accumulated.
+            maybe_refresh_profile(&*profile_memory, &sub_clone, now_ms);
+        });
+    }
 
     Ok(SearchResponse {
         results: results.into_iter().map(Into::into).collect(),
@@ -735,6 +854,86 @@ pub(crate) async fn search_core(
             })
             .collect(),
     })
+}
+
+/// Returns a sort key that adds a mild time-decay penalty to the semantic
+/// distance. The raw `hit.distance` is NOT mutated — callers report the
+/// original value, decay only affects ordering.
+fn decay_sort_key(hit: &SearchHit, now_ms: i64) -> f32 {
+    if hit.created_at <= 0 {
+        return hit.distance;
+    }
+    let age_days = ((now_ms - hit.created_at).max(0) as f64 / 86_400_000.0).min(730.0);
+    // Penalty proportional to the item's own distance: highly-relevant items
+    // are barely affected; borderline hits are nudged down for freshness.
+    let penalty = 0.0002 * age_days as f32 * hit.distance.max(0.01);
+    (hit.distance + penalty).clamp(0.0, 1.0)
+}
+
+/// Blend two embeddings: `weight * a + (1-weight) * b`, then L2-normalize.
+fn blend_embeddings(a: &[f32], b: &[f32], weight: f32) -> Vec<f32> {
+    let mut blended: Vec<f32> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| weight * x + (1.0 - weight) * y)
+        .collect();
+    let norm: f32 = blended.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-9 {
+        for v in &mut blended {
+            *v /= norm;
+        }
+    }
+    blended
+}
+
+/// Recompute the user's interest embedding from recent query embeddings when
+/// enough new events have occurred since the last profile update.
+fn maybe_refresh_profile(memory: &dyn UserMemoryStore, subject: &str, now_ms: i64) {
+    let profile = match memory.get_user_profile(subject) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load user profile for refresh");
+            return;
+        }
+    };
+    let horizon = profile.as_ref().map(|p| p.event_horizon).unwrap_or(0);
+    let new_events = match memory.count_events_since(subject, horizon) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    if new_events < PROFILE_REFRESH_AFTER {
+        return;
+    }
+    let embeddings = match memory.get_recent_query_embeddings(subject, PROFILE_EVENTS_WINDOW) {
+        Ok(e) if !e.is_empty() => e,
+        _ => return,
+    };
+    let dim = embeddings[0].len();
+    let mut centroid = vec![0.0f32; dim];
+    for emb in &embeddings {
+        for (c, v) in centroid.iter_mut().zip(emb) {
+            *c += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    for c in &mut centroid {
+        *c /= n;
+    }
+    let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-9 {
+        for c in &mut centroid {
+            *c /= norm;
+        }
+    }
+    let updated = crate::db::UserProfile {
+        subject: subject.to_owned(),
+        interest_embedding: Some(centroid),
+        event_horizon: now_ms,
+        updated_at: now_ms,
+    };
+    if let Err(e) = memory.upsert_user_profile(updated) {
+        tracing::warn!(error = %e, "failed to save user profile");
+    }
 }
 
 async fn graph_status(
@@ -2537,6 +2736,7 @@ mod tests {
             Arc::new(EmbedderHandle::loading()),
             store.clone(),
             store,
+            Arc::new(NoopUserMemory),
             AuthConfig::default(),
             OpenAiChatConfig {
                 timeout_secs: 60,
@@ -2560,6 +2760,7 @@ mod tests {
             Arc::new(EmbedderHandle::loading()),
             store.clone(),
             store,
+            Arc::new(NoopUserMemory),
             AuthConfig {
                 enabled: true,
                 frontend_api_key: Some("expected-key".to_owned()),
@@ -2621,6 +2822,7 @@ mod tests {
             Arc::new(EmbedderHandle::ready(embedder)),
             vector_store,
             auth_store,
+            Arc::new(NoopUserMemory),
             AuthConfig {
                 enabled: true,
                 session_secret: Some("test-session-secret".to_owned()),

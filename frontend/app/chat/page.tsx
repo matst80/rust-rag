@@ -5,7 +5,7 @@ export default function ChatPage() {
   return (
     <>
       <AppHeader />
-      <main className="container py-6">
+      <main>
         <ChatInterface />
       </main>
     </>

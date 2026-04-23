@@ -101,7 +101,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(request): Parameters<StoreRequest>,
     ) -> Result<Json<StoreResponse>, String> {
-        store_entry_core(&self.state, request)
+        store_entry_core(&self.state, request, None)
             .await
             .map(Json)
             .map_err(stringify_api_error)
@@ -115,7 +115,7 @@ impl RustRagMcpServer {
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
         let query = request.query.clone();
-        let response = search_core(&self.state, request)
+        let response = search_core(&self.state, request, None)
             .await
             .map_err(stringify_api_error)?;
         Ok(format_search_result(&response, &query))

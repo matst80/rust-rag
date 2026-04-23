@@ -256,6 +256,60 @@ pub struct ManualEdgeInput {
     pub metadata: Value,
 }
 
+/// How many recent search events to average when rebuilding an interest profile.
+pub const PROFILE_EVENTS_WINDOW: usize = 30;
+/// Rebuild the interest profile after this many new search events.
+pub const PROFILE_REFRESH_AFTER: i64 = 5;
+
+#[derive(Debug, Clone)]
+pub struct NewUserEvent {
+    pub id: String,
+    pub subject: String,
+    pub event_type: UserEventType,
+    pub query: Option<String>,
+    pub query_embedding: Option<Vec<f32>>,
+    pub item_ids: Vec<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEventType {
+    Search,
+    Store,
+    Chat,
+}
+
+impl UserEventType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Store => "store",
+            Self::Chat => "chat",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserProfile {
+    pub subject: String,
+    pub interest_embedding: Option<Vec<f32>>,
+    pub event_horizon: i64,
+    pub updated_at: i64,
+}
+
+pub trait UserMemoryStore: Send + Sync {
+    fn log_user_event(&self, event: NewUserEvent) -> Result<()>;
+    fn touch_item_accesses(&self, item_ids: &[String], now: i64) -> Result<()>;
+    fn get_user_profile(&self, subject: &str) -> Result<Option<UserProfile>>;
+    fn upsert_user_profile(&self, profile: UserProfile) -> Result<()>;
+    fn get_recent_query_embeddings(
+        &self,
+        subject: &str,
+        limit: usize,
+    ) -> Result<Vec<Vec<f32>>>;
+    fn count_events_since(&self, subject: &str, horizon: i64) -> Result<i64>;
+}
+
 pub trait VectorStore: Send + Sync {
     fn upsert_item(&self, item: ItemRecord, embedding: &[f32]) -> Result<()>;
     fn search(
@@ -957,6 +1011,144 @@ impl VectorStore for SqliteVectorStore {
     }
 }
 
+
+impl UserMemoryStore for SqliteVectorStore {
+    fn log_user_event(&self, event: NewUserEvent) -> Result<()> {
+        let item_ids_json = serde_json::to_string(&event.item_ids)?;
+        let embedding_blob = event.query_embedding.as_deref().map(embedding_to_blob);
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "INSERT INTO user_events (id, subject, event_type, query, query_embedding, item_ids, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                event.id,
+                event.subject,
+                event.event_type.as_str(),
+                event.query,
+                embedding_blob,
+                item_ids_json,
+                event.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn touch_item_accesses(&self, item_ids: &[String], now: i64) -> Result<()> {
+        if item_ids.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        let placeholders = std::iter::repeat("?")
+            .take(item_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE items SET access_count = access_count + 1, last_accessed = ?1 WHERE id IN ({placeholders})"
+        );
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(item_ids.len() + 1);
+        params_vec.push(&now);
+        for id in item_ids {
+            params_vec.push(id);
+        }
+        connection.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+        Ok(())
+    }
+
+    fn get_user_profile(&self, subject: &str) -> Result<Option<UserProfile>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT subject, interest_embedding, event_horizon, updated_at
+             FROM user_profiles WHERE subject = ?1",
+        )?;
+        let mut rows = stmt.query(params![subject])?;
+        match rows.next()? {
+            None => Ok(None),
+            Some(row) => {
+                let blob: Option<Vec<u8>> = row.get(1)?;
+                Ok(Some(UserProfile {
+                    subject: row.get(0)?,
+                    interest_embedding: blob.map(|b| blob_to_embedding(&b)),
+                    event_horizon: row.get(2)?,
+                    updated_at: row.get(3)?,
+                }))
+            }
+        }
+    }
+
+    fn upsert_user_profile(&self, profile: UserProfile) -> Result<()> {
+        let blob = profile.interest_embedding.as_deref().map(embedding_to_blob);
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "INSERT INTO user_profiles (subject, interest_embedding, event_horizon, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(subject) DO UPDATE
+             SET interest_embedding = excluded.interest_embedding,
+                 event_horizon = excluded.event_horizon,
+                 updated_at = excluded.updated_at",
+            params![profile.subject, blob, profile.event_horizon, profile.updated_at],
+        )?;
+        Ok(())
+    }
+
+    fn get_recent_query_embeddings(&self, subject: &str, limit: usize) -> Result<Vec<Vec<f32>>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT query_embedding FROM user_events
+             WHERE subject = ?1 AND event_type = 'search' AND query_embedding IS NOT NULL
+             ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![subject, limit as i64], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        let mut embeddings = Vec::new();
+        for row in rows {
+            embeddings.push(blob_to_embedding(&row?));
+        }
+        Ok(embeddings)
+    }
+
+    fn count_events_since(&self, subject: &str, horizon: i64) -> Result<i64> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let count = connection.query_row(
+            "SELECT COUNT(*) FROM user_events
+             WHERE subject = ?1 AND event_type = 'search' AND created_at > ?2",
+            params![subject, horizon],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+}
+
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect()
+}
+
+fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
 
 fn list_items_internal(
     connection: &Connection,

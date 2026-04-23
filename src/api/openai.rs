@@ -1677,6 +1677,7 @@ mod tests {
             Arc::new(EmbedderHandle::ready(Arc::new(MockEmbedder))),
             store.clone() as Arc<dyn VectorStore>,
             store as Arc<dyn AuthStore>,
+            Arc::new(super::super::NoopUserMemory),
             AuthConfig::default(),
             OpenAiChatConfig {
                 timeout_secs: 60,
