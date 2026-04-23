@@ -1,0 +1,43 @@
+@baseUrl = http://127.0.0.1:4001
+
+### Request Device Code
+# Used by clients (like a CLI or extension) to start the device login flow.
+POST {{baseUrl}}/auth/device/code
+Content-Type: application/json
+
+{
+  "client_name": "my-mcp-client"
+}
+
+### Poll for Device Token
+# Used by clients to poll for the access token after the user has approved the request.
+# Replace {device_code} with the code returned from the /auth/device/code request.
+POST {{baseUrl}}/auth/device/token
+Content-Type: application/json
+
+{
+  "device_code": "REPLACE_WITH_DEVICE_CODE"
+}
+
+### Verify User Code (Internal/UI)
+# Used by the approval UI to check if a user code is valid before prompting for approval.
+GET {{baseUrl}}/auth/device/verify?user_code=ABCD-EFGH
+
+### Approve Device (Requires Session)
+# Used by the approval UI to approve a device request.
+# This requires a valid session cookie (rag_session).
+POST {{baseUrl}}/auth/device/approve
+Content-Type: application/json
+
+{
+  "user_code": "ABCD-EFGH",
+  "name": "mats-laptop"
+}
+
+### List MCP Tokens (Requires Session)
+# Lists all active MCP tokens for the current user.
+GET {{baseUrl}}/auth/tokens
+
+### Revoke MCP Token (Requires Session)
+# Revokes a specific MCP token.
+DELETE {{baseUrl}}/auth/tokens/REPLACE_WITH_TOKEN_ID

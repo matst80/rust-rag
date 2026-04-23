@@ -6,7 +6,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_SERVER_NAME: &str = "rust-rag-mcp";
 const DEFAULT_SERVER_INSTRUCTIONS: &str = "This server exposes the rust-rag retrieval store over MCP tools. \
 Entries are grouped by a user-defined `source_id` (a short lowercase namespace such as \"memory\", \"knowledge\", or \"notes\") — pick a stable source_id per logical bucket of content. \
-Use `search_entries` for semantic retrieval (filter by source_id when you know the bucket), `store_entry` to add content, admin tools to manage items, and graph tools to inspect or curate manual links between entries.";
+Use `search_entries` for semantic retrieval, `store_entry` to add content, `smart_store` to automatically extract items from messy text, admin tools to manage items, and graph tools to inspect or curate manual links.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ToolGroup {

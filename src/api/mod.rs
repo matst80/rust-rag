@@ -1540,29 +1540,29 @@ Rules:\n\
 Respond ONLY with a JSON array. No markdown fences, no explanation.\n\
 Schema: [{\"text\": \"...\", \"source_id\": \"...\", \"metadata\": {\"title\": \"...\", \"topic\": \"...\", \"tags\": [\"...\"]}}]";
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreContext {
-    url: Option<String>,
-    title: Option<String>,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreContext {
+    pub url: Option<String>,
+    pub title: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreRequest {
-    text: String,
-    context: Option<SmartStoreContext>,
-    model: Option<String>,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreRequest {
+    pub text: String,
+    pub context: Option<SmartStoreContext>,
+    pub model: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct SmartStoreResponse {
-    items: Vec<StoreResponse>,
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SmartStoreResponse {
+    pub items: Vec<StoreResponse>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreItem {
-    text: String,
-    source_id: String,
-    metadata: Value,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreItem {
+    pub text: String,
+    pub source_id: String,
+    pub metadata: Value,
 }
 
 async fn smart_store(
