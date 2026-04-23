@@ -238,12 +238,15 @@ impl Default for SortOrder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ListItemsRequest {
     pub source_id: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub sort_order: SortOrder,
+    pub metadata_filter: HashMap<String, String>,
+    pub min_created_at: Option<i64>,
+    pub max_created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1246,28 +1249,64 @@ fn list_items_internal(
         SortOrder::Desc => "DESC",
     };
 
-    let total_count: i64 = if let Some(source_id) = &request.source_id {
-        connection.query_row(
-            "SELECT COUNT(*) FROM items WHERE source_id = ?1",
-            params![source_id],
-            |row| row.get(0),
-        )?
+    let mut where_clauses = Vec::new();
+    let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(source_id) = &request.source_id {
+        where_clauses.push("source_id = ?".to_string());
+        sql_params.push(Box::new(source_id.clone()));
+    }
+
+    if let Some(min_at) = request.min_created_at {
+        where_clauses.push("created_at >= ?".to_string());
+        sql_params.push(Box::new(min_at));
+    }
+
+    if let Some(max_at) = request.max_created_at {
+        where_clauses.push("created_at <= ?".to_string());
+        sql_params.push(Box::new(max_at));
+    }
+
+    for (key, value) in &request.metadata_filter {
+        let path = format!("$.{}", key);
+        where_clauses.push("json_extract(metadata, ?) = ?".to_string());
+        sql_params.push(Box::new(path));
+        sql_params.push(Box::new(value.clone()));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        "".to_string()
     } else {
-        connection.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?
+        format!("WHERE {}", where_clauses.join(" AND "))
     };
+
+    let count_sql = format!("SELECT COUNT(*) FROM items {}", where_sql);
+    let total_count: i64 = connection.query_row(
+        &count_sql,
+        rusqlite::params_from_iter(sql_params.iter().map(|p| p.as_ref())),
+        |row| row.get(0),
+    )?;
 
     let sql = format!(
         "
         SELECT id, text, metadata, source_id, created_at
         FROM items
-        WHERE (?1 IS NULL OR source_id = ?1)
+        {}
         ORDER BY created_at {sort_order}, id ASC
-        LIMIT ?2 OFFSET ?3
-        "
+        LIMIT ? OFFSET ?
+        ",
+        where_sql
     );
 
+    let mut query_params = sql_params;
+    query_params.push(Box::new(limit));
+    query_params.push(Box::new(offset));
+
     let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(params![request.source_id, limit, offset], map_item_row)?;
+    let rows = statement.query_map(
+        rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
+        map_item_row,
+    )?;
     for row in rows {
         items.push(row?);
     }
@@ -1529,6 +1568,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 sort_order: SortOrder::Desc,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(knowledge_items.len(), 1);

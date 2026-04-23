@@ -5,7 +5,7 @@ export default function AssistedPage() {
   return (
     <>
       <AppHeader />
-      <main className="container py-6">
+      <main>
         <AssistedQueryView />
       </main>
     </>

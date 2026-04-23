@@ -18,6 +18,7 @@ import {
   User,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { ThemeToggle } from "@/components/theme-toggle"
 
 const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
@@ -151,6 +152,7 @@ export function AppHeader() {
               <span className="hidden sm:inline">Sign in</span>
             </a>
           ) : null}
+          <ThemeToggle />
           <a
             href={GITHUB_REPO_URL}
             target="_blank"

@@ -158,6 +158,9 @@ impl RustRagMcpServer {
             limit: query.limit,
             offset: query.offset,
             sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+            metadata_filter: query.metadata,
+            min_created_at: query.min_created_at,
+            max_created_at: query.max_created_at,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await

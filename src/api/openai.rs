@@ -186,6 +186,10 @@ struct ListItemsArguments {
     limit: Option<usize>,
     offset: Option<usize>,
     sort_order: Option<String>,
+    min_created_at: Option<i64>,
+    max_created_at: Option<i64>,
+    #[serde(default)]
+    metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -588,7 +592,10 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
                         "source_id": { "type": "string" },
                         "limit": { "type": "integer", "default": 10 },
                         "offset": { "type": "integer", "default": 0 },
-                        "sort_order": { "type": "string", "enum": ["Asc", "Desc"], "default": "Desc" }
+                        "sort_order": { "type": "string", "enum": ["Asc", "Desc"], "default": "Desc" },
+                        "min_created_at": { "type": "integer", "description": "Filter by minimum creation timestamp (ms)." },
+                        "max_created_at": { "type": "integer", "description": "Filter by maximum creation timestamp (ms)." },
+                        "metadata": { "type": "object", "description": "Key-value pairs to match in entry metadata." }
                     },
                     "additionalProperties": false
                 })),
@@ -964,6 +971,9 @@ async fn list_items_tool(
         limit: arguments.limit,
         offset: arguments.offset,
         sort_order,
+        metadata_filter: arguments.metadata,
+        min_created_at: arguments.min_created_at,
+        max_created_at: arguments.max_created_at,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))

@@ -39,6 +39,7 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.88 0 0);
   --sidebar-ring: oklch(0.5 0 0);
+  --dot-color: oklch(0.205 0 0 / 0.05);
 }
 
 .dark {
@@ -78,6 +79,7 @@
   --sidebar-accent-foreground: oklch(0.9 0.148 196.3);
   --sidebar-border: oklch(0.175 0 0);
   --sidebar-ring: oklch(0.9 0.148 196.3);
+  --dot-color: oklch(0.9 0.148 196.3 / 0.045);
 }
 
 @theme inline {
@@ -130,18 +132,18 @@
   }
 }
 
-/* Dot-grid background for dark mode */
-.dark body::before {
+/* Dot-grid background */
+body::before {
   content: '';
   position: fixed;
   inset: 0;
-  background-image: radial-gradient(circle, oklch(0.9 0.148 196.3 / 0.045) 1px, transparent 1px);
+  background-image: radial-gradient(circle, var(--dot-color) 1px, transparent 1px);
   background-size: 24px 24px;
   pointer-events: none;
   z-index: 0;
 }
 
-.dark body > * {
+body > * {
   position: relative;
   z-index: 1;
 }

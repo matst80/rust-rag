@@ -267,13 +267,18 @@ pub struct UpdateItemRequest {
     pub source_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub struct ListItemsQuery {
     /// Restrict the listing to a single source_id. Omit to list across all namespaces.
     pub source_id: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub sort_order: Option<SortOrder>,
+    pub min_created_at: Option<i64>,
+    pub max_created_at: Option<i64>,
+    /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
+    #[serde(flatten)]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1187,6 +1192,9 @@ async fn list_items(
         limit: query.limit,
         offset: query.offset,
         sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+        metadata_filter: query.metadata,
+        min_created_at: query.min_created_at,
+        max_created_at: query.max_created_at,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -2140,10 +2148,23 @@ mod tests {
             let mut items = stored
                 .iter()
                 .filter(|(item, _)| {
-                    request
-                        .source_id
-                        .as_ref()
-                        .is_none_or(|source| &item.source_id == source)
+                    if let Some(source) = &request.source_id {
+                        if &item.source_id != source { return false; }
+                    }
+                    if let Some(min) = request.min_created_at {
+                        if item.created_at < min { return false; }
+                    }
+                    if let Some(max) = request.max_created_at {
+                        if item.created_at > max { return false; }
+                    }
+                    for (key, val) in &request.metadata_filter {
+                        if let Some(meta_val) = item.metadata.get(key) {
+                            if meta_val.as_str() != Some(val) { return false; }
+                        } else {
+                            return false;
+                        }
+                    }
+                    true
                 })
                 .map(|(item, _)| item.clone())
                 .collect::<Vec<_>>();

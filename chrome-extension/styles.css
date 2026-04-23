@@ -1,5 +1,37 @@
 :root {
-  /* k0s-inspired Palette */
+  /* Default: Light Theme */
+  --accent-color: #00818a;
+  --bg-color: #ffffff;
+  --surface-color: #f7f7f7;
+  --surface-secondary: #eeeeee;
+  --text-color: #1a1a1a;
+  --text-secondary: #666666;
+  --success-color: #00aa77;
+  --error-color: #e63946;
+  --border-color: rgba(0, 0, 0, 0.08);
+  
+  --radius-lg: 2px;
+  --radius-md: 1px;
+  
+  --font-main: 'Inter', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  body.system-theme {
+    --accent-color: #00f2ff;
+    --bg-color: #000000;
+    --surface-color: #111111;
+    --surface-secondary: #1a1a1a;
+    --text-color: #ffffff;
+    --text-secondary: #888888;
+    --success-color: #00ffaa;
+    --error-color: #ff4d4d;
+    --border-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+body.dark-theme {
   --accent-color: #00f2ff;
   --bg-color: #000000;
   --surface-color: #111111;
@@ -9,12 +41,32 @@
   --success-color: #00ffaa;
   --error-color: #ff4d4d;
   --border-color: rgba(255, 255, 255, 0.1);
-  
-  --radius-lg: 2px;
-  --radius-md: 1px;
-  
-  --font-main: 'Inter', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+body.light-theme {
+  --accent-color: #00818a;
+  --bg-color: #ffffff;
+  --surface-color: #f7f7f7;
+  --surface-secondary: #eeeeee;
+  --text-color: #1a1a1a;
+  --text-secondary: #666666;
+  --success-color: #00aa77;
+  --error-color: #e63946;
+  --border-color: rgba(0, 0, 0, 0.08);
+}
+
+.footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+#theme-toggle .sun-icon {
+  display: block;
+}
+
+/* Theme toggle icon state placeholder */
+body.dark-theme #theme-toggle .sun-icon {
+  opacity: 0.8;
 }
 
 * {
@@ -52,7 +104,7 @@ h1 {
   font-weight: 900;
   letter-spacing: 2px;
   text-transform: uppercase;
-  color: #fff;
+  color: var(--text-color);
 }
 
 h1 span {
@@ -117,7 +169,7 @@ h1 span {
 }
 
 .search-box input {
-  background: transparent !important; /* Force dark background */
+  background: transparent !important;
   border: none;
   color: var(--text-color) !important;
   padding: 12px 14px;
@@ -174,7 +226,8 @@ h1 span {
 
 .result-text {
   font-size: 12.5px;
-  color: #ddd;
+  color: var(--text-color);
+  opacity: 0.9;
   line-height: 1.6;
 }
 
@@ -233,7 +286,7 @@ h1 span {
 .chat-content {
   font-size: 13px;
   line-height: 1.6;
-  color: #eee;
+  color: var(--text-color);
   white-space: pre-wrap;
 }
 
@@ -241,7 +294,7 @@ h1 span {
 #store-input {
   background-color: var(--surface-color);
   border: 1px solid var(--border-color);
-  color: #fff;
+  color: var(--text-color);
   padding: 14px;
   font-size: 13px;
   width: 100%;
@@ -264,7 +317,7 @@ h1 span {
 select {
   background-color: var(--surface-color);
   border: 1px solid var(--border-color);
-  color: #fff;
+  color: var(--text-color);
   padding: 10px;
   flex: 1;
   font-size: 11px;

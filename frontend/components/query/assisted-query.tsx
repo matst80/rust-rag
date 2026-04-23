@@ -159,8 +159,8 @@ export function AssistedQueryView() {
   )
 
   return (
-    <div className="relative flex min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-6">
+    <div className="relative flex w-full min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
+      <div className="mx-auto w-full max-w-3xl flex-1 flex flex-col px-6">
 
         {!hasActivity ? (
           /* ── Hero state ── */
