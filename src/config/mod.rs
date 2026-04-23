@@ -102,6 +102,29 @@ impl AuthConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChunkingConfig {
+    /// Maximum characters per stored chunk. Tune to your embedding model's context window.
+    /// Env: RAG_CHUNK_MAX_CHARS (default 1536)
+    pub chunk_max_chars: usize,
+    /// Characters of the previous chunk's tail to prepend to each chunk's embedding for context.
+    /// Env: RAG_CHUNK_OVERLAP_CHARS (default 200)
+    pub chunk_overlap_chars: usize,
+    /// Items longer than this are flagged as oversized in the admin panel.
+    /// Env: RAG_LARGE_ITEM_THRESHOLD (default = chunk_max_chars)
+    pub large_item_threshold: usize,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            chunk_max_chars: 1536,
+            chunk_overlap_chars: 200,
+            large_item_threshold: 1536,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OntologyConfig {
     pub enabled: bool,
     pub confidence_threshold: f32,
@@ -147,6 +170,7 @@ pub struct AppConfig {
     pub graph_cross_source: bool,
     pub auth: AuthConfig,
     pub openai_chat: OpenAiChatConfig,
+    pub chunking: ChunkingConfig,
     pub ontology: OntologyConfig,
 }
 
@@ -221,6 +245,15 @@ impl AppConfig {
                     .unwrap_or_else(|| default_retrieval_system_prompt().to_owned()),
                 query_expansion_prompt: non_empty_var("RAG_QUERY_EXPANSION_PROMPT")
                     .unwrap_or_else(|| default_query_expansion_prompt().to_owned()),
+            },
+            chunking: {
+                let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;
+                let chunk_overlap_chars: usize = parse_env("RAG_CHUNK_OVERLAP_CHARS", "200")?;
+                let large_item_threshold: usize = parse_env(
+                    "RAG_LARGE_ITEM_THRESHOLD",
+                    &chunk_max_chars.to_string(),
+                )?;
+                ChunkingConfig { chunk_max_chars, chunk_overlap_chars, large_item_threshold }
             },
             ontology: OntologyConfig {
                 enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,

@@ -14,6 +14,7 @@ import type {
   ListItemsRequest,
   LargeItemsRequest,
   RechunkRequest,
+  LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
 } from "./types"
@@ -70,6 +71,13 @@ export function useRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, RechunkRequest>(
     `rechunk-${id}`,
     (_, { arg }) => api.items.rechunk(id, arg)
+  )
+}
+
+export function useLlmRechunkItem(id: string) {
+  return useSWRMutation<RechunkResponse, Error, string, LlmRechunkRequest>(
+    `llm-rechunk-${id}`,
+    (_, { arg }) => api.items.llmRechunk(id, arg)
   )
 }
 

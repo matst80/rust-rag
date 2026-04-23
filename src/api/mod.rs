@@ -1,5 +1,5 @@
 use crate::{
-    config::{AuthConfig, OpenAiChatConfig},
+    config::{AuthConfig, ChunkingConfig, OpenAiChatConfig},
     db::{
         AuthStore, CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
         GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput,
@@ -46,6 +46,7 @@ pub struct AppState {
     pub user_memory: Arc<dyn UserMemoryStore>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
+    pub chunking: Arc<ChunkingConfig>,
     pub http_client: reqwest::Client,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
@@ -58,6 +59,7 @@ impl AppState {
         user_memory: Arc<dyn UserMemoryStore>,
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
+        chunking: ChunkingConfig,
     ) -> Self {
         let timeout_secs = openai_chat.timeout_secs.max(1);
         Self {
@@ -67,6 +69,7 @@ impl AppState {
             user_memory,
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
+            chunking: Arc::new(chunking),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
@@ -96,6 +99,7 @@ impl AppState {
             user_memory: Arc::new(NoopUserMemory),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
+            chunking: Arc::new(ChunkingConfig::default()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -198,7 +202,7 @@ pub struct ChunkConfig {
 }
 
 fn default_chunk_max_chars() -> usize {
-    1024
+    1536
 }
 fn default_chunk_overlap_chars() -> usize {
     200
@@ -510,6 +514,7 @@ pub fn router(state: AppState) -> Router {
             get(get_item).put(update_item).delete(delete_item),
         )
         .route("/admin/items/{id}/rechunk", post(rechunk_item))
+        .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
@@ -1272,7 +1277,7 @@ async fn list_large_items(
     State(state): State<AppState>,
     Query(query): Query<LargeItemsQuery>,
 ) -> Result<Json<AdminItemsResponse>, ApiError> {
-    let min_chars = query.min_chars.unwrap_or(1024);
+    let min_chars = query.min_chars.unwrap_or(state.chunking.large_item_threshold);
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
     let store = state.store.clone();
@@ -1311,8 +1316,8 @@ async fn rechunk_item(
     .map_err(ApiError::Internal)?
     .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
 
-    let max_chars = body.max_chars.unwrap_or(1024);
-    let overlap_chars = body.overlap_chars.unwrap_or(200);
+    let max_chars = body.max_chars.unwrap_or(state.chunking.chunk_max_chars);
+    let overlap_chars = body.overlap_chars.unwrap_or(state.chunking.chunk_overlap_chars);
 
     let request = StoreRequest {
         id: Some(item.id.clone()),
@@ -1334,6 +1339,178 @@ async fn rechunk_item(
     }
 
     Ok(Json(response))
+}
+
+const LLM_RECHUNK_SYSTEM_PROMPT: &str = "\
+You are a document chunking assistant. Your task is to split the provided text into \
+self-contained, semantically coherent chunks suitable for retrieval-augmented generation (RAG). \
+\n\n\
+Rules:\n\
+- Each chunk should be independently understandable — no dangling references.\n\
+- Preserve meaning; do not summarize or paraphrase.\n\
+- Use natural boundaries (paragraphs, sections, list items).\n\
+- Aim for chunks of roughly 200–600 words.\n\
+- Avoid chunks shorter than 2 sentences unless the section is naturally brief.\n\
+\n\n\
+Respond ONLY with a JSON array of strings, each string being one chunk. No markdown, no explanation.\n\
+Example: [\"chunk one text\", \"chunk two text\"]";
+
+#[derive(Debug, Deserialize)]
+struct LlmRechunkRequest {
+    model: Option<String>,
+    max_chunks: Option<usize>,
+}
+
+async fn llm_rechunk_item(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Path(id): Path<String>,
+    Json(body): Json<LlmRechunkRequest>,
+) -> Result<Json<StoreResponse>, ApiError> {
+    let openai_config = state.openai_chat.clone();
+    if !openai_config.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "upstream OpenAI chat configuration is not set".to_owned(),
+        ));
+    }
+    let model = body
+        .model
+        .or_else(|| openai_config.default_model.clone())
+        .ok_or_else(|| ApiError::BadRequest("model required".to_owned()))?;
+
+    let store = state.store.clone();
+    let item = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || store.get_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?
+    .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
+
+    let max_chunks = body.max_chunks.unwrap_or(20);
+    let user_prompt = format!(
+        "Split this text into at most {max_chunks} chunks.\n\nTEXT:\n{}",
+        item.text
+    );
+
+    let payload = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": LLM_RECHUNK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+
+    let base_url = openai_config
+        .base_url
+        .as_deref()
+        .expect("is_configured() already checked");
+
+    let mut req = state
+        .http_client
+        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .json(&payload);
+    if let Some(key) = openai_config.api_key.as_deref() {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .error_for_status()
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp { choices: Vec<Choice> }
+    #[derive(serde::Deserialize)]
+    struct Choice { message: Msg }
+    #[derive(serde::Deserialize)]
+    struct Msg { content: Option<String> }
+
+    let chat: Resp = response
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    let content = chat
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .unwrap_or_default();
+
+    let texts: Vec<String> = serde_json::from_str(&content).map_err(|_| {
+        ApiError::Internal(anyhow::anyhow!(
+            "LLM did not return a JSON array of strings; got: {content}"
+        ))
+    })?;
+
+    if texts.is_empty() {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "LLM returned an empty chunk list"
+        )));
+    }
+
+    let embedder = state.embedder.get_ready()?;
+    let parent_id = item.id.clone();
+    let source_id = item.source_id.clone();
+    let base_metadata = item.metadata.clone();
+    let now = current_timestamp_millis()?;
+    let store = state.store.clone();
+    let total = texts.len();
+
+    let chunk_ids: Vec<String> = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
+        let mut ids = Vec::with_capacity(total);
+        for (i, text) in texts.into_iter().enumerate() {
+            let chunk_id = format!("{parent_id}:c:{i}");
+            let mut metadata = base_metadata.clone();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "_chunk".to_owned(),
+                    serde_json::json!({ "parent": parent_id, "i": i, "n": total }),
+                );
+            }
+            let record = ItemRecord {
+                id: chunk_id.clone(),
+                text: text.clone(),
+                metadata,
+                source_id: source_id.clone(),
+                created_at: now,
+            };
+            let embedding = embedder.embed(&text)?;
+            store.upsert_item(record, &embedding)?;
+            ids.push(chunk_id);
+        }
+        store.delete_item(&parent_id)?;
+        Ok(ids)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    if let Some(ref sub) = subject.0 {
+        let memory = state.user_memory.clone();
+        let event = NewUserEvent {
+            id: Uuid::new_v4().to_string(),
+            subject: sub.clone(),
+            event_type: UserEventType::Store,
+            query: None,
+            query_embedding: None,
+            item_ids: chunk_ids.clone(),
+            created_at: now,
+        };
+        let _ = tokio::task::spawn_blocking(move || memory.log_user_event(event)).await;
+    }
+
+    Ok(Json(StoreResponse {
+        id: item.id,
+        source_id: item.source_id,
+        created_at: now,
+        chunk_ids: Some(chunk_ids),
+    }))
 }
 
 async fn rebuild_graph(
@@ -2997,6 +3174,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         )));
 
         let response = server.get("/healthz").await;
@@ -3027,6 +3205,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         )));
 
         let response = server
@@ -3090,6 +3269,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         );
         (state, store)
     }

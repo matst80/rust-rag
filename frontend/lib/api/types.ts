@@ -119,6 +119,11 @@ export interface RechunkRequest {
   overlap_chars?: number
 }
 
+export interface LlmRechunkRequest {
+  model?: string
+  max_chunks?: number
+}
+
 export interface RechunkResponse {
   id: string
   source_id: string

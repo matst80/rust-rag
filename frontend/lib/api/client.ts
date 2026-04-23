@@ -16,6 +16,7 @@ import type {
   ListItemsRequest,
   LargeItemsRequest,
   RechunkRequest,
+  LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
   ChatCompletionChunk,
@@ -420,6 +421,16 @@ export async function rechunkItem(
   })
 }
 
+export async function llmRechunkItem(
+  id: string,
+  config: LlmRechunkRequest = {}
+): Promise<RechunkResponse> {
+  return request<RechunkResponse>(`/admin/items/${encodeURIComponent(id)}/llm-rechunk`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  })
+}
+
 export async function createItem(data: StoreRequest): Promise<Entry> {
   return request<Entry>("/api/store", {
     method: "POST",
@@ -545,6 +556,7 @@ export const api = {
     delete: deleteItem,
     listLarge: getLargeItems,
     rechunk: rechunkItem,
+    llmRechunk: llmRechunkItem,
   },
   search,
   edges: {

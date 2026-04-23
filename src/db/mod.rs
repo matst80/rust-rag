@@ -663,7 +663,7 @@ impl VectorStore for SqliteVectorStore {
                     items.metadata,
                     items.source_id,
                     items.created_at,
-                    bm25(items_fts) as score
+                    COALESCE(bm25(items_fts), 0.0) as score
                 FROM items
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1

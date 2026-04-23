@@ -1510,7 +1510,7 @@ mod tests {
     use super::*;
     use crate::{
         api::EmbedderHandle,
-        config::{AuthConfig, OpenAiChatConfig},
+        config::{AuthConfig, ChunkingConfig, OpenAiChatConfig},
         db::{AuthStore, GraphConfig, ItemRecord, SqliteVectorStore, VectorStore},
         embedding::EmbeddingService,
     };
@@ -1683,6 +1683,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         );
 
         let result = search_entries_tool(

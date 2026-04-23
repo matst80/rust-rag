@@ -1,39 +1,71 @@
 "use client"
 
 import { useState } from "react"
+import Link from "next/link"
 import { useSWRConfig } from "swr"
-import { AlertTriangle, Scissors, ChevronLeft, ChevronRight, Loader2 } from "lucide-react"
+import { AlertTriangle, Scissors, Sparkles, ChevronLeft, ChevronRight, Loader2, ExternalLink } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { useLargeItems, useRechunkItem } from "@/lib/api"
+import { useLargeItems, useRechunkItem, useLlmRechunkItem } from "@/lib/api"
 import type { Entry } from "@/lib/api"
 
 const PAGE_SIZE = 20
-const DEFAULT_MIN_CHARS = 1024
 
-function RechunkButton({ item, onDone }: { item: Entry; onDone: () => void }) {
-  const { trigger, isMutating } = useRechunkItem(item.id)
-
-  const handleRechunk = async () => {
-    const result = await trigger({})
-    if (result) onDone()
-  }
+function ItemActions({ item, onDone }: { item: Entry; onDone: () => void }) {
+  const { trigger: rechunk, isMutating: isRechunking } = useRechunkItem(item.id)
+  const { trigger: llmRechunk, isMutating: isLlmRechunking } = useLlmRechunkItem(item.id)
+  const isBusy = isRechunking || isLlmRechunking
 
   return (
-    <Button
-      size="sm"
-      variant="outline"
-      className="rounded-xl gap-1.5"
-      disabled={isMutating}
-      onClick={handleRechunk}
-    >
-      {isMutating ? (
-        <Loader2 className="size-3.5 animate-spin" />
-      ) : (
-        <Scissors className="size-3.5" />
-      )}
-      {isMutating ? "Chunking…" : "Rechunk"}
-    </Button>
+    <div className="flex items-center gap-2 shrink-0">
+      <Button
+        size="sm"
+        variant="ghost"
+        className="rounded-xl gap-1.5 h-8 px-3 text-xs"
+        asChild
+      >
+        <Link href={`/entries/${encodeURIComponent(item.id)}`}>
+          <ExternalLink className="size-3" />
+          Edit
+        </Link>
+      </Button>
+
+      <Button
+        size="sm"
+        variant="outline"
+        className="rounded-xl gap-1.5 h-8 px-3 text-xs"
+        disabled={isBusy}
+        onClick={async () => {
+          await rechunk({})
+          onDone()
+        }}
+      >
+        {isRechunking ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <Scissors className="size-3" />
+        )}
+        {isRechunking ? "Chunking…" : "Split"}
+      </Button>
+
+      <Button
+        size="sm"
+        variant="outline"
+        className="rounded-xl gap-1.5 h-8 px-3 text-xs text-purple-600 border-purple-500/30 hover:bg-purple-500/5"
+        disabled={isBusy}
+        onClick={async () => {
+          await llmRechunk({})
+          onDone()
+        }}
+      >
+        {isLlmRechunking ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <Sparkles className="size-3" />
+        )}
+        {isLlmRechunking ? "Thinking…" : "LLM Split"}
+      </Button>
+    </div>
   )
 }
 
@@ -42,7 +74,6 @@ export function LargeItemsPanel() {
   const { mutate } = useSWRConfig()
 
   const { data, isLoading } = useLargeItems({
-    min_chars: DEFAULT_MIN_CHARS,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
   })
@@ -60,7 +91,7 @@ export function LargeItemsPanel() {
   if (!isLoading && totalCount === 0) return null
 
   return (
-    <div className="flex flex-col gap-4 p-8 md:p-10">
+    <div className="flex flex-col gap-4 px-8 pt-8 md:px-10 md:pt-10">
       <div className="flex items-center gap-3">
         <div className="flex size-9 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
           <AlertTriangle className="size-4 text-amber-500" />
@@ -68,7 +99,9 @@ export function LargeItemsPanel() {
         <div>
           <h2 className="text-lg font-bold tracking-tight">Oversized Entries</h2>
           <p className="text-xs text-muted-foreground">
-            {isLoading ? "Loading…" : `${totalCount} entr${totalCount === 1 ? "y" : "ies"} exceed ${DEFAULT_MIN_CHARS.toLocaleString()} characters — consider chunking for better retrieval`}
+            {isLoading
+              ? "Loading…"
+              : `${totalCount} oversized entr${totalCount === 1 ? "y" : "ies"} — split for better retrieval`}
           </p>
         </div>
       </div>
@@ -84,10 +117,10 @@ export function LargeItemsPanel() {
           {items.map((item) => (
             <div
               key={item.id}
-              className="flex items-center gap-4 rounded-2xl border border-amber-500/10 bg-amber-500/5 px-5 py-3.5"
+              className="flex items-center gap-4 rounded-2xl border border-amber-500/10 bg-amber-500/5 px-5 py-3"
             >
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
                   <span className="font-mono text-xs font-semibold text-muted-foreground truncate max-w-[200px]">
                     {item.id}
                   </span>
@@ -98,21 +131,21 @@ export function LargeItemsPanel() {
                     {item.text.length.toLocaleString()} chars
                   </Badge>
                   <span className="text-[10px] text-muted-foreground/50 shrink-0">
-                    ≈{Math.ceil(item.text.length / DEFAULT_MIN_CHARS)} chunks
+                    oversized
                   </span>
                 </div>
-                <p className="text-sm text-muted-foreground line-clamp-1">
+                <p className="text-xs text-muted-foreground line-clamp-1">
                   {item.text}
                 </p>
               </div>
-              <RechunkButton item={item} onDone={handleDone} />
+              <ItemActions item={item} onDone={handleDone} />
             </div>
           ))}
         </div>
       )}
 
       {totalPages > 1 && (
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex items-center justify-between pt-1 pb-2">
           <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
             Page {page} of {totalPages}
           </span>

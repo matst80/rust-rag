@@ -297,7 +297,7 @@ async fn call_llm_for_edges(
     let payload = json!({
         "model": model,
         "temperature": 0,
-        "max_tokens": 512,
+        "max_tokens": (1024.0 * 1.5) as usize, // generous limit to avoid truncation issues (will be cut off by OpenAI if it exceeds the model's context window)
         "messages": [
             {"role": "system", "content": ONTOLOGY_SYSTEM_PROMPT},
             {"role": "user", "content": user_message}
