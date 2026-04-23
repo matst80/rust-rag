@@ -14,10 +14,21 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "store-in-rag") {
-    storeSelection(info.selectionText, tab.url, tab.title);
-  } else if (info.menuItemId === "smart-store-in-rag") {
-    smartStoreSelection(info.selectionText, tab.url, tab.title);
+  // info.selectionText is truncated by Chrome for large selections;
+  // use executeScript to get the full selection from the page instead.
+  if (info.menuItemId === "store-in-rag" || info.menuItemId === "smart-store-in-rag") {
+    chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.getSelection().toString()
+    }, (results) => {
+      const text = results?.[0]?.result || info.selectionText;
+      if (!text) return;
+      if (info.menuItemId === "store-in-rag") {
+        storeSelection(text, tab.url, tab.title);
+      } else {
+        smartStoreSelection(text, tab.url, tab.title);
+      }
+    });
   }
 });
 

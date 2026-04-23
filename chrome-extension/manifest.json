@@ -5,6 +5,7 @@
   "description": "Simple search and storage for rust-rag",
   "permissions": [
     "contextMenus",
+    "notifications",
     "storage",
     "activeTab",
     "scripting"
