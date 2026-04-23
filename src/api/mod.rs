@@ -493,6 +493,7 @@ pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
         .route("/api/store", post(store))
+        .route("/api/store/smart", post(smart_store))
         .route("/search", post(search))
         .route("/api/search", post(search))
         .route(
@@ -1511,6 +1512,157 @@ async fn llm_rechunk_item(
         created_at: now,
         chunk_ids: Some(chunk_ids),
     }))
+}
+
+const LLM_SMART_STORE_SYSTEM_PROMPT: &str = "\
+You are a knowledge extraction assistant for a personal RAG (retrieval-augmented generation) system. \
+Analyze the provided text and extract structured, searchable knowledge items.\n\n\
+For each logical piece of information:\n\
+1. Write a concise, self-contained text chunk — preserve important details, remove fluff\n\
+2. Assign a source_id category. Use one of: knowledge, reference, notes, code, recipe, \
+   medical, finance, travel, or a short lowercase identifier that best fits\n\
+3. Extract metadata: title (short descriptive title), topic (main subject), \
+   tags (array of relevant keywords)\n\n\
+Rules:\n\
+- Split into MULTIPLE items when the text covers distinct topics or has natural section breaks\n\
+- Each item must be independently useful — no dangling references to other chunks\n\
+- Aim for 1-4 sentences per item; longer only when the information is tightly coupled\n\
+- Preserve technical accuracy; never fabricate or add information not present\n\
+- If a URL or author is present in the context, include it in metadata\n\n\
+Respond ONLY with a JSON array. No markdown fences, no explanation.\n\
+Schema: [{\"text\": \"...\", \"source_id\": \"...\", \"metadata\": {\"title\": \"...\", \"topic\": \"...\", \"tags\": [\"...\"]}}]";
+
+#[derive(Debug, Deserialize)]
+struct SmartStoreContext {
+    url: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SmartStoreRequest {
+    text: String,
+    context: Option<SmartStoreContext>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SmartStoreResponse {
+    items: Vec<StoreResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SmartStoreItem {
+    text: String,
+    source_id: String,
+    metadata: Value,
+}
+
+async fn smart_store(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
+    Json(body): Json<SmartStoreRequest>,
+) -> Result<(StatusCode, Json<SmartStoreResponse>), ApiError> {
+    let openai_config = state.openai_chat.clone();
+    if !openai_config.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "upstream OpenAI chat configuration is not set".to_owned(),
+        ));
+    }
+    let model = body
+        .model
+        .or_else(|| openai_config.default_model.clone())
+        .ok_or_else(|| ApiError::BadRequest("model required".to_owned()))?;
+
+    validate_non_empty("text", &body.text)?;
+
+    let mut user_prompt = body.text.clone();
+    if let Some(ctx) = &body.context {
+        let mut ctx_lines = Vec::new();
+        if let Some(url) = &ctx.url {
+            ctx_lines.push(format!("URL: {url}"));
+        }
+        if let Some(title) = &ctx.title {
+            ctx_lines.push(format!("Page title: {title}"));
+        }
+        if !ctx_lines.is_empty() {
+            user_prompt = format!("{}\n\nTEXT:\n{}", ctx_lines.join("\n"), body.text);
+        }
+    }
+
+    let payload = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": LLM_SMART_STORE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+
+    let base_url = openai_config
+        .base_url
+        .as_deref()
+        .expect("is_configured() already checked");
+
+    let mut req = state
+        .http_client
+        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .json(&payload);
+    if let Some(key) = openai_config.api_key.as_deref() {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .error_for_status()
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp { choices: Vec<Choice> }
+    #[derive(serde::Deserialize)]
+    struct Choice { message: Msg }
+    #[derive(serde::Deserialize)]
+    struct Msg { content: Option<String> }
+
+    let chat: Resp = response
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    let content = chat
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .unwrap_or_default();
+
+    let items: Vec<SmartStoreItem> = serde_json::from_str(&content).map_err(|_| {
+        ApiError::Internal(anyhow::anyhow!(
+            "LLM did not return a valid JSON array; got: {content}"
+        ))
+    })?;
+
+    if items.is_empty() {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "LLM returned an empty item list"
+        )));
+    }
+
+    let mut responses = Vec::with_capacity(items.len());
+    for item in items {
+        let store_req = StoreRequest {
+            id: None,
+            text: item.text,
+            metadata: item.metadata,
+            source_id: item.source_id,
+            chunk: None,
+        };
+        let resp = store_entry_core(&state, store_req, session.0.clone()).await?;
+        responses.push(resp);
+    }
+
+    Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
 }
 
 async fn rebuild_graph(
