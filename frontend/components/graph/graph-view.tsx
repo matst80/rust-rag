@@ -218,9 +218,11 @@ function GraphViewContent() {
     
     // Fit view after layout update
     // We use a small timeout to ensure React Flow has processed the new nodes
-    setTimeout(() => {
-      fitView({ duration: 800, padding: 0.2 })
-    }, 50)
+    if (layoutedNodes.length > 0) {
+      setTimeout(() => {
+        fitView({ duration: 800, padding: 0.2 })
+      }, 50)
+    }
   }, [centerNode, neighborhood, combinedEntries, selectedNode, setEdges, setNodes, fitView])
 
   const handleCenterNodeChange = useCallback((nodeId: string) => {
@@ -718,7 +720,7 @@ function GraphViewContent() {
                             <p className="text-[10px] text-muted-foreground/60">
                               {edge.edge_type === "similarity"
                                 ? `semantic distance ${edge.distance?.toFixed(3) ?? "n/a"}`
-                                : `manual weight ${edge.weight.toFixed(2)}`}
+                                : `manual weight ${edge.weight?.toFixed(2) ?? "n/a"}`}
                             </p>
                           </div>
                           {edge.edge_type === "manual" ? (
