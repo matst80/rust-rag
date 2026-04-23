@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import type { Config, SearchResult, AssistedResult, AssistedEvent } from '../types';
+import { StartView } from './StartView';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Props {
   config: Config;
@@ -118,6 +121,8 @@ export function SearchTab({ config }: Props) {
     mode === 'normal' ? results.length === 0 : assistedResults.length === 0
   );
 
+  const detailUrl = (id: string) => `${config.apiBaseUrl}/entries/${encodeURIComponent(id)}`;
+
   return (
     <>
       <div className="search-box">
@@ -157,7 +162,7 @@ export function SearchTab({ config }: Props) {
 
       <div className="results-list">
         {state === 'idle' && (
-          <p className="placeholder">{mode === 'assisted' ? 'Ask a question — AI will\nexpand and search for you' : 'Type to search your RAG'}</p>
+          <StartView config={config} />
         )}
         {state === 'error' && (
           <p className="placeholder" style={{ color: 'var(--error)' }}>Error: {errorMsg}</p>
@@ -180,8 +185,17 @@ export function SearchTab({ config }: Props) {
           const score = r.score != null ? Math.round(r.score * 100) : null;
           const color = score != null ? scoreColor(score) : 'var(--text-2)';
           return (
-            <div key={i} className="result-card" style={{ animationDelay: `${i * 40}ms` }}>
-              <div className="result-text">{r.text}</div>
+            <a
+              key={r.id}
+              href={detailUrl(r.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="result-card"
+              style={{ animationDelay: `${i * 40}ms` }}
+            >
+              <div className="result-text">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{r.text}</ReactMarkdown>
+              </div>
               <div className="result-meta">
                 <span className="result-source">{r.source_id}</span>
                 {score != null && (
@@ -193,7 +207,7 @@ export function SearchTab({ config }: Props) {
                   </div>
                 )}
               </div>
-            </div>
+            </a>
           );
         })}
 
@@ -202,8 +216,17 @@ export function SearchTab({ config }: Props) {
           const score = distanceToScore(r.distance);
           const color = scoreColor(score);
           return (
-            <div key={r.id ?? i} className="result-card" style={{ animationDelay: `${i * 40}ms` }}>
-              <div className="result-text">{r.text}</div>
+            <a
+              key={r.id}
+              href={detailUrl(r.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="result-card"
+              style={{ animationDelay: `${i * 40}ms` }}
+            >
+              <div className="result-text">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{r.text}</ReactMarkdown>
+              </div>
               <div className="result-meta">
                 <span className="result-source">{r.source_id}</span>
                 <div className="score-col">
@@ -213,7 +236,7 @@ export function SearchTab({ config }: Props) {
                   </div>
                 </div>
               </div>
-            </div>
+            </a>
           );
         })}
       </div>

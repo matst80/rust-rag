@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Config, ChatMessage } from '../types';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Props {
   config: Config;
@@ -117,7 +119,7 @@ export function ChatTab({ config }: Props) {
               <div className="thinking-block">{streaming.thinking}</div>
             )}
             <div className="msg-content">
-              {streaming.content}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming.content}</ReactMarkdown>
               <span className="cursor" />
             </div>
           </div>
@@ -152,7 +154,9 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
     <div className={`chat-msg ${msg.role}`}>
       <div className="msg-label">{msg.role === 'user' ? 'You' : 'AI'}</div>
       {msg.thinking && <div className="thinking-block">{msg.thinking}</div>}
-      <div className="msg-content">{msg.content}</div>
+      <div className="msg-content">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+      </div>
     </div>
   );
 }

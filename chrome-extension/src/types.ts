@@ -6,6 +6,7 @@ export interface Config {
 }
 
 export interface SearchResult {
+  id: string;
   text: string;
   source_id: string;
   score?: number | null;

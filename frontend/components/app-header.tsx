@@ -60,7 +60,7 @@ export function AppHeader() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background">
-      <div className="flex h-12 items-center justify-between px-4">
+      <div className="flex items-center justify-between px-4">
 
         {/* Logo */}
         <div className="flex items-center gap-6">
