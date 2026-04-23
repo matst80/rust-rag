@@ -67,7 +67,7 @@ spec:
                 name: rag-service
                 port:
                   number: 4001
-          - path: /auth/tokens
+          - path: /api/auth/tokens
             pathType: Prefix
             backend:
               service:

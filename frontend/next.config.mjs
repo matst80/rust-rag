@@ -10,11 +10,11 @@ const nextConfig = {
   async rewrites() {
     return [
       {
-        source: '/api/:path((?!auth/).*)',
+        source: '/api/:path*',
         destination: (process.env.RAG_API_URL || 'http://localhost:4001') + '/api/:path*',
       },
       {
-        source: '/admin/:path((?!auth/).*)',
+        source: '/admin/:path*',
         destination: (process.env.RAG_API_URL || 'http://localhost:4001') + '/admin/:path*',
       },
     ]

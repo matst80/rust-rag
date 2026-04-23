@@ -176,8 +176,8 @@ Require the `rag_session` cookie (same JWT the Zitadel callback sets).
 | `GET`    | `/auth/device` | Server-rendered HTML fallback form (when no frontend is deployed). |
 | `GET`    | `/auth/device/verify?user_code=…` | Look up a pending user-code to render context in the UI. |
 | `POST`   | `/auth/device/approve` | `{ user_code, name? }` → mints a token bound to the caller's `sub`. |
-| `GET`    | `/auth/tokens` | Lists tokens belonging to the caller. |
-| `DELETE` | `/auth/tokens/{id}` | Revokes a token. |
+| `GET`    | `/api/auth/tokens` | Lists tokens belonging to the caller. |
+| `DELETE` | `/api/auth/tokens/{id}` | Revokes a token. |
 
 ### Protected (any bearer)
 
@@ -200,10 +200,11 @@ preserved:
 - `POST /api/device/approve` → backend `/auth/device/approve`
 - `GET  /api/device/verify` → backend `/auth/device/verify`
 
-Token management (`/auth/tokens`, `/auth/tokens/{id}`) is routed directly to
-the backend via the ingress — the browser talks to the backend same-origin
-and the session cookie rides along. The backend route also handles its own
-session validation, so no Next.js proxy layer is needed.
+Token management (`/api/auth/tokens`, `/api/auth/tokens/{id}`) is routed to
+the backend via the ingress, while `/auth/tokens` is the frontend page route.
+The browser talks to the backend same-origin and the session cookie rides along.
+The backend route also handles its own session validation, so no Next.js
+proxy layer is needed.
 
 The auth path prefix otherwise stays owned by Next (callback, login, logout,
 session) — only the explicitly-listed `/auth/*` paths are forwarded by the
@@ -219,7 +220,7 @@ ingress.
 - **User codes**: 8 chars from a Crockford-ish alphabet (no O/0/I/1/L),
   rendered `XXXX-XXXX`. Random per-request, stored in `device_auth_requests`.
 - **Subject**: each token has a `subject` column holding the Zitadel `sub` of
-  the approving user. `GET /auth/tokens` and `DELETE /auth/tokens/{id}` are
+  the approving user. `GET /api/auth/tokens` and `DELETE /api/auth/tokens/{id}` are
   filtered by this column so users only see / revoke their own.
 - **`last_used_at`**: updated out-of-band (spawned task) on each successful
   bearer auth so it never blocks the request path.
@@ -296,5 +297,5 @@ checker doesn't.
   `frontend/components/auth/` — Next.js UI.
 - `frontend/app/api/device/` — session-aware proxies to the backend device-
   auth endpoints (approve/verify).
-- `deploy/kubernetes/rust-rag-ingress.yaml` — routes `/auth/tokens*` and
+- `deploy/kubernetes/rust-rag-ingress.yaml` — routes `/api/auth/tokens*` and
   selected `/auth/device/*` paths straight to the backend.

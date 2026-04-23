@@ -36,8 +36,8 @@ Content-Type: application/json
 
 ### List MCP Tokens (Requires Session)
 # Lists all active MCP tokens for the current user.
-GET {{baseUrl}}/auth/tokens
+GET {{baseUrl}}/api/auth/tokens
 
 ### Revoke MCP Token (Requires Session)
 # Revokes a specific MCP token.
-DELETE {{baseUrl}}/auth/tokens/REPLACE_WITH_TOKEN_ID
+DELETE {{baseUrl}}/api/auth/tokens/REPLACE_WITH_TOKEN_ID

@@ -28,7 +28,7 @@ use std::{
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tower_http::trace::TraceLayer;
+use tower_http::{trace::TraceLayer, services::ServeDir};
 use uuid::Uuid;
 
 mod auth;
@@ -536,6 +536,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
+        .fallback_service(ServeDir::new("static-frontend/dist"))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -3622,7 +3623,7 @@ mod tests {
             .json::<auth::DeviceTokenResponse>();
 
         let listed = server
-            .get("/auth/tokens")
+            .get("/api/auth/tokens")
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),
@@ -3634,7 +3635,7 @@ mod tests {
         assert_eq!(tokens.tokens[0].id, token.token_id);
 
         server
-            .delete(&format!("/auth/tokens/{}", token.token_id))
+            .delete(&format!("/api/auth/tokens/{}", token.token_id))
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),
