@@ -46,3 +46,16 @@ content-type: application/json
   "top_k": 5,
   "source_id": "knowledge"
 }
+
+### Smart Store
+# Uses an LLM to extract multiple items and metadata from a raw text/context.
+POST {{baseUrl}}/api/store/smart
+content-type: application/json
+
+{
+  "text": "The user said they like Rust and they are working on a RAG project at https://github.com/matst80/rust-rag",
+  "context": {
+    "url": "https://example.com/chat",
+    "title": "Chat Session"
+  }
+}

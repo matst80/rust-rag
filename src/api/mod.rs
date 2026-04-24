@@ -553,6 +553,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
+        .fallback_service(ServeDir::new("static-frontend/dist"))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -1557,29 +1558,29 @@ Rules:\n\
 Respond ONLY with a JSON array. No markdown fences, no explanation.\n\
 Schema: [{\"text\": \"...\", \"source_id\": \"...\", \"metadata\": {\"title\": \"...\", \"topic\": \"...\", \"tags\": [\"...\"]}}]";
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreContext {
-    url: Option<String>,
-    title: Option<String>,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreContext {
+    pub url: Option<String>,
+    pub title: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreRequest {
-    text: String,
-    context: Option<SmartStoreContext>,
-    model: Option<String>,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreRequest {
+    pub text: String,
+    pub context: Option<SmartStoreContext>,
+    pub model: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct SmartStoreResponse {
-    items: Vec<StoreResponse>,
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SmartStoreResponse {
+    pub items: Vec<StoreResponse>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SmartStoreItem {
-    text: String,
-    source_id: String,
-    metadata: Value,
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreItem {
+    pub text: String,
+    pub source_id: String,
+    pub metadata: Value,
 }
 
 async fn smart_store(
@@ -3639,7 +3640,7 @@ mod tests {
             .json::<auth::DeviceTokenResponse>();
 
         let listed = server
-            .get("/auth/tokens")
+            .get("/api/auth/tokens")
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),
@@ -3651,7 +3652,7 @@ mod tests {
         assert_eq!(tokens.tokens[0].id, token.token_id);
 
         server
-            .delete(&format!("/auth/tokens/{}", token.token_id))
+            .delete(&format!("/api/auth/tokens/{}", token.token_id))
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),
