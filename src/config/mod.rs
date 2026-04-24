@@ -125,6 +125,26 @@ impl Default for ChunkingConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct MultimodalConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_secs: u64,
+}
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self { base_url: None, api_key: None, model: None, timeout_secs: 120 }
+    }
+}
+
+impl MultimodalConfig {
+    pub fn is_configured(&self) -> bool {
+        self.base_url.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OntologyConfig {
     pub enabled: bool,
     pub confidence_threshold: f32,
@@ -170,6 +190,7 @@ pub struct AppConfig {
     pub graph_cross_source: bool,
     pub auth: AuthConfig,
     pub openai_chat: OpenAiChatConfig,
+    pub multimodal: MultimodalConfig,
     pub chunking: ChunkingConfig,
     pub ontology: OntologyConfig,
 }
@@ -245,6 +266,13 @@ impl AppConfig {
                     .unwrap_or_else(|| default_retrieval_system_prompt().to_owned()),
                 query_expansion_prompt: non_empty_var("RAG_QUERY_EXPANSION_PROMPT")
                     .unwrap_or_else(|| default_query_expansion_prompt().to_owned()),
+            },
+            multimodal: MultimodalConfig {
+                base_url: non_empty_var("RAG_MULTIMODAL_BASE_URL")
+                    .map(|v| v.trim_end_matches('/').to_owned()),
+                api_key: non_empty_var("RAG_MULTIMODAL_API_KEY"),
+                model: non_empty_var("RAG_MULTIMODAL_MODEL"),
+                timeout_secs: parse_env("RAG_MULTIMODAL_TIMEOUT_SECS", "120")?,
             },
             chunking: {
                 let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;

@@ -161,6 +161,22 @@ export function EntryDetail({ id }: EntryDetailProps) {
           </div>
         ) : (
           <div className="space-y-8 animate-in fade-in duration-500">
+            {/* Image preview */}
+            {entry.metadata.source_type === "image" && entry.metadata.source_file && (
+              <div>
+                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
+                  Image
+                </h2>
+                <div className="border border-border bg-card overflow-hidden">
+                  <img
+                    src={String(entry.metadata.source_file)}
+                    alt={String(entry.metadata.original_filename ?? "image")}
+                    className="max-w-full h-auto"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Content */}
             <div>
               <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">

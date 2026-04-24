@@ -1,5 +1,5 @@
 use crate::{
-    config::{AuthConfig, ChunkingConfig, OpenAiChatConfig},
+    config::{AuthConfig, ChunkingConfig, MultimodalConfig, OpenAiChatConfig},
     db::{
         AuthStore, CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
         GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput,
@@ -28,11 +28,12 @@ use std::{
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
 mod auth;
 mod chunking;
+mod multimodal;
 mod openai;
 mod query;
 
@@ -46,8 +47,10 @@ pub struct AppState {
     pub user_memory: Arc<dyn UserMemoryStore>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
+    pub multimodal: Arc<MultimodalConfig>,
     pub chunking: Arc<ChunkingConfig>,
     pub http_client: reqwest::Client,
+    pub multimodal_client: reqwest::Client,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
@@ -59,9 +62,11 @@ impl AppState {
         user_memory: Arc<dyn UserMemoryStore>,
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
+        multimodal: MultimodalConfig,
         chunking: ChunkingConfig,
     ) -> Self {
         let timeout_secs = openai_chat.timeout_secs.max(1);
+        let multimodal_timeout = multimodal.timeout_secs.max(1);
         Self {
             embedder,
             store,
@@ -69,11 +74,16 @@ impl AppState {
             user_memory,
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
+            multimodal: Arc::new(multimodal),
             chunking: Arc::new(chunking),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
                 .expect("http client should build"),
+            multimodal_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(multimodal_timeout))
+                .build()
+                .expect("multimodal http client should build"),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -99,11 +109,16 @@ impl AppState {
             user_memory: Arc::new(NoopUserMemory),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
+            multimodal: Arc::new(MultimodalConfig::default()),
             chunking: Arc::new(ChunkingConfig::default()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("http client should build"),
+            multimodal_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("multimodal http client should build"),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -524,6 +539,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .route("/api/ingest/image", post(multimodal::ingest_image))
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -533,6 +549,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(health))
+        .nest_service("/assets", ServeDir::new("assets"))
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)

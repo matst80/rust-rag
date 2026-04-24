@@ -9,6 +9,7 @@ import {
   FolderOpen,
   GitBranch,
   Github,
+  ImagePlus,
   KeyRound,
   LogIn,
   LogOut,
@@ -27,6 +28,7 @@ const navigation = [
   { name: "Assisted", href: "/assisted", icon: Sparkles },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Entries", href: "/entries", icon: FolderOpen },
+  { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
 

@@ -54,6 +54,17 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
         />
       )}
 
+      {/* Image thumbnail */}
+      {entry.metadata.source_type === "image" && entry.metadata.source_file && (
+        <div className="shrink-0 w-16 h-16 border border-border overflow-hidden bg-muted">
+          <img
+            src={String(entry.metadata.source_file)}
+            alt=""
+            className="w-full h-full object-cover"
+          />
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 min-w-0 space-y-2.5 pl-2">
         {/* Meta row */}

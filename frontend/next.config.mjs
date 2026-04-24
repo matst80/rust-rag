@@ -17,6 +17,10 @@ const nextConfig = {
         source: '/admin/:path((?!auth/).*)',
         destination: (process.env.RAG_API_URL || 'http://localhost:4001') + '/admin/:path*',
       },
+      {
+        source: '/assets/:path*',
+        destination: (process.env.RAG_API_URL || 'http://localhost:4001') + '/assets/:path*',
+      },
     ]
   },
 }

@@ -278,6 +278,13 @@ export type AssistedQueryEvent =
   | AssistedQueryMergedEvent
   | ChatCompletionStreamError
 
+export interface ImageIngestResponse {
+  id: string
+  source_id: string
+  created_at: number
+  source_file: string
+}
+
 export interface AssistedQueryHandlers {
   onQueries?: (event: AssistedQueryQueriesEvent) => void
   onResult?: (event: AssistedQueryResultEvent) => void

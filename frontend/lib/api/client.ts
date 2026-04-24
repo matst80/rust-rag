@@ -29,6 +29,7 @@ import type {
   AssistedQueryQueriesEvent,
   AssistedQueryResultEvent,
   AssistedQueryMergedEvent,
+  ImageIngestResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -438,6 +439,26 @@ export async function createItem(data: StoreRequest): Promise<Entry> {
   })
 }
 
+export async function uploadImage(
+  file: File,
+  sourceId: string = "images"
+): Promise<ImageIngestResponse> {
+  const form = new FormData()
+  form.append("file", file)
+  form.append("source_id", sourceId)
+
+  const response = await fetch(`${API_BASE_URL}/api/ingest/image`, {
+    method: "POST",
+    body: form,
+  })
+
+  if (!response.ok) {
+    throw new APIError(response.status, `Upload failed: ${response.statusText}`)
+  }
+
+  return response.json()
+}
+
 export async function updateItem(
   id: string,
   data: UpdateItemRequest
@@ -557,6 +578,7 @@ export const api = {
     listLarge: getLargeItems,
     rechunk: rechunkItem,
     llmRechunk: llmRechunkItem,
+    uploadImage,
   },
   search,
   edges: {

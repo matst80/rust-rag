@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         user_memory,
         config.auth.clone(),
         config.openai_chat.clone(),
+        config.multimodal.clone(),
         config.chunking.clone(),
     );
     let app = build_app(state);
