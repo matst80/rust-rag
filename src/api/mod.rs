@@ -48,6 +48,7 @@ pub struct AppState {
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
     pub multimodal: Arc<MultimodalConfig>,
+    pub upload_path: Arc<String>,
     pub chunking: Arc<ChunkingConfig>,
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
@@ -63,6 +64,7 @@ impl AppState {
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
         multimodal: MultimodalConfig,
+        upload_path: String,
         chunking: ChunkingConfig,
     ) -> Self {
         let timeout_secs = openai_chat.timeout_secs.max(1);
@@ -75,6 +77,7 @@ impl AppState {
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(multimodal),
+            upload_path: Arc::new(upload_path),
             chunking: Arc::new(chunking),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
@@ -110,6 +113,7 @@ impl AppState {
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(MultimodalConfig::default()),
+            upload_path: Arc::new("uploads".to_owned()),
             chunking: Arc::new(ChunkingConfig::default()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
@@ -547,9 +551,10 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    let upload_path = state.upload_path.as_str().to_owned();
     Router::new()
         .route("/healthz", get(health))
-        .nest_service("/assets", ServeDir::new("assets"))
+        .nest_service("/assets", ServeDir::new(&upload_path))
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)

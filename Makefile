@@ -20,6 +20,11 @@ RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:8081/v1
 RAG_OPENAI_API_KEY ?=
 RAG_OPENAI_MODEL ?= current_model.gguf
 RAG_OPENAI_TIMEOUT_SECS ?= 60
+RAG_MULTIMODAL_BASE_URL ?=
+RAG_MULTIMODAL_API_KEY ?=
+RAG_MULTIMODAL_MODEL ?=
+RAG_MULTIMODAL_TIMEOUT_SECS ?= 120
+RAG_UPLOAD_PATH ?= $(CURDIR)/data/uploads
 
 # Ontology worker — tuned for a local LLM with a 65535-token context window.
 # Token budget per call: ~700 (system prompt) + target_preview/4 + neighbors*(candidate_preview/4)
@@ -112,7 +117,7 @@ help:
 		'  make http-files       List the .http request files'
 
 fetch-assets:
-	mkdir -p "$(MODEL_DIR)" "$(CURDIR)/data"
+	mkdir -p "$(MODEL_DIR)" "$(CURDIR)/data" "$(RAG_UPLOAD_PATH)"
 	curl -L --fail --silent --show-error "$(MODEL_URL)" -o "$(RAG_MODEL_PATH)"
 	curl -L --fail --silent --show-error "$(TOKENIZER_URL)" -o "$(RAG_TOKENIZER_PATH)"
 	@printf '%s\n' "Fetched model to $(RAG_MODEL_PATH)"
@@ -146,7 +151,12 @@ print-env:
 		"export RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS=$(RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS)" \
 		"export RAG_CHUNK_MAX_CHARS=$(RAG_CHUNK_MAX_CHARS)" \
 		"export RAG_CHUNK_OVERLAP_CHARS=$(RAG_CHUNK_OVERLAP_CHARS)" \
-		"export RAG_LARGE_ITEM_THRESHOLD=$(RAG_LARGE_ITEM_THRESHOLD)"
+		"export RAG_LARGE_ITEM_THRESHOLD=$(RAG_LARGE_ITEM_THRESHOLD)" \
+		"export RAG_MULTIMODAL_BASE_URL=$(RAG_MULTIMODAL_BASE_URL)" \
+		"export RAG_MULTIMODAL_API_KEY=$(RAG_MULTIMODAL_API_KEY)" \
+		"export RAG_MULTIMODAL_MODEL=$(RAG_MULTIMODAL_MODEL)" \
+		"export RAG_MULTIMODAL_TIMEOUT_SECS=$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
+		"export RAG_UPLOAD_PATH=$(RAG_UPLOAD_PATH)"
 
 fmt:
 	cargo fmt
@@ -172,7 +182,7 @@ build-mcp:
 	cargo build --release --manifest-path mcp-stdio/Cargo.toml
 
 run:
-	@mkdir -p "$(LOG_DIR)"
+	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
 	@printf 'Logging to %s — run "make tail-logs" in another terminal to follow\n' "$(LOG_FILE)"
 	RUST_LOG="$(RUST_LOG)" \
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
@@ -206,10 +216,15 @@ run:
 	RAG_CHUNK_MAX_CHARS="$(RAG_CHUNK_MAX_CHARS)" \
 	RAG_CHUNK_OVERLAP_CHARS="$(RAG_CHUNK_OVERLAP_CHARS)" \
 	RAG_LARGE_ITEM_THRESHOLD="$(RAG_LARGE_ITEM_THRESHOLD)" \
+	RAG_MULTIMODAL_BASE_URL="$(RAG_MULTIMODAL_BASE_URL)" \
+	RAG_MULTIMODAL_API_KEY="$(RAG_MULTIMODAL_API_KEY)" \
+	RAG_MULTIMODAL_MODEL="$(RAG_MULTIMODAL_MODEL)" \
+	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
+	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
 	cargo run 2>&1 | tee "$(LOG_FILE)"
 
 run-cuda:
-	@mkdir -p "$(LOG_DIR)"
+	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
 	@printf 'Logging to %s — run "make tail-logs" in another terminal to follow\n' "$(LOG_FILE)"
 	RUST_LOG="$(RUST_LOG)" \
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
@@ -245,6 +260,11 @@ run-cuda:
 	RAG_LARGE_ITEM_THRESHOLD="$(RAG_LARGE_ITEM_THRESHOLD)" \
 	RAG_CUDA_MEM_LIMIT_MB="$(RAG_CUDA_MEM_LIMIT_MB)" \
 	RAG_CUDA_DEVICE_ID="$(RAG_CUDA_DEVICE_ID)" \
+	RAG_MULTIMODAL_BASE_URL="$(RAG_MULTIMODAL_BASE_URL)" \
+	RAG_MULTIMODAL_API_KEY="$(RAG_MULTIMODAL_API_KEY)" \
+	RAG_MULTIMODAL_MODEL="$(RAG_MULTIMODAL_MODEL)" \
+	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
+	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
 	cargo run --features cuda 2>&1 | tee "$(LOG_FILE)"
 
 run-mcp:

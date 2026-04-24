@@ -58,13 +58,14 @@ pub async fn ingest_image(
 
     let item_id = uuid::Uuid::now_v7().to_string();
     let stored_name = format!("{item_id}.{ext}");
+    let upload_dir = state.upload_path.as_str();
 
-    fs::create_dir_all("assets")
+    fs::create_dir_all(upload_dir)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    fs::write(format!("assets/{stored_name}"), &bytes)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to create upload dir {upload_dir:?}: {e}")))?;
+    fs::write(format!("{upload_dir}/{stored_name}"), &bytes)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to write {stored_name}: {e}")))?;
 
     let extracted_text = extract_image_text(&state, &bytes, &ext).await?;
 
