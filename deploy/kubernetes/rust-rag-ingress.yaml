@@ -46,6 +46,20 @@ spec:
                 name: rag-service
                 port:
                   number: 4001
+          - path: /api/ingest
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+          - path: /assets
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
           - path: /admin
             pathType: Prefix
             backend:

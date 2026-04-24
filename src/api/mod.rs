@@ -490,6 +490,7 @@ struct Claims {
     exp: usize,
 }
 
+#[allow(dead_code)]
 pub(crate) struct NoopUserMemory;
 
 impl UserMemoryStore for NoopUserMemory {
@@ -1336,7 +1337,7 @@ async fn rechunk_item(
     Path(id): Path<String>,
     Json(body): Json<RechunkRequest>,
 ) -> Result<Json<StoreResponse>, ApiError> {
-    let embedder = state.embedder.get_ready()?;
+    state.embedder.get_ready()?;
     let store = state.store.clone();
 
     let item = tokio::task::spawn_blocking({

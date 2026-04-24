@@ -11,6 +11,11 @@ chrome.runtime.onInstalled.addListener(() => {
     title: "Smart save to RAG (AI-assisted)",
     contexts: ["selection"]
   });
+  chrome.contextMenus.create({
+    id: "store-image-in-rag",
+    title: "Store Image in RAG",
+    contexts: ["image"]
+  });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -29,6 +34,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
         smartStoreSelection(text, tab.url, tab.title);
       }
     });
+  } else if (info.menuItemId === "store-image-in-rag") {
+    storeImage(info.srcUrl, tab.url, tab.title);
   }
 });
 
@@ -106,6 +113,65 @@ async function storeSelection(text, url, title) {
       iconUrl: "icons/icon48.png",
       title: "rust-rag Error",
       message: `Failed to store: ${error.message}`
+    });
+  }
+}
+
+async function storeImage(imageUrl, pageUrl, pageTitle) {
+  const { apiBaseUrl, apiToken } = await chrome.storage.local.get(['apiBaseUrl', 'apiToken']);
+  
+  if (!apiBaseUrl || !apiToken) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag",
+      message: "Please configure API URL and Token in the extension popup."
+    });
+    return;
+  }
+
+  try {
+    const imgResponse = await fetch(imageUrl);
+    const blob = await imgResponse.blob();
+    
+    let filename = imageUrl.split('/').pop().split('?')[0] || 'image.jpg';
+    if (!filename.includes('.')) filename += '.jpg';
+
+    const formData = new FormData();
+    formData.append('file', blob, filename);
+    formData.append('source_id', 'chrome-extension');
+    formData.append('metadata', JSON.stringify({
+      url: pageUrl,
+      title: pageTitle,
+      stored_at: new Date().toISOString(),
+      source_url: imageUrl
+    }));
+
+    const response = await fetch(`${apiBaseUrl}/api/ingest/image`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiToken}`
+      },
+      body: formData
+    });
+
+    if (response.ok) {
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icons/icon48.png",
+        title: "rust-rag",
+        message: "Successfully ingested image into RAG!"
+      });
+    } else {
+      const error = await response.json();
+      throw new Error(error.error || response.statusText);
+    }
+  } catch (error) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag Error",
+      message: `Failed to ingest image: ${error.message}`
     });
   }
 }
