@@ -101,7 +101,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(request): Parameters<StoreRequest>,
     ) -> Result<Json<StoreResponse>, String> {
-        store_entry_core(&self.state, request)
+        store_entry_core(&self.state, request, None)
             .await
             .map(Json)
             .map_err(stringify_api_error)
@@ -115,7 +115,7 @@ impl RustRagMcpServer {
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
         let query = request.query.clone();
-        let response = search_core(&self.state, request)
+        let response = search_core(&self.state, request, None)
             .await
             .map_err(stringify_api_error)?;
         Ok(format_search_result(&response, &query))
@@ -158,6 +158,9 @@ impl RustRagMcpServer {
             limit: query.limit,
             offset: query.offset,
             sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+            metadata_filter: query.metadata,
+            min_created_at: query.min_created_at,
+            max_created_at: query.max_created_at,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -376,6 +379,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
                 distance: related.distance,
+                chunk_context: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

@@ -1,12 +1,12 @@
 import { AppHeader } from "@/components/app-header"
-import { AssistedQueryView } from "@/components/query/assisted-query"
+import { SearchPage } from "@/components/search/search-page"
 
 export default function AssistedPage() {
   return (
     <>
       <AppHeader />
-      <main className="container py-6">
-        <AssistedQueryView />
+      <main>
+        <SearchPage defaultAssisted={true} />
       </main>
     </>
   )

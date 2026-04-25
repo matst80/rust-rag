@@ -5,6 +5,7 @@
   "description": "Simple search and storage for rust-rag",
   "permissions": [
     "contextMenus",
+    "notifications",
     "storage",
     "activeTab",
     "scripting"
@@ -37,6 +38,13 @@
         "mac": "Command+Shift+S"
       },
       "description": "Store current selection in RAG"
+    },
+    "smart-store-selection": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+A",
+        "mac": "Command+Shift+A"
+      },
+      "description": "Smart save current selection to RAG (AI-assisted)"
     }
   },
   "host_permissions": [

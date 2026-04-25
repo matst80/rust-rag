@@ -1,16 +1,17 @@
 use crate::{
-    config::{AuthConfig, OpenAiChatConfig},
+    config::{AuthConfig, ChunkingConfig, MultimodalConfig, OpenAiChatConfig},
     db::{
         AuthStore, CategorySummary, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-        GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, SearchHit,
-        SortOrder, VectorStore,
+        GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput,
+        NewUserEvent, SearchHit, SortOrder, UserEventType, UserMemoryStore, VectorStore,
+        PROFILE_EVENTS_WINDOW, PROFILE_REFRESH_AFTER,
     },
     embedding::EmbeddingService,
 };
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -27,10 +28,12 @@ use std::{
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use uuid::Uuid;
 
 mod auth;
+mod chunking;
+mod multimodal;
 mod openai;
 mod query;
 
@@ -41,9 +44,14 @@ pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
     pub store: Arc<dyn VectorStore>,
     pub auth_store: Arc<dyn AuthStore>,
+    pub user_memory: Arc<dyn UserMemoryStore>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
+    pub multimodal: Arc<MultimodalConfig>,
+    pub upload_path: Arc<String>,
+    pub chunking: Arc<ChunkingConfig>,
     pub http_client: reqwest::Client,
+    pub multimodal_client: reqwest::Client,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
@@ -52,20 +60,33 @@ impl AppState {
         embedder: Arc<EmbedderHandle>,
         store: Arc<dyn VectorStore>,
         auth_store: Arc<dyn AuthStore>,
+        user_memory: Arc<dyn UserMemoryStore>,
         auth: AuthConfig,
         openai_chat: OpenAiChatConfig,
+        multimodal: MultimodalConfig,
+        upload_path: String,
+        chunking: ChunkingConfig,
     ) -> Self {
         let timeout_secs = openai_chat.timeout_secs.max(1);
+        let multimodal_timeout = multimodal.timeout_secs.max(1);
         Self {
             embedder,
             store,
             auth_store,
+            user_memory,
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
+            multimodal: Arc::new(multimodal),
+            upload_path: Arc::new(upload_path),
+            chunking: Arc::new(chunking),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
                 .expect("http client should build"),
+            multimodal_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(multimodal_timeout))
+                .build()
+                .expect("multimodal http client should build"),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -88,12 +109,20 @@ impl AppState {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
             store,
             auth_store,
+            user_memory: Arc::new(NoopUserMemory),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
+            multimodal: Arc::new(MultimodalConfig::default()),
+            upload_path: Arc::new("uploads".to_owned()),
+            chunking: Arc::new(ChunkingConfig::default()),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
                 .expect("http client should build"),
+            multimodal_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("multimodal http client should build"),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -181,6 +210,24 @@ pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ChunkConfig {
+    /// Maximum characters per chunk (≈ max_chars/4 tokens). Default 1024 (~256 tokens).
+    #[serde(default = "default_chunk_max_chars")]
+    pub max_chars: usize,
+    /// Characters of previous-chunk tail prepended to each chunk's embedding for
+    /// contextual awareness. The stored text is NOT affected. Default 200 (~50 tokens).
+    #[serde(default = "default_chunk_overlap_chars")]
+    pub overlap_chars: usize,
+}
+
+fn default_chunk_max_chars() -> usize {
+    1536
+}
+fn default_chunk_overlap_chars() -> usize {
+    200
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct StoreRequest {
     /// Optional stable identifier. If omitted, a UUIDv7 is generated.
     pub id: Option<String>,
@@ -192,6 +239,10 @@ pub struct StoreRequest {
     /// Entries sharing a source_id are grouped together; search and listing can filter on it.
     /// Pick a short, lowercase, stable identifier per logical bucket of content.
     pub source_id: String,
+    /// If provided, the text is split into overlapping chunks before embedding.
+    /// Each chunk is stored as a separate item keyed `{id}:c:{index}`.
+    /// Omit for short texts or when you want the entry treated as a single unit.
+    pub chunk: Option<ChunkConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -235,13 +286,18 @@ pub struct UpdateItemRequest {
     pub source_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub struct ListItemsQuery {
     /// Restrict the listing to a single source_id. Omit to list across all namespaces.
     pub source_id: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub sort_order: Option<SortOrder>,
+    pub min_created_at: Option<i64>,
+    pub max_created_at: Option<i64>,
+    /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
+    #[serde(flatten)]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -274,6 +330,10 @@ pub struct StoreResponse {
     pub id: String,
     pub source_id: String,
     pub created_at: i64,
+    /// IDs of stored chunks, present only when the request included a `chunk` config
+    /// and the text was long enough to require splitting (≥ 2 chunks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -291,6 +351,10 @@ pub struct SearchResultPayload {
     pub source_id: String,
     pub created_at: i64,
     pub distance: f32,
+    /// Stitched context window for chunk results: the matched chunk surrounded by
+    /// its immediate neighbours. Null for non-chunk entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_context: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -426,10 +490,35 @@ struct Claims {
     exp: usize,
 }
 
+#[allow(dead_code)]
+pub(crate) struct NoopUserMemory;
+
+impl UserMemoryStore for NoopUserMemory {
+    fn log_user_event(&self, _: NewUserEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn touch_item_accesses(&self, _: &[String], _: i64) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn get_user_profile(&self, _: &str) -> anyhow::Result<Option<crate::db::UserProfile>> {
+        Ok(None)
+    }
+    fn upsert_user_profile(&self, _: crate::db::UserProfile) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn get_recent_query_embeddings(&self, _: &str, _: usize) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(Vec::new())
+    }
+    fn count_events_since(&self, _: &str, _: i64) -> anyhow::Result<i64> {
+        Ok(0)
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
         .route("/api/store", post(store))
+        .route("/api/store/smart", post(smart_store))
         .route("/search", post(search))
         .route("/api/search", post(search))
         .route(
@@ -445,13 +534,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
+        .route("/admin/items/oversized", get(list_large_items))
         .route(
             "/admin/items/{id}",
             get(get_item).put(update_item).delete(delete_item),
         )
+        .route("/admin/items/{id}/rechunk", post(rechunk_item))
+        .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .route("/api/ingest/image", post(multimodal::ingest_image))
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -459,18 +552,21 @@ pub fn router(state: AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    let upload_path = state.upload_path.as_str().to_owned();
     Router::new()
         .route("/healthz", get(health))
+        .nest_service("/assets", ServeDir::new(&upload_path))
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
+        .fallback_service(ServeDir::new("static-frontend/dist"))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
 
 async fn require_api_key(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     tracing::debug!(
@@ -479,6 +575,7 @@ async fn require_api_key(
         "checking api key for request"
     );
     if !state.auth.is_enabled() {
+        request.extensions_mut().insert(SessionSubject(None));
         return Ok(next.run(request).await);
     }
 
@@ -502,6 +599,7 @@ async fn require_api_key(
 
     if let Some(ref key) = provided {
         if state.auth.matches_api_key(key) {
+            request.extensions_mut().insert(SessionSubject(None));
             return Ok(next.run(request).await);
         }
 
@@ -530,6 +628,9 @@ async fn require_api_key(
                         }
                     });
                     tracing::debug!(token_id = %record.id, "authorized via MCP token");
+                    request
+                        .extensions_mut()
+                        .insert(SessionSubject(record.subject));
                     return Ok(next.run(request).await);
                 }
             }
@@ -554,8 +655,11 @@ async fn require_api_key(
                             &DecodingKey::from_secret(secret.as_bytes()),
                             &validation,
                         ) {
-                            Ok(_) => {
+                            Ok(token_data) => {
                                 tracing::info!("authorized via session cookie");
+                                request
+                                    .extensions_mut()
+                                    .insert(SessionSubject(Some(token_data.claims.sub)));
                                 return Ok(next.run(request).await);
                             }
                             Err(err) => {
@@ -591,22 +695,25 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
 
 async fn store(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
     Json(request): Json<StoreRequest>,
 ) -> Result<(StatusCode, Json<StoreResponse>), ApiError> {
-    let response = store_entry_core(&state, request).await?;
+    let response = store_entry_core(&state, request, session.0).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
 async fn search(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    search_core(&state, request).await.map(Json)
+    search_core(&state, request, session.0).await.map(Json)
 }
 
 pub(crate) async fn store_entry_core(
     state: &AppState,
     request: StoreRequest,
+    subject: Option<String>,
 ) -> Result<StoreResponse, ApiError> {
     let id = resolve_store_id(request.id);
     validate_non_empty("text", &request.text)?;
@@ -617,33 +724,124 @@ pub(crate) async fn store_entry_core(
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
     let source_id = request.source_id.clone();
-    let item = ItemRecord {
-        id: id.clone(),
-        text: request.text.clone(),
-        metadata: request.metadata,
-        source_id: request.source_id,
-        created_at,
+
+    let chunk_ids = if let Some(ref cfg) = request.chunk {
+        // Build chunk slices (returns 1 slice if text fits in one chunk).
+        let slices =
+            chunking::chunk_document(&request.text, cfg.max_chars, cfg.overlap_chars);
+        let n = slices.len();
+
+        if n <= 1 {
+            // Text fits in a single chunk — store as a normal entry, no chunking metadata.
+            let item = ItemRecord {
+                id: id.clone(),
+                text: request.text.clone(),
+                metadata: request.metadata.clone(),
+                source_id: source_id.clone(),
+                created_at,
+            };
+            let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let embedding = embedder.embed(&embed_text)?;
+                store.upsert_item(item, &embedding)?;
+                Ok(())
+            })
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+            None
+        } else {
+            let parent_id = id.clone();
+            let mut ids: Vec<String> = Vec::with_capacity(n);
+
+            for (i, slice) in slices.into_iter().enumerate() {
+                let chunk_id = format!("{parent_id}:c:{i}");
+                ids.push(chunk_id.clone());
+
+                let mut meta = request.metadata.clone();
+                if let Value::Object(ref mut map) = meta {
+                    map.insert(
+                        "_chunk".to_owned(),
+                        serde_json::json!({ "parent": parent_id, "i": i, "n": n }),
+                    );
+                }
+
+                let item = ItemRecord {
+                    id: chunk_id,
+                    text: slice.text,
+                    metadata: meta,
+                    source_id: source_id.clone(),
+                    created_at,
+                };
+                let embed_text = slice.embed_text;
+                let emb = embedder.clone();
+                let st = store.clone();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let embedding = emb.embed(&embed_text)?;
+                    st.upsert_item(item, &embedding)?;
+                    Ok(())
+                })
+                .await
+                .map_err(ApiError::TaskJoin)?
+                .map_err(ApiError::Internal)?;
+            }
+            Some(ids)
+        }
+    } else {
+        // No chunking requested.
+        let item = ItemRecord {
+            id: id.clone(),
+            text: request.text.clone(),
+            metadata: request.metadata,
+            source_id: source_id.clone(),
+            created_at,
+        };
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let embedding = embedder.embed(&item.text)?;
+            store.upsert_item(item, &embedding)?;
+            Ok(())
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+        None
     };
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let embedding = embedder.embed(&item.text)?;
-        store.upsert_item(item, &embedding)?;
-        Ok(())
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let stored_ids: Vec<String> = chunk_ids
+        .as_deref()
+        .unwrap_or(&[id.clone()])
+        .to_vec();
+
+    if let Some(sub) = subject {
+        let memory = state.user_memory.clone();
+        let event_id = Uuid::now_v7().to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = memory.log_user_event(NewUserEvent {
+                id: event_id,
+                subject: sub,
+                event_type: UserEventType::Store,
+                query: None,
+                query_embedding: None,
+                item_ids: stored_ids,
+                created_at,
+            }) {
+                tracing::warn!(error = %e, "failed to log store event");
+            }
+        });
+    }
 
     Ok(StoreResponse {
         id,
         source_id,
         created_at,
+        chunk_ids,
     })
 }
 
 pub(crate) async fn search_core(
     state: &AppState,
     request: SearchRequest,
+    subject: Option<String>,
 ) -> Result<SearchResponse, ApiError> {
     if request.top_k == 0 {
         return Err(ApiError::BadRequest(
@@ -654,25 +852,56 @@ pub(crate) async fn search_core(
         validate_source_id(source_id)?;
     }
 
+    // Load user interest profile for personalization (best-effort).
+    let interest_embedding: Option<Vec<f32>> = if let Some(ref sub) = subject {
+        let memory = state.user_memory.clone();
+        let sub = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            memory
+                .get_user_profile(&sub)
+                .ok()
+                .flatten()
+                .and_then(|p| p.interest_embedding)
+        })
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
-    let query = request.query;
+    let query = request.query.clone();
     let top_k = request.top_k;
     let source_id = request.source_id;
     let max_distance = request.max_distance;
+    let now_ms = current_timestamp_millis()?;
 
-    let (results, related) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>)> {
-            let embedding = embedder.embed(&query)?;
+    let (results, related, raw_embedding) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+            let raw = embedder.embed(&query)?;
+            let embedding = if let Some(ref interest) = interest_embedding {
+                blend_embeddings(&raw, interest, 0.8)
+            } else {
+                raw.clone()
+            };
             let hits = if request.hybrid {
                 store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
             } else {
                 store.search(&embedding, top_k, source_id.as_deref())?
             };
-            let filtered: Vec<SearchHit> = hits
+            let mut filtered: Vec<SearchHit> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
                 .collect();
+
+            // Sort by decay-adjusted score but keep the raw semantic distance for
+            // the response so the reported values remain pure vector/BM25 distances.
+            filtered.sort_by(|a, b| {
+                decay_sort_key(a, now_ms)
+                    .partial_cmp(&decay_sort_key(b, now_ms))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let related = if let Some(top) = filtered.first() {
                 let edges = store
@@ -713,15 +942,61 @@ pub(crate) async fn search_core(
                 Vec::new()
             };
 
-            Ok((filtered, related))
+            Ok((filtered, related, raw))
         },
     )
     .await
     .map_err(ApiError::TaskJoin)?
     .map_err(ApiError::Internal)?;
 
+    // Fire-and-forget: log the search event and update access counts.
+    if let Some(sub) = subject {
+        let memory = state.user_memory.clone();
+        let hit_ids: Vec<String> = results.iter().map(|h| h.id.clone()).collect();
+        let event_id = Uuid::now_v7().to_string();
+        let query_text = request.query.clone();
+        let profile_memory = memory.clone();
+        let sub_clone = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            let event = NewUserEvent {
+                id: event_id,
+                subject: sub_clone.clone(),
+                event_type: UserEventType::Search,
+                query: Some(query_text),
+                query_embedding: Some(raw_embedding),
+                item_ids: hit_ids.clone(),
+                created_at: now_ms,
+            };
+            if let Err(e) = memory.log_user_event(event) {
+                tracing::warn!(error = %e, "failed to log search event");
+            }
+            if let Err(e) = memory.touch_item_accesses(&hit_ids, now_ms) {
+                tracing::warn!(error = %e, "failed to update item access counts");
+            }
+            // Refresh interest profile if enough new events have accumulated.
+            maybe_refresh_profile(&*profile_memory, &sub_clone, now_ms);
+        });
+    }
+
+    // Enrich chunk results with adjacent-chunk context (best-effort).
+    let store_for_chunks = state.store.clone();
+    let result_payloads: Vec<SearchResultPayload> = tokio::task::spawn_blocking(move || {
+        results
+            .into_iter()
+            .map(|hit| {
+                let ctx = chunk_context_for_hit(&*store_for_chunks, &hit);
+                SearchResultPayload {
+                    chunk_context: ctx,
+                    ..SearchResultPayload::from(hit)
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?;
+
     Ok(SearchResponse {
-        results: results.into_iter().map(Into::into).collect(),
+        results: result_payloads,
         related: related
             .into_iter()
             .map(|(hit, relation)| RelatedResultPayload {
@@ -735,6 +1010,130 @@ pub(crate) async fn search_core(
             })
             .collect(),
     })
+}
+
+/// If `hit` is a chunk (metadata contains `_chunk.parent`), fetch the previous
+/// and next sibling chunks and stitch them together as a context window.
+/// Returns `None` for non-chunk entries or when neighbours can't be fetched.
+fn chunk_context_for_hit(store: &dyn VectorStore, hit: &SearchHit) -> Option<String> {
+    let chunk_meta = hit.metadata.get("_chunk")?;
+    let parent = chunk_meta.get("parent")?.as_str()?;
+    let index = chunk_meta.get("i")?.as_u64()? as usize;
+    let total = chunk_meta.get("n")?.as_u64()? as usize;
+
+    let prev_text = if index > 0 {
+        store
+            .get_item(&format!("{parent}:c:{}", index - 1))
+            .ok()
+            .flatten()
+            .map(|r| r.text)
+    } else {
+        None
+    };
+    let next_text = if index + 1 < total {
+        store
+            .get_item(&format!("{parent}:c:{}", index + 1))
+            .ok()
+            .flatten()
+            .map(|r| r.text)
+    } else {
+        None
+    };
+
+    // Only build context if at least one neighbour exists.
+    if prev_text.is_none() && next_text.is_none() {
+        return None;
+    }
+
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if let Some(ref p) = prev_text {
+        parts.push(p.as_str());
+    }
+    parts.push(hit.text.as_str());
+    if let Some(ref n) = next_text {
+        parts.push(n.as_str());
+    }
+    Some(parts.join("\n\n"))
+}
+
+/// Returns a sort key that adds a mild time-decay penalty to the semantic
+/// distance. The raw `hit.distance` is NOT mutated — callers report the
+/// original value, decay only affects ordering.
+fn decay_sort_key(hit: &SearchHit, now_ms: i64) -> f32 {
+    if hit.created_at <= 0 {
+        return hit.distance;
+    }
+    let age_days = ((now_ms - hit.created_at).max(0) as f64 / 86_400_000.0).min(730.0);
+    // Penalty proportional to the item's own distance: highly-relevant items
+    // are barely affected; borderline hits are nudged down for freshness.
+    let penalty = 0.0002 * age_days as f32 * hit.distance.max(0.01);
+    (hit.distance + penalty).clamp(0.0, 1.0)
+}
+
+/// Blend two embeddings: `weight * a + (1-weight) * b`, then L2-normalize.
+fn blend_embeddings(a: &[f32], b: &[f32], weight: f32) -> Vec<f32> {
+    let mut blended: Vec<f32> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| weight * x + (1.0 - weight) * y)
+        .collect();
+    let norm: f32 = blended.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-9 {
+        for v in &mut blended {
+            *v /= norm;
+        }
+    }
+    blended
+}
+
+/// Recompute the user's interest embedding from recent query embeddings when
+/// enough new events have occurred since the last profile update.
+fn maybe_refresh_profile(memory: &dyn UserMemoryStore, subject: &str, now_ms: i64) {
+    let profile = match memory.get_user_profile(subject) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load user profile for refresh");
+            return;
+        }
+    };
+    let horizon = profile.as_ref().map(|p| p.event_horizon).unwrap_or(0);
+    let new_events = match memory.count_events_since(subject, horizon) {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    if new_events < PROFILE_REFRESH_AFTER {
+        return;
+    }
+    let embeddings = match memory.get_recent_query_embeddings(subject, PROFILE_EVENTS_WINDOW) {
+        Ok(e) if !e.is_empty() => e,
+        _ => return,
+    };
+    let dim = embeddings[0].len();
+    let mut centroid = vec![0.0f32; dim];
+    for emb in &embeddings {
+        for (c, v) in centroid.iter_mut().zip(emb) {
+            *c += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    for c in &mut centroid {
+        *c /= n;
+    }
+    let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-9 {
+        for c in &mut centroid {
+            *c /= norm;
+        }
+    }
+    let updated = crate::db::UserProfile {
+        subject: subject.to_owned(),
+        interest_embedding: Some(centroid),
+        event_horizon: now_ms,
+        updated_at: now_ms,
+    };
+    if let Err(e) = memory.upsert_user_profile(updated) {
+        tracing::warn!(error = %e, "failed to save user profile");
+    }
 }
 
 async fn graph_status(
@@ -817,6 +1216,9 @@ async fn list_items(
         limit: query.limit,
         offset: query.offset,
         sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+        metadata_filter: query.metadata,
+        min_created_at: query.min_created_at,
+        max_created_at: query.max_created_at,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -895,6 +1297,406 @@ async fn delete_item(
     }
 
     Ok(Json(DeleteResponse { id, deleted }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LargeItemsQuery {
+    min_chars: Option<usize>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn list_large_items(
+    State(state): State<AppState>,
+    Query(query): Query<LargeItemsQuery>,
+) -> Result<Json<AdminItemsResponse>, ApiError> {
+    let min_chars = query.min_chars.unwrap_or(state.chunking.large_item_threshold);
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    let store = state.store.clone();
+    let (items, total_count) =
+        tokio::task::spawn_blocking(move || store.list_large_items(min_chars, limit, offset))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+    Ok(Json(AdminItemsResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        total_count,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RechunkRequest {
+    max_chars: Option<usize>,
+    overlap_chars: Option<usize>,
+}
+
+async fn rechunk_item(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Path(id): Path<String>,
+    Json(body): Json<RechunkRequest>,
+) -> Result<Json<StoreResponse>, ApiError> {
+    state.embedder.get_ready()?;
+    let store = state.store.clone();
+
+    let item = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || store.get_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?
+    .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
+
+    let max_chars = body.max_chars.unwrap_or(state.chunking.chunk_max_chars);
+    let overlap_chars = body.overlap_chars.unwrap_or(state.chunking.chunk_overlap_chars);
+
+    let request = StoreRequest {
+        id: Some(item.id.clone()),
+        text: item.text,
+        metadata: item.metadata,
+        source_id: item.source_id,
+        chunk: Some(ChunkConfig { max_chars, overlap_chars }),
+    };
+    let response = store_entry_core(&state, request, subject.0).await?;
+
+    // Delete the original unchunked item if chunking produced multiple chunks.
+    if response.chunk_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        let store = state.store.clone();
+        let parent_id = id.clone();
+        tokio::task::spawn_blocking(move || store.delete_item(&parent_id))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
+    }
+
+    Ok(Json(response))
+}
+
+const LLM_RECHUNK_SYSTEM_PROMPT: &str = "\
+You are a document chunking assistant. Your task is to split the provided text into \
+self-contained, semantically coherent chunks suitable for retrieval-augmented generation (RAG). \
+\n\n\
+Rules:\n\
+- Each chunk should be independently understandable — no dangling references.\n\
+- Preserve meaning; do not summarize or paraphrase.\n\
+- Use natural boundaries (paragraphs, sections, list items, functions).\n\
+- NEVER split code blocks across chunks. Keep a code block and its immediate context together.\n\
+- Aim for natural chunks of roughly 300–800 words where possible.\n\
+- Avoid chunks shorter than 3 sentences unless the section is naturally brief.\n\
+\n\n\
+Respond ONLY with a JSON array of strings, each string being one chunk. No markdown, no explanation.\n\
+Example: [\"chunk one text\", \"chunk two text\"]";
+
+#[derive(Debug, Deserialize)]
+struct LlmRechunkRequest {
+    model: Option<String>,
+    max_chunks: Option<usize>,
+}
+
+async fn llm_rechunk_item(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Path(id): Path<String>,
+    Json(body): Json<LlmRechunkRequest>,
+) -> Result<Json<StoreResponse>, ApiError> {
+    let openai_config = state.openai_chat.clone();
+    if !openai_config.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "upstream OpenAI chat configuration is not set".to_owned(),
+        ));
+    }
+    let model = body
+        .model
+        .or_else(|| openai_config.default_model.clone())
+        .ok_or_else(|| ApiError::BadRequest("model required".to_owned()))?;
+
+    let store = state.store.clone();
+    let item = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || store.get_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?
+    .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
+
+    let max_chunks = body.max_chunks.unwrap_or(20);
+    let user_prompt = format!(
+        "Split this text into at most {max_chunks} chunks.\n\nTEXT:\n{}",
+        item.text
+    );
+
+    let payload = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": LLM_RECHUNK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+
+    let base_url = openai_config
+        .base_url
+        .as_deref()
+        .expect("is_configured() already checked");
+
+    let mut req = state
+        .http_client
+        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .json(&payload);
+    if let Some(key) = openai_config.api_key.as_deref() {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .error_for_status()
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp { choices: Vec<Choice> }
+    #[derive(serde::Deserialize)]
+    struct Choice { message: Msg }
+    #[derive(serde::Deserialize)]
+    struct Msg { content: Option<String> }
+
+    let chat: Resp = response
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    let content = chat
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .unwrap_or_default();
+
+    let texts: Vec<String> = serde_json::from_str(&content).map_err(|_| {
+        ApiError::Internal(anyhow::anyhow!(
+            "LLM did not return a JSON array of strings; got: {content}"
+        ))
+    })?;
+
+    if texts.is_empty() {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "LLM returned an empty chunk list"
+        )));
+    }
+
+    let embedder = state.embedder.get_ready()?;
+    let parent_id = item.id.clone();
+    let source_id = item.source_id.clone();
+    let base_metadata = item.metadata.clone();
+    let now = current_timestamp_millis()?;
+    let store = state.store.clone();
+    let total = texts.len();
+
+    let chunk_ids: Vec<String> = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
+        let mut ids = Vec::with_capacity(total);
+        for (i, text) in texts.into_iter().enumerate() {
+            let chunk_id = format!("{parent_id}:c:{i}");
+            let mut metadata = base_metadata.clone();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "_chunk".to_owned(),
+                    serde_json::json!({ "parent": parent_id, "i": i, "n": total }),
+                );
+            }
+            let record = ItemRecord {
+                id: chunk_id.clone(),
+                text: text.clone(),
+                metadata,
+                source_id: source_id.clone(),
+                created_at: now,
+            };
+            let embedding = embedder.embed(&text)?;
+            store.upsert_item(record, &embedding)?;
+            ids.push(chunk_id);
+        }
+        store.delete_item(&parent_id)?;
+        Ok(ids)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    if let Some(ref sub) = subject.0 {
+        let memory = state.user_memory.clone();
+        let event = NewUserEvent {
+            id: Uuid::new_v4().to_string(),
+            subject: sub.clone(),
+            event_type: UserEventType::Store,
+            query: None,
+            query_embedding: None,
+            item_ids: chunk_ids.clone(),
+            created_at: now,
+        };
+        let _ = tokio::task::spawn_blocking(move || memory.log_user_event(event)).await;
+    }
+
+    Ok(Json(StoreResponse {
+        id: item.id,
+        source_id: item.source_id,
+        created_at: now,
+        chunk_ids: Some(chunk_ids),
+    }))
+}
+
+const LLM_SMART_STORE_SYSTEM_PROMPT: &str = "\
+You are a knowledge extraction assistant for a personal RAG (retrieval-augmented generation) system. \
+Analyze the provided text and extract structured, searchable knowledge items.\n\n\
+For each logical piece of information:\n\
+1. Write a semantically coherent, self-contained text chunk — preserve all important technical details and context.\n\
+2. Assign a source_id category. Use one of: knowledge, reference, notes, code, recipe, \
+   medical, finance, travel, or a short lowercase identifier that best fits\n\
+3. Extract metadata: title (short descriptive title), topic (main subject), \
+   tags (array of relevant keywords)\n\n\
+Rules:\n\
+- Split into MULTIPLE items only when the text covers truly distinct topics or has major section breaks.\n\
+- Each item must be independently useful — no dangling references to other chunks.\n\
+- NEVER split a code block into multiple items. A code block should always be stored in its entirety within a single item, along with its immediate explanation.\n\
+- Aim for natural, readable chunks (e.g., a full paragraph or a logical sub-section). Chunks should typically be 200-600 words; only use very short chunks if the topic is naturally brief.\n\
+- Preserve technical accuracy; never fabricate or add information not present.\n\
+- If a URL or author is present in the context, include it in metadata.\n\n\
+Respond ONLY with a JSON array. No markdown fences, no explanation.\n\
+Schema: [{\"text\": \"...\", \"source_id\": \"...\", \"metadata\": {\"title\": \"...\", \"topic\": \"...\", \"tags\": [\"...\"]}}]";
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreContext {
+    pub url: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreRequest {
+    pub text: String,
+    pub context: Option<SmartStoreContext>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SmartStoreResponse {
+    pub items: Vec<StoreResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SmartStoreItem {
+    pub text: String,
+    pub source_id: String,
+    pub metadata: Value,
+}
+
+async fn smart_store(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionSubject>,
+    Json(body): Json<SmartStoreRequest>,
+) -> Result<(StatusCode, Json<SmartStoreResponse>), ApiError> {
+    let openai_config = state.openai_chat.clone();
+    if !openai_config.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "upstream OpenAI chat configuration is not set".to_owned(),
+        ));
+    }
+    let model = body
+        .model
+        .or_else(|| openai_config.default_model.clone())
+        .ok_or_else(|| ApiError::BadRequest("model required".to_owned()))?;
+
+    validate_non_empty("text", &body.text)?;
+
+    let mut user_prompt = body.text.clone();
+    if let Some(ctx) = &body.context {
+        let mut ctx_lines = Vec::new();
+        if let Some(url) = &ctx.url {
+            ctx_lines.push(format!("URL: {url}"));
+        }
+        if let Some(title) = &ctx.title {
+            ctx_lines.push(format!("Page title: {title}"));
+        }
+        if !ctx_lines.is_empty() {
+            user_prompt = format!("{}\n\nTEXT:\n{}", ctx_lines.join("\n"), body.text);
+        }
+    }
+
+    let payload = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": LLM_SMART_STORE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ]
+    });
+
+    let base_url = openai_config
+        .base_url
+        .as_deref()
+        .expect("is_configured() already checked");
+
+    let mut req = state
+        .http_client
+        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .json(&payload);
+    if let Some(key) = openai_config.api_key.as_deref() {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .error_for_status()
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct Resp { choices: Vec<Choice> }
+    #[derive(serde::Deserialize)]
+    struct Choice { message: Msg }
+    #[derive(serde::Deserialize)]
+    struct Msg { content: Option<String> }
+
+    let chat: Resp = response
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+
+    let content = chat
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .unwrap_or_default();
+
+    let items: Vec<SmartStoreItem> = serde_json::from_str(&content).map_err(|_| {
+        ApiError::Internal(anyhow::anyhow!(
+            "LLM did not return a valid JSON array; got: {content}"
+        ))
+    })?;
+
+    if items.is_empty() {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "LLM returned an empty item list"
+        )));
+    }
+
+    let mut responses = Vec::with_capacity(items.len());
+    for item in items {
+        let store_req = StoreRequest {
+            id: None,
+            text: item.text,
+            metadata: item.metadata,
+            source_id: item.source_id,
+            chunk: None,
+        };
+        let resp = store_entry_core(&state, store_req, session.0.clone()).await?;
+        responses.push(resp);
+    }
+
+    Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
 }
 
 async fn rebuild_graph(
@@ -1009,6 +1811,7 @@ impl From<SearchHit> for SearchResultPayload {
             source_id: value.source_id,
             created_at: value.created_at,
             distance: value.distance,
+            chunk_context: None,
         }
     }
 }
@@ -1352,15 +2155,42 @@ mod tests {
                 .collect())
         }
 
+        fn list_large_items(&self, min_chars: usize, _limit: usize, _offset: usize) -> Result<(Vec<ItemRecord>, i64)> {
+            let stored = self.stored.lock().expect("store mutex poisoned");
+            let items: Vec<_> = stored
+                .iter()
+                .filter(|(item, _)| {
+                    item.text.len() > min_chars
+                        && item.metadata.get("_chunk").is_none()
+                })
+                .map(|(item, _)| item.clone())
+                .collect();
+            let total = items.len() as i64;
+            Ok((items, total))
+        }
+
         fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {
             let stored = self.stored.lock().expect("store mutex poisoned");
             let mut items = stored
                 .iter()
                 .filter(|(item, _)| {
-                    request
-                        .source_id
-                        .as_ref()
-                        .is_none_or(|source| &item.source_id == source)
+                    if let Some(source) = &request.source_id {
+                        if &item.source_id != source { return false; }
+                    }
+                    if let Some(min) = request.min_created_at {
+                        if item.created_at < min { return false; }
+                    }
+                    if let Some(max) = request.max_created_at {
+                        if item.created_at > max { return false; }
+                    }
+                    for (key, val) in &request.metadata_filter {
+                        if let Some(meta_val) = item.metadata.get(key) {
+                            if meta_val.as_str() != Some(val) { return false; }
+                        } else {
+                            return false;
+                        }
+                    }
+                    true
                 })
                 .map(|(item, _)| item.clone())
                 .collect::<Vec<_>>();
@@ -2537,11 +3367,13 @@ mod tests {
             Arc::new(EmbedderHandle::loading()),
             store.clone(),
             store,
+            Arc::new(NoopUserMemory),
             AuthConfig::default(),
             OpenAiChatConfig {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         )));
 
         let response = server.get("/healthz").await;
@@ -2560,6 +3392,7 @@ mod tests {
             Arc::new(EmbedderHandle::loading()),
             store.clone(),
             store,
+            Arc::new(NoopUserMemory),
             AuthConfig {
                 enabled: true,
                 frontend_api_key: Some("expected-key".to_owned()),
@@ -2571,6 +3404,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         )));
 
         let response = server
@@ -2621,6 +3455,7 @@ mod tests {
             Arc::new(EmbedderHandle::ready(embedder)),
             vector_store,
             auth_store,
+            Arc::new(NoopUserMemory),
             AuthConfig {
                 enabled: true,
                 session_secret: Some("test-session-secret".to_owned()),
@@ -2633,6 +3468,7 @@ mod tests {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            ChunkingConfig::default(),
         );
         (state, store)
     }
@@ -2812,7 +3648,7 @@ mod tests {
             .json::<auth::DeviceTokenResponse>();
 
         let listed = server
-            .get("/auth/tokens")
+            .get("/api/auth/tokens")
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),
@@ -2824,7 +3660,7 @@ mod tests {
         assert_eq!(tokens.tokens[0].id, token.token_id);
 
         server
-            .delete(&format!("/auth/tokens/{}", token.token_id))
+            .delete(&format!("/api/auth/tokens/{}", token.token_id))
             .add_header(
                 axum::http::header::COOKIE,
                 cookie.parse::<axum::http::HeaderValue>().unwrap(),

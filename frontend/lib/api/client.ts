@@ -14,6 +14,10 @@ import type {
   GraphNodeDistance,
   GraphStatus,
   ListItemsRequest,
+  LargeItemsRequest,
+  RechunkRequest,
+  LlmRechunkRequest,
+  RechunkResponse,
   PagedItems,
   ChatCompletionChunk,
   ChatCompletionToolResult,
@@ -25,6 +29,7 @@ import type {
   AssistedQueryQueriesEvent,
   AssistedQueryResultEvent,
   AssistedQueryMergedEvent,
+  ImageIngestResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -390,11 +395,68 @@ export async function getItem(id: string): Promise<Entry> {
   return item
 }
 
+export async function getLargeItems(
+  options: LargeItemsRequest = {}
+): Promise<PagedItems> {
+  const params = new URLSearchParams()
+  if (options.min_chars !== undefined) params.append("min_chars", options.min_chars.toString())
+  if (options.limit !== undefined) params.append("limit", options.limit.toString())
+  if (options.offset !== undefined) params.append("offset", options.offset.toString())
+  const queryString = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<{ items: Entry[]; total_count: number }>(
+    `/admin/items/oversized${queryString}`
+  )
+  return {
+    items: ensureArray(response.items, "large items"),
+    total_count: response.total_count,
+  }
+}
+
+export async function rechunkItem(
+  id: string,
+  config: RechunkRequest = {}
+): Promise<RechunkResponse> {
+  return request<RechunkResponse>(`/admin/items/${encodeURIComponent(id)}/rechunk`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  })
+}
+
+export async function llmRechunkItem(
+  id: string,
+  config: LlmRechunkRequest = {}
+): Promise<RechunkResponse> {
+  return request<RechunkResponse>(`/admin/items/${encodeURIComponent(id)}/llm-rechunk`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  })
+}
+
 export async function createItem(data: StoreRequest): Promise<Entry> {
   return request<Entry>("/api/store", {
     method: "POST",
     body: JSON.stringify(data),
   })
+}
+
+export async function uploadImage(
+  file: File,
+  sourceId: string = "images"
+): Promise<ImageIngestResponse> {
+  const form = new FormData()
+  form.append("file", file)
+  form.append("source_id", sourceId)
+
+  const response = await fetch(`${API_BASE_URL}/api/ingest/image`, {
+    method: "POST",
+    body: form,
+  })
+
+  if (!response.ok) {
+    throw new APIError(response.status, `Upload failed: ${response.statusText}`)
+  }
+
+  return response.json()
 }
 
 export async function updateItem(
@@ -513,6 +575,10 @@ export const api = {
     create: createItem,
     update: updateItem,
     delete: deleteItem,
+    listLarge: getLargeItems,
+    rechunk: rechunkItem,
+    llmRechunk: llmRechunkItem,
+    uploadImage,
   },
   search,
   edges: {

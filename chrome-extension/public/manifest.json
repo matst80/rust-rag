@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "rust-rag Collector",
+  "version": "1.0.0",
+  "description": "Simple search and storage for rust-rag",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting",
+    "notifications"
+  ],
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "commands": {
+    "store-selection": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+S",
+        "mac": "Command+Shift+S"
+      },
+      "description": "Store current selection in RAG"
+    }
+  },
+  "host_permissions": [
+    "https://rag.k6n.net/*"
+  ]
+}

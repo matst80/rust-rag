@@ -78,7 +78,7 @@ impl OpenAiChatConfig {
 }
 
 pub const fn default_retrieval_system_prompt() -> &'static str {
-    "You are a RAG Intelligence Assistant. Your goal is to build and query a high-quality knowledge base.\n\nCORE GUIDELINES:\n1. CRAWLING: Use 'ingest_web_content' to research new information.\n2. LARGE PAGES: If a page is too large (>20k chars), it will be saved to disk. Use 'read_file_range' to read it line-by-line.\n3. CHUNKING: NEVER store a whole page as a single entry. It ruins embedding quality.\n4. EXTRACTION: When you ingest a page, extract specific, meaningful sections.\n5. STORAGE: Use 'store_entry' to save focused chunks of 1000-1500 characters.\n6. CONTEXT: Ensure each stored chunk is self-contained (include relevant titles/context in the text).\n7. RETRIEVAL: When a user asks a question, decompose it into multiple focused 'search_entries' calls from different angles (synonyms, sub-topics, related concepts) rather than a single literal query. Prefer hybrid search. Merge and cite the best results.\n\nBe concise and analytical."
+    "You are a RAG Intelligence Assistant. Your goal is to build and query a high-quality knowledge base.\n\nCORE GUIDELINES:\n1. CRAWLING: Use 'ingest_web_content' to research new information.\n2. LARGE PAGES: If a page is too large (>20k chars), it will be saved to disk. Use 'read_file_range' to read it line-by-line.\n3. CHUNKING: NEVER store a whole page as a single entry. It ruins embedding quality.\n4. EXTRACTION: When you ingest a page, extract specific, meaningful sections.\n5. STORAGE: Use 'store_entry' to save semantically coherent chunks (typically 2000-4000 characters). NEVER split code blocks — keep them intact with their surrounding explanation.\n6. CONTEXT: Ensure each stored chunk is self-contained (include relevant titles/context in the text).\n7. RETRIEVAL: When a user asks a question, decompose it into multiple focused 'search_entries' calls from different angles (synonyms, sub-topics, related concepts) rather than a single literal query. Prefer hybrid search. Merge and cite the best results.\n\nBe concise and analytical."
 }
 
 pub const fn default_query_expansion_prompt() -> &'static str {
@@ -102,10 +102,83 @@ impl AuthConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChunkingConfig {
+    /// Maximum characters per stored chunk. Tune to your embedding model's context window.
+    /// Env: RAG_CHUNK_MAX_CHARS (default 1536)
+    pub chunk_max_chars: usize,
+    /// Characters of the previous chunk's tail to prepend to each chunk's embedding for context.
+    /// Env: RAG_CHUNK_OVERLAP_CHARS (default 200)
+    pub chunk_overlap_chars: usize,
+    /// Items longer than this are flagged as oversized in the admin panel.
+    /// Env: RAG_LARGE_ITEM_THRESHOLD (default = chunk_max_chars)
+    pub large_item_threshold: usize,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            chunk_max_chars: 1536,
+            chunk_overlap_chars: 200,
+            large_item_threshold: 1536,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MultimodalConfig {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_secs: u64,
+}
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self { base_url: None, api_key: None, model: None, timeout_secs: 120 }
+    }
+}
+
+impl MultimodalConfig {
+    pub fn is_configured(&self) -> bool {
+        self.base_url.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OntologyConfig {
+    pub enabled: bool,
+    pub confidence_threshold: f32,
+    pub batch_size: usize,
+    pub interval_secs: u64,
+    /// Number of nearest neighbors to retrieve and send to the LLM per item.
+    /// Reduce for local models with small context windows.
+    pub neighbor_count: usize,
+    /// Max characters of the target item's text to include in the LLM prompt.
+    pub target_preview_chars: usize,
+    /// Max characters of each candidate item's text to include in the LLM prompt.
+    pub candidate_preview_chars: usize,
+}
+
+impl Default for OntologyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            confidence_threshold: 0.7,
+            batch_size: 5,
+            interval_secs: 30,
+            neighbor_count: 8,
+            target_preview_chars: 600,
+            candidate_preview_chars: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
     pub db_path: String,
+    pub upload_path: String,
     pub model_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub ort_dylib_path: Option<PathBuf>,
@@ -118,6 +191,9 @@ pub struct AppConfig {
     pub graph_cross_source: bool,
     pub auth: AuthConfig,
     pub openai_chat: OpenAiChatConfig,
+    pub multimodal: MultimodalConfig,
+    pub chunking: ChunkingConfig,
+    pub ontology: OntologyConfig,
 }
 
 impl AppConfig {
@@ -151,6 +227,7 @@ impl AppConfig {
             host: parse_env("RAG_HOST", "0.0.0.0")?,
             port: parse_env("RAG_PORT", "4001")?,
             db_path: env::var("RAG_DB_PATH").unwrap_or_else(|_| "rag.db".to_owned()),
+            upload_path: env::var("RAG_UPLOAD_PATH").unwrap_or_else(|_| "uploads".to_owned()),
             model_path: required_path("RAG_MODEL_PATH")?,
             tokenizer_path: required_path("RAG_TOKENIZER_PATH")?,
             ort_dylib_path: env::var_os("RAG_ORT_DYLIB_PATH").map(PathBuf::from),
@@ -191,6 +268,31 @@ impl AppConfig {
                     .unwrap_or_else(|| default_retrieval_system_prompt().to_owned()),
                 query_expansion_prompt: non_empty_var("RAG_QUERY_EXPANSION_PROMPT")
                     .unwrap_or_else(|| default_query_expansion_prompt().to_owned()),
+            },
+            multimodal: MultimodalConfig {
+                base_url: non_empty_var("RAG_MULTIMODAL_BASE_URL")
+                    .map(|v| v.trim_end_matches('/').to_owned()),
+                api_key: non_empty_var("RAG_MULTIMODAL_API_KEY"),
+                model: non_empty_var("RAG_MULTIMODAL_MODEL"),
+                timeout_secs: parse_env("RAG_MULTIMODAL_TIMEOUT_SECS", "120")?,
+            },
+            chunking: {
+                let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;
+                let chunk_overlap_chars: usize = parse_env("RAG_CHUNK_OVERLAP_CHARS", "200")?;
+                let large_item_threshold: usize = parse_env(
+                    "RAG_LARGE_ITEM_THRESHOLD",
+                    &chunk_max_chars.to_string(),
+                )?;
+                ChunkingConfig { chunk_max_chars, chunk_overlap_chars, large_item_threshold }
+            },
+            ontology: OntologyConfig {
+                enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,
+                confidence_threshold: parse_env("RAG_ONTOLOGY_CONFIDENCE_THRESHOLD", "0.7")?,
+                batch_size: parse_env("RAG_ONTOLOGY_BATCH_SIZE", "5")?,
+                interval_secs: parse_env("RAG_ONTOLOGY_INTERVAL_SECS", "30")?,
+                neighbor_count: parse_env("RAG_ONTOLOGY_NEIGHBOR_COUNT", "8")?,
+                target_preview_chars: parse_env("RAG_ONTOLOGY_TARGET_PREVIEW_CHARS", "600")?,
+                candidate_preview_chars: parse_env("RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS", "300")?,
             },
         })
     }

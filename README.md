@@ -49,32 +49,26 @@ make run
 make run-mcp
 ```
 
-## MCP stdio bridge
+## MCP Integration
 
-The workspace also includes `mcp-stdio`, a stdio MCP server that forwards tool calls to the HTTP API.
+`rust-rag` supports the Model Context Protocol (MCP) via two transports:
 
-```bash
+### 1. Direct SSE Transport (Recommended)
+The server exposes an in-process MCP transport at `/mcp`. This allows direct connection from clients like Claude Code without a bridge process.
+
+~~~bash
+claude mcp add --transport http rust-rag https://your-rag-server.com/mcp \
+  --header "Authorization: Bearer your-mcp-token"
+~~~
+
+### 2. stdio Bridge (`mcp-stdio`)
+The workspace also includes `mcp-stdio`, a standalone bridge that forwards tool calls to the HTTP API. This is useful for clients that only support stdio-based MCP.
+
+~~~bash
 cargo run -p mcp-stdio
-```
+~~~
 
-Supported bridge environment variables:
-
-- `RAG_MCP_API_BASE_URL` - rust-rag HTTP base URL. Default: `http://127.0.0.1:4001`
-- `RAG_MCP_TIMEOUT_SECS` - outbound HTTP timeout in seconds. Default: `30`
-- `RAG_MCP_TOOL_GROUPS` - comma-separated tool groups to expose: `core`, `admin`, `graph`
-- `RAG_MCP_AUTH_BEARER` - optional bearer token added to upstream HTTP requests
-- `RAG_MCP_HEADERS` - optional semicolon-separated extra headers as `Name=Value;Other=Value`
-- `RAG_MCP_SERVER_NAME` - MCP server name reported during initialization
-- `RAG_MCP_SERVER_VERSION` - MCP server version reported during initialization
-- `RAG_MCP_SERVER_INSTRUCTIONS` - optional MCP server instructions text
-
-When the Rust API is protected with `RAG_API_KEYS`, configure MCP with either `RAG_MCP_AUTH_BEARER=<api-key>` or `RAG_MCP_HEADERS=x-api-key=<api-key>`.
-
-Tool groups map directly to the existing HTTP surface:
-
-- `core`: health, store, search
-- `admin`: categories, list/update/delete items
-- `graph`: graph status, edge listing, neighborhood lookup, rebuild, manual edge create/delete
+See [MCP Setup](docs/mcp-setup.md) for detailed configuration and authentication (device login) instructions.
 
 ### Release workflow
 

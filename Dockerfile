@@ -21,12 +21,13 @@ WORKDIR /app
 COPY --from=builder /app/target/release/rust-rag /usr/local/bin/rust-rag
 COPY --from=builder /app/assets /app/assets
 
-RUN mkdir -p /app/data \
+RUN mkdir -p /app/data /app/data/uploads \
 	&& chown -R rustrag:rustrag /app
 
 ENV RAG_HOST=0.0.0.0 \
 	RAG_PORT=4001 \
 	RAG_DB_PATH=/app/data/rag.db \
+	RAG_UPLOAD_PATH=/app/data/uploads \
 	RAG_MODEL_PATH=/app/assets/bge-small-en-v1.5/model.onnx \
 	RAG_TOKENIZER_PATH=/app/assets/bge-small-en-v1.5/tokenizer.json \
 	RAG_EMBEDDING_DIMENSION=384 \

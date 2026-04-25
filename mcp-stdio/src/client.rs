@@ -7,7 +7,8 @@ use rust_rag::api::{
     AdminItemPayload, AdminItemsResponse, CategoriesResponse, CreateManualEdgeRequest,
     DeleteResponse, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
     GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery, ListItemsQuery,
-    SearchRequest, SearchResponse, StoreRequest, StoreResponse, UpdateItemRequest,
+    SearchRequest, SearchResponse, SmartStoreRequest, SmartStoreResponse, StoreRequest,
+    StoreResponse, UpdateItemRequest,
 };
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -82,6 +83,11 @@ impl RustRagHttpClient {
 
     pub async fn store(&self, request: &StoreRequest) -> Result<StoreResponse> {
         self.send_json(Method::POST, "api/store", Some(request), None::<&()>)
+            .await
+    }
+
+    pub async fn smart_store(&self, request: &SmartStoreRequest) -> Result<SmartStoreResponse> {
+        self.send_json(Method::POST, "api/store/smart", Some(request), None::<&()>)
             .await
     }
 

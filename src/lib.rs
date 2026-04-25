@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod embedding;
 pub mod mcp;
+pub mod ontology;
 
 use axum::Router;
 

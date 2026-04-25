@@ -18,8 +18,8 @@ import { MarkdownView } from "./markdown-view"
 import { EmbeddedGraph } from "../graph/embedded-graph"
 import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { toast } from "sonner"
-import { cn } from "@/lib/utils"
 
 interface EntryDetailProps {
   id: string
@@ -28,6 +28,7 @@ interface EntryDetailProps {
 export function EntryDetail({ id }: EntryDetailProps) {
   const router = useRouter()
   const { mutate } = useSWRConfig()
+  const isMobile = useIsMobile()
   const { data: entry, isLoading, error } = useItem(id)
   const { data: graphStatus } = useGraphStatus()
   const { data: edges } = useEdgesForItem(graphStatus?.enabled ? id : null)
@@ -38,9 +39,7 @@ export function EntryDetail({ id }: EntryDetailProps) {
   const [editedText, setEditedText] = useState("")
 
   useEffect(() => {
-    if (entry) {
-      setEditedText(entry.text)
-    }
+    if (entry) setEditedText(entry.text)
   }, [entry])
 
   const handleDelete = async () => {
@@ -59,193 +58,152 @@ export function EntryDetail({ id }: EntryDetailProps) {
       })
       mutate(["items", id])
       setIsEditing(false)
-      toast.success("Entry updated successfully")
-    } catch (err) {
+      toast.success("Entry updated")
+    } catch {
       toast.error("Failed to update entry")
     }
   }
 
   if (isLoading) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] items-center justify-center">
-        <div className="size-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+      <div className="flex h-[calc(100vh-3rem)] items-center justify-center gap-3">
+        <div className="size-6 animate-spin border-2 border-border border-t-primary" />
+        <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground animate-pulse">
+          Loading...
+        </span>
       </div>
     )
   }
 
   if (error || !entry) {
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] flex-col items-center justify-center text-center">
-        <h3 className="mb-2 text-lg font-medium">Entry not found</h3>
-        <p className="mb-4 text-sm text-muted-foreground">The entry you're looking for doesn't exist.</p>
-        <Button asChild>
+      <div className="flex h-[calc(100vh-3rem)] flex-col items-center justify-center text-center gap-4">
+        <p className="font-mono text-xs uppercase tracking-widest text-muted-foreground">Entry not found</p>
+        <Button asChild variant="outline" size="sm">
           <Link href="/entries">Back to Entries</Link>
         </Button>
       </div>
     )
   }
 
-  const getSourceVariant = (source: string) => {
-    const s = source.toLowerCase()
-    if (s.includes('manual')) return 'warning'
-    if (s.includes('auto')) return 'info'
-    if (s.includes('imported')) return 'purple'
-    return 'outline'
-  }
-
-  return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col overflow-hidden bg-background">
-      {/* Header bar */}
-      <div className="flex h-16 shrink-0 items-center justify-between border-b px-6 bg-background/50 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" asChild className="rounded-full">
-            <Link href="/entries">
-              <ArrowLeft className="size-4" />
-            </Link>
-          </Button>
-          <div className="flex flex-col">
-            <h1 className="text-lg font-black tracking-tighter uppercase text-foreground/80 leading-none">Intelligence Fragment</h1>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[10px] font-bold text-muted-foreground/40 tabular-nums uppercase tracking-widest">ID: {entry.id.substring(0, 8)}...</span>
-              <Badge variant={getSourceVariant(entry.source_id)} className="px-1.5 py-0 text-[8px] uppercase font-black tracking-[0.15em]">
-                {entry.source_id}
-              </Badge>
-            </div>
+  // ── Shared header ──────────────────────────────────────
+  const header = (
+    <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4 bg-background">
+      <div className="flex items-center gap-3 min-w-0">
+        <Button variant="ghost" size="icon" className="size-8 shrink-0" asChild>
+          <Link href="/entries">
+            <ArrowLeft className="size-4" />
+          </Link>
+        </Button>
+        <div className="flex flex-col min-w-0">
+          <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground leading-none">
+            Fragment
+          </h1>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+              {entry.id.substring(0, 12)}…
+            </span>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">
+              {entry.source_id}
+            </span>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button 
-            variant={isEditing ? "default" : "outline"} 
-            size="sm" 
-            onClick={isEditing ? handleSave : () => setIsEditing(true)}
-            className="shadow-sm transition-all"
-          >
-            {isEditing ? (
-              <><Save className="size-4 mr-2" /> Save Changes</>
-            ) : (
-              <><Pencil className="size-4 mr-2" /> Edit Mode</>
-            )}
-          </Button>
-          {isEditing && (
-            <Button variant="ghost" size="sm" onClick={() => setIsEditing(false)}>
-              Cancel
-            </Button>
-          )}
-          <ComboButton 
-            onConfirm={handleDelete}
-            className="text-muted-foreground"
-          />
         </div>
       </div>
 
-      <ResizablePanelGroup direction="horizontal" className="flex-1">
-        <ResizablePanel defaultSize={60} minSize={30}>
-          <div className="flex h-full flex-col overflow-y-auto px-10 py-8 scrollbar-thin">
-            <div className="mx-auto w-full max-w-3xl">
-              {isEditing ? (
-                <div className="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60">Content Editor</h2>
-                    <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20">Drafting</Badge>
-                  </div>
-                  <Textarea
-                    value={editedText}
-                    onChange={(e) => setEditedText(e.target.value)}
-                    className="min-h-[60vh] text-base leading-relaxed p-6 rounded-2xl border-muted/50 focus-visible:ring-primary/20 resize-none shadow-inner bg-muted/5 font-mono"
-                    placeholder="Write your content here... (Markdown supported)"
+      <div className="flex items-center gap-2 shrink-0">
+        <Button
+          variant={isEditing ? "default" : "outline"}
+          size="sm"
+          className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
+          onClick={isEditing ? handleSave : () => setIsEditing(true)}
+        >
+          {isEditing ? (
+            <><Save className="size-3.5 mr-1.5" />Save</>
+          ) : (
+            <><Pencil className="size-3.5 mr-1.5" />Edit</>
+          )}
+        </Button>
+        {isEditing && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
+            onClick={() => setIsEditing(false)}
+          >
+            Cancel
+          </Button>
+        )}
+        <ComboButton onConfirm={handleDelete} className="size-8" />
+      </div>
+    </div>
+  )
+
+  // ── Main content section ───────────────────────────────
+  const contentSection = (
+    <div className="flex h-full flex-col overflow-y-auto px-5 md:px-10 py-6 md:py-8">
+      <div className="mx-auto w-full max-w-3xl space-y-8">
+        {isEditing ? (
+          <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                Editor
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 border border-primary/30 text-primary bg-primary/5">
+                Drafting
+              </span>
+            </div>
+            <Textarea
+              value={editedText}
+              onChange={(e) => setEditedText(e.target.value)}
+              className="min-h-[60vh] text-sm leading-relaxed p-4 border-border focus-visible:border-primary focus-visible:ring-0 resize-none bg-card font-mono"
+              placeholder="Write your content here... (Markdown supported)"
+            />
+          </div>
+        ) : (
+          <div className="space-y-8 animate-in fade-in duration-500">
+            {/* Image preview */}
+            {entry.metadata.source_type === "image" && entry.metadata.source_file && (
+              <div>
+                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
+                  Image
+                </h2>
+                <div className="border border-border bg-card overflow-hidden">
+                  <img
+                    src={String(entry.metadata.source_file)}
+                    alt={String(entry.metadata.original_filename ?? "image")}
+                    className="max-w-full h-auto"
                   />
                 </div>
-              ) : (
-                <div className="space-y-8 animate-in fade-in duration-500">
-                  <div className="flex flex-col gap-6">
-                    <div>
-                      <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60 mb-4">Content</h2>
-                      <div className="bg-card rounded-2xl border border-muted/40 p-8 shadow-sm">
-                        <MarkdownView content={entry.text} />
-                      </div>
-                    </div>
-
-                    {Object.keys(entry.metadata).length > 0 && (
-                      <div>
-                        <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60 mb-4">Properties</h2>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                          {Object.entries(entry.metadata).map(([key, value]) => (
-                            <div key={key} className="flex flex-col gap-1 rounded-xl bg-muted/20 p-3.5 border border-muted/40 transition-colors hover:bg-muted/30">
-                              <span className="text-[10px] font-bold uppercase text-muted-foreground/50 tracking-widest">{key}</span>
-                              <span className="text-sm font-semibold truncate text-foreground/90">{String(value)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle />
-
-        <ResizablePanel defaultSize={40} minSize={20}>
-          <div className="flex h-full flex-col bg-muted/5">
-            <div className="flex h-12 shrink-0 items-center justify-between border-b px-4 bg-background/30 backdrop-blur-sm">
-              <div className="flex items-center gap-2">
-                <GitBranch className="size-4 text-primary" />
-                <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Neural Context</span>
               </div>
-              {graphStatus?.enabled && (
-                <Button variant="ghost" size="sm" asChild className="h-8 text-[10px] font-bold uppercase">
-                  <Link href={`/visualize?focus=${encodeURIComponent(id)}`}>
-                    Full View
-                  </Link>
-                </Button>
-              )}
-            </div>
-            
-            <div className="flex-1 relative">
-              {graphStatus?.enabled ? (
-                <EmbeddedGraph 
-                  centerId={id} 
-                  onNodeClick={(clickedId) => {
-                    if (clickedId !== id) {
-                      router.push(`/entries/${encodeURIComponent(clickedId)}`)
-                    }
-                  }} 
-                />
-              ) : (
-                <div className="flex h-full flex-col items-center justify-center p-8 text-center text-muted-foreground">
-                  <GitBranch className="size-8 mb-4 opacity-20" />
-                  <p className="text-sm font-medium">Graph context unavailable</p>
-                  <p className="text-xs mt-1">Enable graph support to visualize relationships.</p>
-                </div>
-              )}
+            )}
+
+            {/* Content */}
+            <div>
+              <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
+                Content
+              </h2>
+              <div className="border border-border bg-card p-6">
+                <MarkdownView content={entry.text} />
+              </div>
             </div>
 
-            {edges && edges.length > 0 && (
-              <div className="h-1/3 shrink-0 border-t bg-card/50 overflow-y-auto p-4 flex flex-col gap-3">
-                <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/70">Connected Nodes</h3>
-                <div className="flex flex-col gap-2">
-                  {edges.map((edge) => (
+            {/* Metadata */}
+            {Object.keys(entry.metadata).length > 0 && (
+              <div>
+                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
+                  Properties
+                </h2>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {Object.entries(entry.metadata).map(([key, value]) => (
                     <div
-                      key={edge.id}
-                      className="group flex items-center justify-between rounded-xl border border-muted/30 bg-background/50 p-3 transition-all hover:border-primary/30 hover:shadow-sm"
+                      key={key}
+                      className="flex flex-col gap-1 border border-border bg-card p-3 hover:border-border/80 transition-colors"
                     >
-                      <div className="flex flex-col gap-1">
-                        <Badge variant="indigo" className="w-fit text-[9px] font-bold uppercase py-0 px-1.5 opacity-80">
-                          {edge.relationship}
-                        </Badge>
-                        <Link
-                          href={`/entries/${encodeURIComponent(
-                            edge.source_id === id ? edge.target_id : edge.source_id
-                          )}`}
-                          className="text-xs font-bold hover:text-primary transition-colors truncate max-w-[150px]"
-                        >
-                          {edge.source_id === id ? edge.target_id : edge.source_id}
-                        </Link>
-                      </div>
-                      <span className="text-[9px] uppercase font-bold text-muted-foreground/40">
-                        {edge.source_id === id ? "out" : "in"}
+                      <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                        {key}
+                      </span>
+                      <span className="text-sm font-medium truncate text-foreground">
+                        {String(value)}
                       </span>
                     </div>
                   ))}
@@ -253,6 +211,104 @@ export function EntryDetail({ id }: EntryDetailProps) {
               </div>
             )}
           </div>
+        )}
+      </div>
+    </div>
+  )
+
+  // ── Graph panel ────────────────────────────────────────
+  const graphPanel = (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-4">
+        <div className="flex items-center gap-2">
+          <GitBranch className="size-3.5 text-primary" />
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground">
+            Connections
+          </span>
+        </div>
+        {graphStatus?.enabled && (
+          <Link
+            href={`/visualize?focus=${encodeURIComponent(id)}`}
+            className="font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground hover:text-primary transition-colors"
+          >
+            Full View →
+          </Link>
+        )}
+      </div>
+
+      <div className="flex-1 relative overflow-hidden">
+        {graphStatus?.enabled ? (
+          <EmbeddedGraph
+            centerId={id}
+            onNodeClick={(clickedId) => {
+              if (clickedId !== id) router.push(`/entries/${encodeURIComponent(clickedId)}`)
+            }}
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+            <GitBranch className="size-6 mb-3 text-muted-foreground/30" />
+            <p className="font-mono text-xs text-muted-foreground">Graph unavailable</p>
+          </div>
+        )}
+      </div>
+
+      {edges && edges.length > 0 && (
+        <div className="h-1/3 shrink-0 border-t border-border bg-card overflow-y-auto p-3 flex flex-col gap-2">
+          <h3 className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+            Connected — {edges.length}
+          </h3>
+          <div className="flex flex-col gap-1.5">
+            {edges.map((edge) => {
+              const targetId = edge.source_id === id ? edge.target_id : edge.source_id
+              return (
+                <div
+                  key={edge.id}
+                  className="flex items-center justify-between border border-border bg-background p-2.5 hover:border-primary/30 transition-colors"
+                >
+                  <div className="flex flex-col gap-0.5 min-w-0">
+                    <span className="font-mono text-[10px] font-bold text-primary uppercase tracking-wider">
+                      {edge.relationship}
+                    </span>
+                    <Link
+                      href={`/entries/${encodeURIComponent(targetId)}`}
+                      className="font-mono text-xs text-muted-foreground hover:text-primary transition-colors truncate"
+                    >
+                      {targetId.substring(0, 20)}…
+                    </Link>
+                  </div>
+                  <span className="font-mono text-[10px] uppercase text-muted-foreground/60 shrink-0 ml-2">
+                    {edge.source_id === id ? "out" : "in"}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  // ── Mobile layout (no graph) ───────────────────────────
+  if (isMobile) {
+    return (
+      <div className="flex flex-col overflow-hidden bg-background" style={{ height: "calc(100vh - 3rem)" }}>
+        {header}
+        {contentSection}
+      </div>
+    )
+  }
+
+  // ── Desktop layout (resizable split) ──────────────────
+  return (
+    <div className="flex h-[calc(100vh-3rem)] flex-col overflow-hidden bg-background">
+      {header}
+      <ResizablePanelGroup direction="horizontal" className="flex-1 overflow-hidden">
+        <ResizablePanel defaultSize={60} minSize={30}>
+          {contentSection}
+        </ResizablePanel>
+        <ResizableHandle withHandle />
+        <ResizablePanel defaultSize={40} minSize={20}>
+          {graphPanel}
         </ResizablePanel>
       </ResizablePanelGroup>
     </div>

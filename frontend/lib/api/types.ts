@@ -108,6 +108,29 @@ export interface ListItemsRequest {
   sort_order?: SortOrder
 }
 
+export interface LargeItemsRequest {
+  min_chars?: number
+  limit?: number
+  offset?: number
+}
+
+export interface RechunkRequest {
+  max_chars?: number
+  overlap_chars?: number
+}
+
+export interface LlmRechunkRequest {
+  model?: string
+  max_chunks?: number
+}
+
+export interface RechunkResponse {
+  id: string
+  source_id: string
+  created_at: number
+  chunk_ids?: string[]
+}
+
 export interface PagedItems {
   items: Entry[]
   total_count: number
@@ -254,6 +277,13 @@ export type AssistedQueryEvent =
   | AssistedQueryResultEvent
   | AssistedQueryMergedEvent
   | ChatCompletionStreamError
+
+export interface ImageIngestResponse {
+  id: string
+  source_id: string
+  created_at: number
+  source_file: string
+}
 
 export interface AssistedQueryHandlers {
   onQueries?: (event: AssistedQueryQueriesEvent) => void
