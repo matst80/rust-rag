@@ -1381,9 +1381,10 @@ self-contained, semantically coherent chunks suitable for retrieval-augmented ge
 Rules:\n\
 - Each chunk should be independently understandable — no dangling references.\n\
 - Preserve meaning; do not summarize or paraphrase.\n\
-- Use natural boundaries (paragraphs, sections, list items).\n\
-- Aim for chunks of roughly 200–600 words.\n\
-- Avoid chunks shorter than 2 sentences unless the section is naturally brief.\n\
+- Use natural boundaries (paragraphs, sections, list items, functions).\n\
+- NEVER split code blocks across chunks. Keep a code block and its immediate context together.\n\
+- Aim for natural chunks of roughly 300–800 words where possible.\n\
+- Avoid chunks shorter than 3 sentences unless the section is naturally brief.\n\
 \n\n\
 Respond ONLY with a JSON array of strings, each string being one chunk. No markdown, no explanation.\n\
 Example: [\"chunk one text\", \"chunk two text\"]";
@@ -1550,17 +1551,18 @@ const LLM_SMART_STORE_SYSTEM_PROMPT: &str = "\
 You are a knowledge extraction assistant for a personal RAG (retrieval-augmented generation) system. \
 Analyze the provided text and extract structured, searchable knowledge items.\n\n\
 For each logical piece of information:\n\
-1. Write a concise, self-contained text chunk — preserve important details, remove fluff\n\
+1. Write a semantically coherent, self-contained text chunk — preserve all important technical details and context.\n\
 2. Assign a source_id category. Use one of: knowledge, reference, notes, code, recipe, \
    medical, finance, travel, or a short lowercase identifier that best fits\n\
 3. Extract metadata: title (short descriptive title), topic (main subject), \
    tags (array of relevant keywords)\n\n\
 Rules:\n\
-- Split into MULTIPLE items when the text covers distinct topics or has natural section breaks\n\
-- Each item must be independently useful — no dangling references to other chunks\n\
-- Aim for 1-4 sentences per item; longer only when the information is tightly coupled\n\
-- Preserve technical accuracy; never fabricate or add information not present\n\
-- If a URL or author is present in the context, include it in metadata\n\n\
+- Split into MULTIPLE items only when the text covers truly distinct topics or has major section breaks.\n\
+- Each item must be independently useful — no dangling references to other chunks.\n\
+- NEVER split a code block into multiple items. A code block should always be stored in its entirety within a single item, along with its immediate explanation.\n\
+- Aim for natural, readable chunks (e.g., a full paragraph or a logical sub-section). Chunks should typically be 200-600 words; only use very short chunks if the topic is naturally brief.\n\
+- Preserve technical accuracy; never fabricate or add information not present.\n\
+- If a URL or author is present in the context, include it in metadata.\n\n\
 Respond ONLY with a JSON array. No markdown fences, no explanation.\n\
 Schema: [{\"text\": \"...\", \"source_id\": \"...\", \"metadata\": {\"title\": \"...\", \"topic\": \"...\", \"tags\": [\"...\"]}}]";
 

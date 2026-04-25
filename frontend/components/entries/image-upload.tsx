@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { ArrowLeft, Upload, ImageIcon, X, CheckCircle } from "lucide-react"
@@ -18,7 +18,7 @@ export function ImageUpload() {
   const [uploading, setUploading] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
 
-  const handleFile = (f: File) => {
+  const handleFile = useCallback((f: File) => {
     if (!f.type.startsWith("image/")) {
       toast.error("Only image files are supported")
       return
@@ -26,7 +26,28 @@ export function ImageUpload() {
     setFile(f)
     const url = URL.createObjectURL(f)
     setPreview(url)
-  }
+  }, [])
+
+  const handlePaste = useCallback((e: ClipboardEvent) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image") !== -1) {
+        const f = items[i].getAsFile()
+        if (f) {
+          handleFile(f)
+          toast.info("Image pasted from clipboard")
+          break
+        }
+      }
+    }
+  }, [handleFile])
+
+  useEffect(() => {
+    window.addEventListener("paste", handlePaste)
+    return () => window.removeEventListener("paste", handlePaste)
+  }, [handlePaste])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()

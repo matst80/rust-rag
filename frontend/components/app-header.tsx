@@ -25,7 +25,6 @@ const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
 const navigation = [
   { name: "Search", href: "/", icon: Search },
-  { name: "Assisted", href: "/assisted", icon: Sparkles },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Upload", href: "/entries/upload", icon: ImagePlus },

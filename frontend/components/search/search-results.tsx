@@ -1,6 +1,6 @@
 "use client"
 
-import { FileText, Link2 } from "lucide-react"
+import { FileText, Link2, Sparkles } from "lucide-react"
 import type { SearchResult, RelatedResult } from "@/lib/api"
 import { EntryCard } from "../entries/entry-card"
 
@@ -8,14 +8,19 @@ interface SearchResultsProps {
   results: SearchResult[]
   related?: RelatedResult[]
   query: string
+  isAssisted?: boolean
 }
 
-export function SearchResults({ results, related = [], query }: SearchResultsProps) {
+export function SearchResults({ results, related = [], query, isAssisted }: SearchResultsProps) {
   if (results.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center animate-in fade-in slide-in-from-bottom-4 duration-700">
         <div className="mb-6 flex size-20 items-center justify-center border border-border bg-card">
-          <FileText className="size-8 text-muted-foreground/60" />
+          {isAssisted ? (
+            <Sparkles className="size-8 text-primary/60" />
+          ) : (
+            <FileText className="size-8 text-muted-foreground/60" />
+          )}
         </div>
         <h3 className="mb-3 text-2xl font-extrabold tracking-tight">No results match</h3>
         <p className="text-muted-foreground max-w-sm text-sm leading-relaxed">
@@ -31,9 +36,13 @@ export function SearchResults({ results, related = [], query }: SearchResultsPro
       {/* Results header */}
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2 px-3 py-1.5 border border-primary/20 bg-primary/5">
-          <div className="size-1.5 bg-primary animate-pulse" />
+          {isAssisted ? (
+            <Sparkles className="size-3 text-primary animate-pulse" />
+          ) : (
+            <div className="size-1.5 bg-primary animate-pulse" />
+          )}
           <p className="font-mono text-[10px] font-black uppercase tracking-[3px] text-primary/80">
-            {results.length} fragment{results.length !== 1 ? "s" : ""}
+            {results.length} {isAssisted ? "merged" : ""} fragment{results.length !== 1 ? "s" : ""}
           </p>
         </div>
         <div className="h-px flex-1 bg-border" />

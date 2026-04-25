@@ -223,18 +223,25 @@ async fn process_batch(
             Ok(edges) => {
                 let count = edges.len();
                 for edge in edges {
+                    let from = edge.from_item_id.clone();
+                    let to = edge.to_item_id.clone();
+                    let rel = edge.relation.clone().unwrap_or_else(|| "none".to_string());
+                    let conf = edge.weight;
+
                     let store_clone = store.clone();
                     if let Err(err) =
                         tokio::task::spawn_blocking(move || store_clone.add_manual_edge(edge))
                             .await
                     {
                         error!("ontology worker: failed to insert edge: {err}");
+                    } else {
+                        info!("ontology worker: added edge: {} --[{}]--> {} (conf: {:.2})", from, rel, to, conf);
                     }
                 }
                 if count > 0 {
                     info!("ontology worker: item {} → {count} edge(s) committed", item.id);
                 } else {
-                    tracing::debug!("ontology worker: item {} → no edges (all filtered or empty)", item.id);
+                    info!("ontology worker: item {} → no edges (all filtered or empty)", item.id);
                 }
                 "done"
             }
@@ -246,9 +253,11 @@ async fn process_batch(
 
         let store_clone = store.clone();
         let id = item.id.clone();
+        let status_to_set = status.to_string();
         let _ =
-            tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, status))
+            tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
                 .await;
+        info!("ontology worker: marked item {} as {}", item.id, status);
     }
 
     Ok(())
