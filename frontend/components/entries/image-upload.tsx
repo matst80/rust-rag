@@ -68,14 +68,69 @@ export function ImageUpload() {
     if (f) handleFile(f)
   }
 
+  const scaleImage = (file: File, maxWidth = 1600, maxHeight = 1600): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image()
+      img.src = URL.createObjectURL(file)
+      img.onload = () => {
+        URL.revokeObjectURL(img.src)
+        let width = img.width
+        let height = img.height
+
+        if (width <= maxWidth && height <= maxHeight) {
+          resolve(file)
+          return
+        }
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height *= maxWidth / width
+            width = maxWidth
+          }
+        } else {
+          if (height > maxHeight) {
+            width *= maxHeight / height
+            height = maxHeight
+          }
+        }
+
+        const canvas = document.createElement("canvas")
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext("2d")
+        if (!ctx) {
+          reject(new Error("Failed to get canvas context"))
+          return
+        }
+
+        ctx.drawImage(img, 0, 0, width, height)
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              resolve(blob)
+            } else {
+              reject(new Error("Canvas toBlob failed"))
+            }
+          },
+          file.type,
+          0.85 // quality
+        )
+      }
+      img.onerror = reject
+    })
+  }
+
   const handleUpload = async () => {
     if (!file) return
     setUploading(true)
     try {
-      const result = await uploadImage(file, sourceId)
+      const scaledBlob = await scaleImage(file)
+      const scaledFile = new File([scaledBlob], file.name, { type: file.type })
+      const result = await uploadImage(scaledFile, sourceId)
       toast.success("Image indexed successfully")
       router.push(`/entries/${encodeURIComponent(result.id)}`)
-    } catch {
+    } catch (err) {
+      console.error("Upload error:", err)
       toast.error("Upload failed")
       setUploading(false)
     }
