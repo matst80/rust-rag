@@ -101,9 +101,9 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
 
   return (
     <div className="relative flex w-full min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
-      <div className="mx-auto w-full max-w-3xl flex-1 flex flex-col px-6">
+      <div className="mx-auto w-full max-w-3xl flex-1 flex flex-col px-4 md:px-6">
         {!submittedQuery ? (
-          <div className="flex flex-1 flex-col items-center justify-center -mt-16">
+          <div className="flex flex-1 flex-col items-center justify-start pt-10 md:justify-center md:-mt-16">
 
             <div className="animate-in fade-in zoom-in duration-700 fill-mode-both mb-8">
               {isAssisted ? (
@@ -123,7 +123,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
               {isAssisted ? "AI-Assisted" : "rust-rag"}
             </p>
 
-            <h1 className="mb-4 text-center text-4xl md:text-5xl font-extrabold tracking-tight text-foreground animate-in fade-in slide-in-from-bottom-4 duration-700 delay-200 fill-mode-both">
+            <h1 className="mb-4 text-center text-3xl md:text-5xl font-extrabold tracking-tight text-foreground animate-in fade-in slide-in-from-bottom-4 duration-700 delay-200 fill-mode-both">
               {isAssisted ? "Deep Search" : "Search Intelligence"}
             </h1>
 

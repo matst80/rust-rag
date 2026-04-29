@@ -38,6 +38,18 @@ RAG_ONTOLOGY_NEIGHBOR_COUNT ?= 10
 RAG_ONTOLOGY_TARGET_PREVIEW_CHARS ?= 2000
 RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS ?= 1500
 
+# Manager worker — autonomous orchestrator. Uses xAI Grok by default.
+RAG_MANAGER_ENABLED ?= true
+RAG_MANAGER_CHANNEL ?= manager
+RAG_MANAGER_MENTION ?= @manager
+RAG_MANAGER_INTERVAL_SECS ?= 300
+RAG_MANAGER_API_BASE_URL ?= https://api.x.ai/v1
+RAG_MANAGER_API_KEY ?=
+RAG_MANAGER_MODEL ?= grok-4-1-fast-reasoning
+RAG_MANAGER_TIMEOUT_SECS ?= 120
+RAG_MANAGER_MAX_ITERATIONS ?= 8
+RAG_MANAGER_MEMORY_SOURCE_ID ?= manager_memory
+
 # Chunking — tune to your embedding model's context window.
 # RAG_LARGE_ITEM_THRESHOLD defaults to RAG_CHUNK_MAX_CHARS when unset.
 RAG_CHUNK_MAX_CHARS ?= 1536
@@ -63,11 +75,15 @@ FRONTEND_DIR ?= $(CURDIR)/frontend
 APP_BASE_URL ?= http://localhost:3000
 K8S_MANIFEST ?= deploy/kubernetes/rust-rag.yaml
 K8S_FRONTEND_MANIFEST ?= deploy/kubernetes/rust-rag-frontend.yaml
+K8S_FRONTEND_HOST_MANIFEST ?= deploy/kubernetes/rust-rag-frontend-host.yaml
+K8S_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-ingress.yaml
+FRONTEND_DEV_PORT ?= 3000
+FRONTEND_DEV_HOST ?= 0.0.0.0
 K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets print-env fmt test verify check-env build build-cuda build-mcp run run-cuda run-mcp tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets print-env fmt test verify check-env build build-cuda build-mcp run run-cuda run-mcp tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -90,6 +106,9 @@ help:
 		'  make docker-build     Build the server container image' \
 		'  make docker-push      Push the server container image' \
 		'  make docker-run       Run the server container with the local data directory mounted' \
+		'  make frontend-install      Install frontend npm dependencies' \
+		'  make frontend-dev          Run Next.js dev on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT) (host-shim mode)' \
+		'  make frontend-prod         Build and start Next.js on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT)' \
 		'  make frontend-docker-build Build the Next.js frontend container image' \
 		'  make frontend-docker-push  Push the Next.js frontend container image' \
 		'  make frontend-docker-run   Run the frontend container (override RAG_API_URL as needed)' \
@@ -97,8 +116,12 @@ help:
 		'  make docker-push-all  Push both server and frontend images' \
 		'  make k8s-apply        Apply the Kubernetes manifest in deploy/kubernetes' \
 		'  make k8s-delete       Delete the Kubernetes manifest in deploy/kubernetes' \
-		'  make k8s-apply-frontend  Apply the frontend Kubernetes manifest' \
-		'  make k8s-delete-frontend Delete the frontend Kubernetes manifest' \
+		'  make k8s-apply-frontend       Apply the in-cluster frontend Deployment' \
+		'  make k8s-delete-frontend      Delete the in-cluster frontend Deployment' \
+		'  make k8s-apply-frontend-host  Apply the host-shim Service `rag-frontend` -> 10.10.11.135:3000' \
+		'  make k8s-delete-frontend-host Delete the host-shim Service' \
+		'  make k8s-apply-ingress        Apply the Ingress (routes / to rag-frontend)' \
+		'  make k8s-delete-ingress       Delete the Ingress' \
 		'  make k8s-apply-all    Apply both server and frontend manifests' \
 		'  make k8s-delete-all   Delete both server and frontend manifests' \
 		'  make k8s-namespace    Create K8S_NAMESPACE (currently: $(K8S_NAMESPACE)) if it does not exist' \
@@ -255,6 +278,16 @@ run-cuda:
 	RAG_ONTOLOGY_NEIGHBOR_COUNT="$(RAG_ONTOLOGY_NEIGHBOR_COUNT)" \
 	RAG_ONTOLOGY_TARGET_PREVIEW_CHARS="$(RAG_ONTOLOGY_TARGET_PREVIEW_CHARS)" \
 	RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS="$(RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS)" \
+	RAG_MANAGER_ENABLED="$(RAG_MANAGER_ENABLED)" \
+	RAG_MANAGER_CHANNEL="$(RAG_MANAGER_CHANNEL)" \
+	RAG_MANAGER_MENTION="$(RAG_MANAGER_MENTION)" \
+	RAG_MANAGER_INTERVAL_SECS="$(RAG_MANAGER_INTERVAL_SECS)" \
+	RAG_MANAGER_API_BASE_URL="$(RAG_MANAGER_API_BASE_URL)" \
+	RAG_MANAGER_API_KEY="$(RAG_MANAGER_API_KEY)" \
+	RAG_MANAGER_MODEL="$(RAG_MANAGER_MODEL)" \
+	RAG_MANAGER_TIMEOUT_SECS="$(RAG_MANAGER_TIMEOUT_SECS)" \
+	RAG_MANAGER_MAX_ITERATIONS="$(RAG_MANAGER_MAX_ITERATIONS)" \
+	RAG_MANAGER_MEMORY_SOURCE_ID="$(RAG_MANAGER_MEMORY_SOURCE_ID)" \
 	RAG_CHUNK_MAX_CHARS="$(RAG_CHUNK_MAX_CHARS)" \
 	RAG_CHUNK_OVERLAP_CHARS="$(RAG_CHUNK_OVERLAP_CHARS)" \
 	RAG_LARGE_ITEM_THRESHOLD="$(RAG_LARGE_ITEM_THRESHOLD)" \
@@ -329,6 +362,37 @@ frontend-docker-run:
 		-e ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
 		"$(FRONTEND_IMAGE_NAME)"
 
+frontend-install:
+	cd "$(FRONTEND_DIR)" && npm install
+
+# Run Next.js in dev mode bound to 0.0.0.0 so the in-cluster `rust-rag-frontend`
+# selector-less Service (Endpoints -> 10.10.11.135:3000) can reach it. Hot reload
+# replaces the Docker rebuild + image push loop for frontend changes.
+frontend-dev:
+	cd "$(FRONTEND_DIR)" && \
+		RAG_API_URL="http://127.0.0.1:$(RAG_PORT)" \
+		APP_BASE_URL="$(APP_BASE_URL)" \
+		AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
+		ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
+		ZITADEL_CLIENT_ID="$(ZITADEL_CLIENT_ID)" \
+		ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
+		ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
+		ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
+		npx next dev -H "$(FRONTEND_DEV_HOST)" -p "$(FRONTEND_DEV_PORT)"
+
+# Production-mode `next start` on the host (built first via `npm run build`).
+frontend-prod:
+	cd "$(FRONTEND_DIR)" && npm run build && \
+		RAG_API_URL="http://127.0.0.1:$(RAG_PORT)" \
+		APP_BASE_URL="$(APP_BASE_URL)" \
+		AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
+		ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
+		ZITADEL_CLIENT_ID="$(ZITADEL_CLIENT_ID)" \
+		ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
+		ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
+		ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
+		npx next start -H "$(FRONTEND_DEV_HOST)" -p "$(FRONTEND_DEV_PORT)"
+
 docker-build-all: docker-build frontend-docker-build
 
 docker-push-all: docker-push frontend-docker-push
@@ -348,6 +412,21 @@ k8s-apply-frontend:
 
 k8s-delete-frontend:
 	kubectl $(KUBECTL_NS) delete -f "$(K8S_FRONTEND_MANIFEST)"
+
+# Host-shim: selector-less Service `rag-frontend` + Endpoints -> 10.10.11.135:3000.
+# Co-exists with the in-cluster Deployment (Service `rust-rag-frontend`). The
+# Ingress routes `/` to `rag-frontend`; in-cluster Deployment stays as fallback.
+k8s-apply-frontend-host:
+	kubectl $(KUBECTL_NS) apply -f "$(K8S_FRONTEND_HOST_MANIFEST)"
+
+k8s-delete-frontend-host:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_FRONTEND_HOST_MANIFEST)"
+
+k8s-apply-ingress:
+	kubectl $(KUBECTL_NS) apply -f "$(K8S_INGRESS_MANIFEST)"
+
+k8s-delete-ingress:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_INGRESS_MANIFEST)"
 
 k8s-apply-all: k8s-apply k8s-apply-frontend
 

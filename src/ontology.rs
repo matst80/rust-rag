@@ -126,6 +126,7 @@ pub async fn run_ontology_worker(
     http_client: Client,
     openai: OpenAiChatConfig,
     ontology_cfg: OntologyConfig,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     if !openai.is_configured() {
         info!("ontology worker: disabled (no OpenAI base URL configured)");
@@ -153,11 +154,20 @@ pub async fn run_ontology_worker(
 
     let mut ticker = interval(Duration::from_secs(ontology_cfg.interval_secs));
     loop {
-        ticker.tick().await;
-        if let Err(err) =
-            process_batch(&store, &embedder, &http_client, &openai, &model, &ontology_cfg).await
-        {
-            error!("ontology worker: batch error: {err}");
+        tokio::select! {
+            _ = ticker.tick() => {
+                if let Err(err) =
+                    process_batch(&store, &embedder, &http_client, &openai, &model, &ontology_cfg).await
+                {
+                    error!("ontology worker: batch error: {err}");
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("ontology worker: shutdown signal received, exiting loop");
+                    break;
+                }
+            }
         }
     }
 }

@@ -30,6 +30,12 @@ import type {
   AssistedQueryResultEvent,
   AssistedQueryMergedEvent,
   ImageIngestResponse,
+  Message,
+  MessageChannel,
+  SendMessageRequest,
+  ListMessagesRequest,
+  MessagesResponse,
+  ClearChannelResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -555,6 +561,124 @@ export async function deleteEdge(id: string): Promise<void> {
   })
 }
 
+// Messages API
+export async function sendMessage(data: SendMessageRequest): Promise<Message> {
+  return request<Message>("/api/messages", {
+    method: "POST",
+    body: JSON.stringify(data),
+  })
+}
+
+export async function listMessages(
+  options: ListMessagesRequest = {}
+): Promise<MessagesResponse> {
+  const params = new URLSearchParams()
+  if (options.channel) params.append("channel", options.channel)
+  if (options.sender) params.append("sender", options.sender)
+  if (options.kind) params.append("kind", options.kind)
+  if (options.since !== undefined) params.append("since", String(options.since))
+  if (options.until !== undefined) params.append("until", String(options.until))
+  if (options.limit !== undefined) params.append("limit", String(options.limit))
+  if (options.offset !== undefined) params.append("offset", String(options.offset))
+  if (options.sort_order) params.append("sort_order", options.sort_order)
+  if (options.user) params.append("user", options.user)
+  if (options.user_kind) params.append("user_kind", options.user_kind)
+  if (options.wait !== undefined) params.append("wait", String(options.wait))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<MessagesResponse>(`/api/messages${qs}`)
+  return {
+    messages: ensureArray(response.messages, "messages"),
+    total_count: response.total_count,
+    active_users: response.active_users ?? [],
+    deleted_ids: response.deleted_ids ?? [],
+  }
+}
+
+export async function deleteMessage(id: string): Promise<void> {
+  await request<void>(`/api/messages/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function listMessageChannels(): Promise<MessageChannel[]> {
+  const response = await request<{ channels: MessageChannel[] }>(
+    "/api/messages/channels"
+  )
+  return ensureArray(response.channels, "message channels")
+}
+
+export async function clearMessageChannel(
+  channel: string
+): Promise<ClearChannelResponse> {
+  return request<ClearChannelResponse>(
+    `/api/messages/channels/${encodeURIComponent(channel)}`,
+    { method: "DELETE" }
+  )
+}
+
+export interface ManagerMemoryRecord {
+  id: string
+  kind: string
+  content: string
+  metadata: Record<string, unknown>
+  created_at: number
+  source_id: string
+}
+
+export const MANAGER_MEMORY_SOURCE_ID = "manager_memory"
+
+export async function listManagerMemory(params?: {
+  kind?: string
+  search?: string
+  limit?: number
+}): Promise<ManagerMemoryRecord[]> {
+  const limit = params?.limit ?? 100
+  const { items } = await getItems({
+    source_id: MANAGER_MEMORY_SOURCE_ID,
+    limit,
+    sort_order: "desc",
+  })
+  const search = params?.search?.trim().toLowerCase()
+  return items
+    .filter((item) => {
+      const meta = (item.metadata ?? {}) as Record<string, unknown>
+      if (params?.kind && meta.kind !== params.kind) return false
+      if (search && !item.text.toLowerCase().includes(search)) return false
+      return true
+    })
+    .map((item) => {
+      const meta = (item.metadata ?? {}) as Record<string, unknown>
+      return {
+        id: item.id,
+        kind: typeof meta.kind === "string" ? meta.kind : "note",
+        content: item.text,
+        metadata: meta,
+        created_at: item.created_at,
+        source_id: item.source_id,
+      }
+    })
+}
+
+export async function deleteManagerMemory(id: string): Promise<void> {
+  await deleteItem(id)
+}
+
+export async function clearManagerMemory(
+  kind?: string
+): Promise<{ deleted_count: number }> {
+  const memories = await listManagerMemory({ kind, limit: 1000 })
+  let deleted_count = 0
+  for (const m of memories) {
+    try {
+      await deleteItem(m.id)
+      deleted_count += 1
+    } catch (err) {
+      console.warn("clearManagerMemory: failed to delete", m.id, err)
+    }
+  }
+  return { deleted_count }
+}
+
 // Export API client as object
 export const api = {
   categories: {
@@ -581,6 +705,18 @@ export const api = {
     uploadImage,
   },
   search,
+  messages: {
+    send: sendMessage,
+    list: listMessages,
+    channels: listMessageChannels,
+    delete: deleteMessage,
+    clearChannel: clearMessageChannel,
+  },
+  manager: {
+    memory: listManagerMemory,
+    deleteMemory: deleteManagerMemory,
+    clearMemory: clearManagerMemory,
+  },
   edges: {
     list: getEdges,
     listForItem: getEdgesForItem,

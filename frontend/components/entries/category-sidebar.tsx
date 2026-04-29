@@ -23,8 +23,8 @@ export function CategorySidebar({
   ), [categories, filterText])
 
   return (
-    <aside className="flex w-full flex-col bg-muted/5 p-6 md:w-80 md:min-h-[calc(100vh-3.5rem)] border-r border-muted/20 backdrop-blur-sm">
-      <div className="mb-8 space-y-4">
+    <aside className="flex w-full flex-col bg-muted/5 p-4 md:p-6 md:w-80 md:min-h-[calc(100vh-3.5rem)] border-r border-muted/20 backdrop-blur-sm">
+      <div className="mb-4 md:mb-8 space-y-4">
         <h2 className="flex items-center gap-2.5 px-3 text-[11px] font-bold uppercase tracking-[0.2em] text-primary/60">
           <Layers className="size-4" />
           Knowledge Collections

@@ -54,3 +54,19 @@ Configuration is stored in `~/.config/rust-rag/config.json`. You can override th
 ```bash
 rag --api-url https://my-rag-instance.com list
 ```
+
+You can also set the current message channel as a global flag for commands that operate on a channel:
+
+```bash
+rag --channel ops msg send "deploy started"
+rag --channel ops msg history --limit 20
+rag --channel ops acp gemini --name ops-bot
+```
+
+If `--channel` is not set, the CLI falls back to the configured `channel` value. If
+that is also unset, it derives a default channel from the current directory name.
+
+```bash
+cd ~/src/rust-rag
+rag msg send "working here"   # sends to #rust-rag
+```

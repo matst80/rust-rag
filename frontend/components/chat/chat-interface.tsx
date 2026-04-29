@@ -142,7 +142,7 @@ export function ChatInterface() {
     <div className="flex flex-col w-full h-[calc(100vh-3rem)]">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto flex flex-col">
-        <div className="flex-1 flex flex-col justify-end max-w-3xl w-full mx-auto px-6 py-8 gap-8">
+        <div className="flex-1 flex flex-col max-w-3xl w-full mx-auto px-6 py-8 gap-8">
           {messages.filter(m => m.role !== "system").map((message, i) => (
             <div
               key={i}

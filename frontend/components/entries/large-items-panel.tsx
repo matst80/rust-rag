@@ -91,7 +91,7 @@ export function LargeItemsPanel() {
   if (!isLoading && totalCount === 0) return null
 
   return (
-    <div className="flex flex-col gap-4 px-8 pt-8 md:px-10 md:pt-10">
+    <div className="flex flex-col gap-4 px-4 pt-4 md:px-10 md:pt-10">
       <div className="flex items-center gap-3">
         <div className="flex size-9 items-center justify-center rounded-xl bg-amber-500/10 border border-amber-500/20">
           <AlertTriangle className="size-4 text-amber-500" />
@@ -117,7 +117,7 @@ export function LargeItemsPanel() {
           {items.map((item) => (
             <div
               key={item.id}
-              className="flex items-center gap-4 rounded-2xl border border-amber-500/10 bg-amber-500/5 px-5 py-3"
+              className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-2xl border border-amber-500/10 bg-amber-500/5 p-4 sm:px-5 sm:py-3"
             >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -138,7 +138,9 @@ export function LargeItemsPanel() {
                   {item.text}
                 </p>
               </div>
-              <ItemActions item={item} onDone={handleDone} />
+              <div className="mt-2 sm:mt-0 w-full sm:w-auto flex justify-end">
+                <ItemActions item={item} onDone={handleDone} />
+              </div>
             </div>
           ))}
         </div>

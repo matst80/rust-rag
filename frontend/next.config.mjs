@@ -3,7 +3,7 @@ const RAG_API_URL = process.env.RAG_API_URL || 'http://localhost:4001';
 console.log('Next.js rewrites using RAG_API_URL:', RAG_API_URL);
 
 const nextConfig = {
-  allowedDevOrigins: ["127.0.0.1", "10.10.11.135"],
+  allowedDevOrigins: ["127.0.0.1", "10.10.11.135", "rag.k6n.net"],
   typescript: {
     ignoreBuildErrors: true,
   },

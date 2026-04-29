@@ -1,0 +1,10 @@
+{
+  "name": "gemini-chat-extension",
+  "version": "1.0.0",
+  "description": "A simple communication extension for Gemini CLI",
+  "main": "index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.1"
+  },
+  "type": "module"
+}

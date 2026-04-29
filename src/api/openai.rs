@@ -1520,7 +1520,7 @@ mod tests {
     use super::*;
     use crate::{
         api::EmbedderHandle,
-        config::{AuthConfig, ChunkingConfig, OpenAiChatConfig},
+        config::{AuthConfig, ChunkingConfig, MultimodalConfig, OpenAiChatConfig},
         db::{AuthStore, GraphConfig, ItemRecord, SqliteVectorStore, VectorStore},
         embedding::EmbeddingService,
     };
@@ -1688,11 +1688,14 @@ mod tests {
             store.clone() as Arc<dyn VectorStore>,
             store as Arc<dyn AuthStore>,
             Arc::new(super::super::NoopUserMemory),
+            Arc::new(super::super::NoopMessages),
             AuthConfig::default(),
             OpenAiChatConfig {
                 timeout_secs: 60,
                 ..OpenAiChatConfig::default()
             },
+            MultimodalConfig::default(),
+            "uploads".to_owned(),
             ChunkingConfig::default(),
         );
 

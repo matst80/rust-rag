@@ -2,13 +2,16 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { useState } from "react"
 import useSWR from "swr"
+import { ManagerMemoryPanel } from "@/components/manager/memory-panel"
 import {
   BookOpen,
   Brain,
   FolderOpen,
   GitBranch,
   Github,
+  Hash,
   ImagePlus,
   KeyRound,
   LogIn,
@@ -26,6 +29,7 @@ const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 const navigation = [
   { name: "Search", href: "/", icon: Search },
   { name: "Chat", href: "/chat", icon: MessageSquare },
+  { name: "Swarm", href: "/messages", icon: Hash },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },
@@ -53,6 +57,7 @@ async function loadSession(url: string): Promise<SessionResponse> {
 
 export function AppHeader() {
   const pathname = usePathname()
+  const [memoryOpen, setMemoryOpen] = useState(false)
   const { data: session } = useSWR<SessionResponse>("/auth/session", loadSession, {
     revalidateOnFocus: true,
   })
@@ -60,6 +65,7 @@ export function AppHeader() {
     session?.user?.name ?? session?.user?.preferred_username ?? session?.user?.email ?? "Signed in"
 
   return (
+    <>
     <header className="sticky top-0 z-50 border-b border-border bg-background">
       <div className="flex items-center justify-between px-4">
 
@@ -98,7 +104,7 @@ export function AppHeader() {
         </div>
 
         {/* Right side */}
-        <div className="flex items-center">
+        <div className="hidden sm:flex items-center">
           {navigationRight.map((item) => {
             const isActive = pathname.startsWith(item.href)
             return (
@@ -153,6 +159,16 @@ export function AppHeader() {
               <span className="hidden sm:inline">Sign in</span>
             </a>
           ) : null}
+          <button
+            type="button"
+            onClick={() => setMemoryOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground transition-colors hover:text-foreground"
+            aria-label="Manager memory"
+            title="Manager memory"
+          >
+            <Brain className="size-3.5" />
+            <span className="hidden sm:inline">Memory</span>
+          </button>
           <ThemeToggle />
           <a
             href={GITHUB_REPO_URL}
@@ -167,5 +183,7 @@ export function AppHeader() {
         </div>
       </div>
     </header>
+    <ManagerMemoryPanel open={memoryOpen} onClose={() => setMemoryOpen(false)} />
+    </>
   )
 }

@@ -1,0 +1,14 @@
+{
+  "hooks": [
+    {
+      "type": "mention",
+      "behavior": "prompt",
+      "description": "Inject direct mentions as native terminal prompts"
+    },
+    {
+      "type": "turn_end",
+      "behavior": "listener",
+      "description": "Trigger a notification when the agent turn completes"
+    }
+  ]
+}

@@ -13,6 +13,7 @@ pub enum ToolGroup {
     Core,
     Admin,
     Graph,
+    Messages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,7 @@ impl ToolGroup {
             Self::Core => "core",
             Self::Admin => "admin",
             Self::Graph => "graph",
+            Self::Messages => "messages",
         }
     }
 
@@ -53,6 +55,7 @@ impl ToolGroup {
             "core" => Ok(Self::Core),
             "admin" => Ok(Self::Admin),
             "graph" => Ok(Self::Graph),
+            "messages" | "msg" | "chat" => Ok(Self::Messages),
             other => bail!("unsupported tool group {other}"),
         }
     }
@@ -152,7 +155,7 @@ fn parse_u64_env(value: Option<&String>, default: u64, key: &str) -> Result<u64>
 }
 
 fn parse_tool_groups(value: Option<&String>) -> Result<BTreeSet<ToolGroup>> {
-    let raw = value.map(String::as_str).unwrap_or("core,admin,graph");
+    let raw = value.map(String::as_str).unwrap_or("core,admin,graph,messages");
     let mut groups = BTreeSet::new();
     for part in raw.split(',') {
         let trimmed = part.trim();
@@ -216,10 +219,11 @@ mod tests {
 
         assert_eq!(config.api_base_url, "https://rag.k6n.net");
         assert_eq!(config.request_timeout.as_secs(), 30);
-        assert_eq!(config.enabled_groups.len(), 3);
+        assert_eq!(config.enabled_groups.len(), 4);
         assert!(config.enabled_groups.contains(&ToolGroup::Core));
         assert!(config.enabled_groups.contains(&ToolGroup::Admin));
         assert!(config.enabled_groups.contains(&ToolGroup::Graph));
+        assert!(config.enabled_groups.contains(&ToolGroup::Messages));
         assert_eq!(config.server_name, "rust-rag-mcp");
         assert!(config.server_instructions.is_some());
         assert_eq!(config.search_format, SearchFormat::Markdown);

@@ -36,7 +36,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
     <Link
       href={`/entries/${encodeURIComponent(entry.id)}`}
       className={cn(
-        "group relative flex items-start gap-6 p-5 overflow-hidden transition-colors duration-200",
+        "group relative flex items-start gap-3 md:gap-6 p-4 md:p-5 overflow-hidden transition-colors duration-200",
         "bg-card hover:bg-card/80",
         "animate-in fade-in slide-in-from-bottom-2"
       )}

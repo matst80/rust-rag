@@ -1,0 +1,36 @@
+# Host-shim Service + Endpoints for the frontend running on 10.10.11.135:3000.
+# Mirrors the `rag-service` pattern used by the backend. Co-exists with the
+# in-cluster Deployment + Service in `rust-rag-frontend.yaml` (selector-driven).
+# The Ingress routes `/` here while the in-cluster Deployment stays available
+# as a fallback under its original Service name.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-frontend
+  labels:
+    app.kubernetes.io/name: rag-frontend
+    rust-rag.io/mode: host-shim
+spec:
+  # Selector intentionally omitted — Endpoints below carry the host IP.
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: rag-frontend
+  labels:
+    app.kubernetes.io/name: rag-frontend
+    rust-rag.io/mode: host-shim
+subsets:
+  - addresses:
+      - ip: 10.10.11.135
+    ports:
+      - name: http
+        port: 3000
+        protocol: TCP

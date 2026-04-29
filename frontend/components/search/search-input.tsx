@@ -69,19 +69,20 @@ export function SearchInput({
         )}
       >
         {/* Textarea */}
-        <div className="flex-1 px-4 pt-4 pb-2">
+        <div className="flex-1 px-4 pt-5 pb-3 md:pt-4 md:pb-2">
           <Textarea
             placeholder={isAssisted ? "Ask a complex question..." : "Search your knowledge base..."}
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             onKeyDown={onKeyDown}
+            autoFocus
             className="w-full min-h-13 max-h-65 border-none bg-transparent! p-0 text-base font-medium focus-visible:ring-0 resize-none placeholder:text-muted-foreground/60 shadow-none ring-0!"
             rows={1}
           />
         </div>
 
         {/* Controls */}
-        <div className="flex items-center justify-between px-3 pb-3 gap-2">
+        <div className="flex items-center justify-between px-4 pb-4 md:px-3 md:pb-3 gap-2">
           <div className="flex items-center gap-2">
             <button
               type="button"

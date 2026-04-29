@@ -174,6 +174,43 @@ impl Default for OntologyConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ManagerConfig {
+    pub enabled: bool,
+    pub channel: String,
+    pub mention: String,
+    pub interval_secs: u64,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub system_prompt: String,
+    pub max_iterations: usize,
+    pub memory_source_id: String,
+}
+
+impl Default for ManagerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            channel: "manager".to_owned(),
+            mention: "@manager".to_owned(),
+            interval_secs: 300,
+            base_url: None,
+            api_key: None,
+            model: None,
+            timeout_secs: None,
+            system_prompt: default_manager_system_prompt().to_owned(),
+            max_iterations: 8,
+            memory_source_id: "manager_memory".to_owned(),
+        }
+    }
+}
+
+pub const fn default_manager_system_prompt() -> &'static str {
+    "You are the Manager: an autonomous orchestrator for a multi-channel chat system bridging humans and ACP agents.\n\nYOUR ROLE:\n- Observe traffic across all channels.\n- Coordinate ACP (Agent Client Protocol) agents by posting messages, NOT by direct API calls. The ACP bridge listens to channel messages and executes traces in those same channels.\n- Maintain durable memory in `manager_memory` (separate from RAG knowledge base).\n- Use the RAG knowledge base to inject relevant context into agent threads.\n\nTRIGGER CONTEXT:\nEach invocation receives recent messages and memory recall. The trigger reason is included: `manager_channel` (user posted in your channel), `mention` (someone @mentioned you elsewhere), `cron` (interval tick).\n\nACP CONTROL VIA MESSAGES:\n- To spawn an ACP agent: post a message to the target channel using `post_message` with text like `@<sender> spawn <agent_name> <root_path>` matching the bridge's expected format.\n- To inject a prompt into an existing thread: `post_message` to that channel with `sender_kind=human` and the prompt as text — the agent picks it up.\n- To kill/stop a thread: post `@<agent> stop` or use the kind/metadata convention the bridge expects.\n- Always observe channel history first via `read_channel` or `channel_summary` to learn the active conventions before issuing commands.\n\nORCHESTRATION TOOLS:\n- `list_agents` — see who is online (sender_kind=agent) before routing or assigning work.\n- `channel_summary` — cheap stats (sender breakdown, last activity, previews) without an LLM call.\n- `assign_task` — durable task assignment. Posts a notification to the target channel and stores the task in manager_memory (kind=task, status=pending).\n- `list_tasks` / `update_task` — track progress. Mark `in_progress` when an agent starts, `done` when complete, `blocked` if stalled.\n\nROUTING POLICY (no dedicated tool — your judgment):\n1. Read the request. Identify domain (code, research, ops, design, etc.).\n2. Use `list_agents` to see candidates and `channel_summary` on their channels to gauge load/recent expertise.\n3. Use `search_rag` to pull any prior context relevant to the request.\n4. If context found, summarize and inject via `post_message` to the target agent's channel BEFORE assigning.\n5. Use `assign_task` (or post directly with the bridge's spawn syntax for new threads).\n\nAUTO-RAG-INJECTION POLICY:\n- When triggered by a `mention` or `manager_channel` message asking about a topic, ALWAYS run `search_rag` first.\n- If results are relevant, post a concise summary (3-5 bullets) into the requesting channel before any other action.\n- Do not dump raw chunks; synthesize.\n\nMEMORY DISCIPLINE:\n- Use `remember` for durable notes that aren't tasks. Kinds: `summary`, `note`, `observation`. Tasks use `assign_task`.\n- Use `recall` at the start of complex actions.\n- Don't store ephemeral chat content; the messages table already keeps that.\n\nRESPONSE STYLE:\n- Be terse. Act, then briefly post a status to your own channel if user-visible explanation is warranted.\n- If no action is needed (e.g. cron tick with nothing to do), call no tools and produce no output."
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
@@ -194,6 +231,7 @@ pub struct AppConfig {
     pub multimodal: MultimodalConfig,
     pub chunking: ChunkingConfig,
     pub ontology: OntologyConfig,
+    pub manager: ManagerConfig,
 }
 
 impl AppConfig {
@@ -284,6 +322,27 @@ impl AppConfig {
                     &chunk_max_chars.to_string(),
                 )?;
                 ChunkingConfig { chunk_max_chars, chunk_overlap_chars, large_item_threshold }
+            },
+            manager: ManagerConfig {
+                enabled: parse_env("RAG_MANAGER_ENABLED", "false")?,
+                channel: env::var("RAG_MANAGER_CHANNEL")
+                    .unwrap_or_else(|_| "manager".to_owned()),
+                mention: env::var("RAG_MANAGER_MENTION")
+                    .unwrap_or_else(|_| "@manager".to_owned()),
+                interval_secs: parse_env("RAG_MANAGER_INTERVAL_SECS", "300")?,
+                base_url: non_empty_var("RAG_MANAGER_API_BASE_URL")
+                    .map(|v| v.trim_end_matches('/').to_owned()),
+                api_key: non_empty_var("RAG_MANAGER_API_KEY"),
+                model: non_empty_var("RAG_MANAGER_MODEL"),
+                timeout_secs: non_empty_var("RAG_MANAGER_TIMEOUT_SECS")
+                    .map(|v| v.parse::<u64>())
+                    .transpose()
+                    .map_err(|e| anyhow!("failed to parse RAG_MANAGER_TIMEOUT_SECS: {e}"))?,
+                system_prompt: non_empty_var("RAG_MANAGER_SYSTEM_PROMPT")
+                    .unwrap_or_else(|| default_manager_system_prompt().to_owned()),
+                max_iterations: parse_env("RAG_MANAGER_MAX_ITERATIONS", "8")?,
+                memory_source_id: env::var("RAG_MANAGER_MEMORY_SOURCE_ID")
+                    .unwrap_or_else(|_| "manager_memory".to_owned()),
             },
             ontology: OntologyConfig {
                 enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,

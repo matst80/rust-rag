@@ -7,9 +7,9 @@ use rust_rag::{
     api::{AppState, EmbedderHandle},
     build_app,
     config::AppConfig,
-    db::{AuthStore, SqliteVectorStore, UserMemoryStore, VectorStore},
+    db::{AuthStore, MessageStore, SqliteVectorStore, UserMemoryStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
-    ontology,
+    manager, ontology,
 };
 
 #[tokio::main]
@@ -56,33 +56,51 @@ async fn main() -> Result<()> {
     let store_service: Arc<dyn VectorStore> = store.clone();
     let auth_store: Arc<dyn AuthStore> = store.clone();
     let user_memory: Arc<dyn UserMemoryStore> = store.clone();
+    let message_store: Arc<dyn MessageStore> = store.clone();
     let embedder_handle = Arc::new(EmbedderHandle::loading());
     let state = AppState::new(
         embedder_handle.clone(),
         store_service,
         auth_store,
         user_memory,
+        message_store,
         config.auth.clone(),
         config.openai_chat.clone(),
         config.multimodal.clone(),
         config.upload_path.clone(),
         config.chunking.clone(),
-    );
-    let app = build_app(state);
+    )
+    .with_manager(config.manager.clone());
+    let app = build_app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;
     let local_addr = listener.local_addr()?;
     println!("rust-rag listening on http://{local_addr}");
     info!("rust-rag listening on http://{local_addr}");
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut manager_handle = None;
+    if config.manager.enabled {
+        let manager_state = state.clone();
+        let manager_config = config.manager.clone();
+        let manager_shutdown = shutdown_rx.clone();
+        manager_handle = Some(tokio::spawn(manager::run_manager_worker(
+            manager_state,
+            manager_config,
+            manager_shutdown,
+        )));
+    }
+
+    let mut ontology_handle = None;
     if config.ontology.enabled {
-        tokio::spawn(ontology::run_ontology_worker(
+        ontology_handle = Some(tokio::spawn(ontology::run_ontology_worker(
             store.clone(),
             embedder_handle.clone(),
             reqwest::Client::new(),
             config.openai_chat.clone(),
             config.ontology.clone(),
-        ));
+            shutdown_rx,
+        )));
     }
 
     let model_path = config.model_path.clone();
@@ -109,10 +127,27 @@ async fn main() -> Result<()> {
         }
     });
 
+    let state_for_shutdown = state.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            info!("shutdown signal received, notifying components");
+            let _ = shutdown_tx.send(true);
+            state_for_shutdown.message_notify.notify_waiters();
+        })
         .await?;
 
+    if let Some(handle) = ontology_handle {
+        info!("waiting for ontology worker to finish");
+        let _ = handle.await;
+    }
+
+    if let Some(handle) = manager_handle {
+        info!("waiting for manager worker to finish");
+        let _ = handle.await;
+    }
+
+    info!("closing sqlite store");
     store.close()?;
     Ok(())
 }
