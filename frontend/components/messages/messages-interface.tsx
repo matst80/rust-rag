@@ -689,6 +689,15 @@ export function MessagesInterface() {
     }
   }, [messages, initialLoaded])
 
+  // Force scroll to bottom on channel switch / first load of a channel.
+  useLayoutEffect(() => {
+    if (!initialLoaded) return
+    const el = scrollContainerRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    wasNearBottomRef.current = true
+  }, [activeChannel, initialLoaded])
+
   const loadMore = useCallback(async () => {
     if (loadingMore || !hasMore || messages.length === 0 || !activeChannel) return
     const oldest = messages[0]
