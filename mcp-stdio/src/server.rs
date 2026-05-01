@@ -14,8 +14,8 @@ use rmcp::{
 use rust_rag::{
     api::{
         CreateManualEdgeRequest, DeleteResponse, GraphNeighborhoodQuery, ListGraphEdgesQuery,
-        ListItemsQuery, SearchRequest, SearchResponse, SearchResultPayload, StoreRequest,
-        UpdateItemRequest,
+        ListItemsQuery, ListMessagesQuery, SearchRequest, SearchResponse, SearchResultPayload,
+        SendMessageRequest, SmartStoreRequest, SmartStoreResponse, StoreRequest, UpdateItemRequest,
     },
     db::GraphEdgeType,
 };
@@ -54,6 +54,9 @@ impl RustRagMcpServer {
         }
         if enabled_groups.contains(&ToolGroup::Graph) {
             tool_router = tool_router + Self::graph_tools();
+        }
+        if enabled_groups.contains(&ToolGroup::Messages) {
+            tool_router = tool_router + Self::messages_tools();
         }
 
         Self {
@@ -123,13 +126,29 @@ impl RustRagMcpServer {
             .map_err(stringify_error)
     }
 
-    #[tool(description = "Store a text entry with metadata and source_id in rust-rag.")]
+    #[tool(
+        description = "Store a text entry with metadata and source_id in rust-rag."
+    )]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
     ) -> Result<Json<rust_rag::api::StoreResponse>, String> {
         self.client
             .store(&request)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(
+        description = "Use LLM to extract and store multiple entries from a messy text blob. Automatically determines source_id and metadata."
+    )]
+    async fn smart_store(
+        &self,
+        Parameters(request): Parameters<SmartStoreRequest>,
+    ) -> Result<Json<SmartStoreResponse>, String> {
+        self.client
+            .smart_store(&request)
             .await
             .map(Json)
             .map_err(stringify_error)
@@ -294,6 +313,52 @@ impl RustRagMcpServer {
     }
 }
 
+#[rmcp::tool_router(router = messages_tools)]
+impl RustRagMcpServer {
+    #[tool(
+        description = "Send a chat message to a channel. Used for agent <-> human and agent <-> agent communication. Provide channel and text; sender_kind defaults to 'agent' when called by an MCP/agent client."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(request): Parameters<SendMessageRequest>,
+    ) -> Result<Json<rust_rag::api::MessagePayload>, String> {
+        let mut request = request;
+        if request.sender_kind.is_none() {
+            request.sender_kind = Some(rust_rag::db::MessageSenderKind::Agent);
+        }
+        self.client
+            .send_message(&request)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(
+        description = "List messages with optional filters: channel, sender, since (ms epoch), until (ms epoch), limit, offset, sort_order ('asc' or 'desc')."
+    )]
+    async fn message_history(
+        &self,
+        Parameters(query): Parameters<ListMessagesQuery>,
+    ) -> Result<Json<rust_rag::api::MessagesResponse>, String> {
+        self.client
+            .list_messages(&query)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "List all message channels with their message counts and last activity.")]
+    async fn list_message_channels(
+        &self,
+    ) -> Result<Json<rust_rag::api::ChannelsResponse>, String> {
+        self.client
+            .list_message_channels()
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+}
+
 fn stringify_error(error: anyhow::Error) -> String {
     error.to_string()
 }
@@ -356,6 +421,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
                 distance: related.distance,
+                chunk_context: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -381,7 +447,11 @@ fn write_result_entry(
         id = hit.id,
         source = hit.source_id,
     );
-    let _ = writeln!(out, "\n{}", hit.text.trim());
+    if let Some(ctx) = &hit.chunk_context {
+        let _ = writeln!(out, "\n> ... {} ...", ctx.trim());
+    } else {
+        let _ = writeln!(out, "\n{}", hit.text.trim());
+    }
 }
 
 #[cfg(test)]

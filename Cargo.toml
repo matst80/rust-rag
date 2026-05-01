@@ -15,7 +15,7 @@ cuda = ["ort/cuda"]
 anyhow = "1.0.102"
 async-stream = "0.3.6"
 async-trait = "0.1.89"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 bytemuck = "1.25.0"
 futures-util = "0.3.31"
 ndarray = "0.17.2"
@@ -30,7 +30,7 @@ sqlite-vec = "0.1.9"
 thiserror = "2.0.18"
 tokenizers = "0.22.2"
 tokio = { version = "1.52.1", features = ["full"] }
-tower-http = { version = "0.6.6", features = ["trace"] }
+tower-http = { version = "0.6.6", features = ["trace", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18.1", features = ["v7"] }

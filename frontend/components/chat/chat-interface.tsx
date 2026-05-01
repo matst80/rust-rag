@@ -1,23 +1,19 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react"
+import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, CheckCircle2 } from "lucide-react"
 import { api } from "@/lib/api"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import type { 
-  ChatCompletionMessage, 
-  ChatCompletionChunk, 
-  ChatCompletionStreamError, 
+import type {
+  ChatCompletionMessage,
+  ChatCompletionChunk,
+  ChatCompletionStreamError,
   ChatCompletionToolResult,
-  ChatCompletionAssistantToolCall 
+  ChatCompletionAssistantToolCall
 } from "@/lib/api/types"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 
-// Extended message type to handle internal state like reasoning
 interface ExtendedMessage extends ChatCompletionMessage {
   reasoning?: string
   tool_results?: Record<string, string>
@@ -33,9 +29,7 @@ export function ChatInterface() {
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const scrollToBottom = useCallback(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: "smooth" })
-    }
+    scrollRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
 
   useEffect(() => {
@@ -51,7 +45,6 @@ export function ChatInterface() {
     setInput("")
     setIsStreaming(true)
 
-    // Prepare assistant message placeholder
     const assistantMessage: ExtendedMessage = { role: "assistant", content: "", reasoning: "" }
     setMessages(prev => [...prev, assistantMessage])
 
@@ -80,35 +73,17 @@ export function ChatInterface() {
 
             let updated = false
 
-            if (delta.content) {
-              fullContent += delta.content
-              updated = true
-            }
+            if (delta.content) { fullContent += delta.content; updated = true }
 
             const reasoning = delta.reasoning_content || delta.reasoning
-            if (reasoning) {
-              fullReasoning += reasoning
-              updated = true
-            }
+            if (reasoning) { fullReasoning += reasoning; updated = true }
 
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
-                const existing = accumulatedToolCalls[tc.index] || {
-                  id: "",
-                  type: "function",
-                  function: { name: "", arguments: "" }
-                }
-                
+                const existing = accumulatedToolCalls[tc.index] || { id: "", type: "function", function: { name: "", arguments: "" } }
                 if (tc.id) existing.id = tc.id
-                if (tc.function?.name) {
-                    if (!existing.function) existing.function = { name: "", arguments: "" }
-                    existing.function.name += tc.function.name
-                }
-                if (tc.function?.arguments) {
-                    if (!existing.function) existing.function = { name: "", arguments: "" }
-                    existing.function.arguments += tc.function.arguments
-                }
-                
+                if (tc.function?.name) { if (!existing.function) existing.function = { name: "", arguments: "" }; existing.function.name += tc.function.name }
+                if (tc.function?.arguments) { if (!existing.function) existing.function = { name: "", arguments: "" }; existing.function.arguments += tc.function.arguments }
                 accumulatedToolCalls[tc.index] = existing
               }
               updated = true
@@ -121,48 +96,36 @@ export function ChatInterface() {
                 if (last.role === "assistant") {
                   last.content = fullContent
                   last.reasoning = fullReasoning
-                  
                   const toolCalls = Object.values(accumulatedToolCalls)
-                  if (toolCalls.length > 0) {
-                    last.tool_calls = toolCalls as ChatCompletionAssistantToolCall[]
-                  }
+                  if (toolCalls.length > 0) last.tool_calls = toolCalls as ChatCompletionAssistantToolCall[]
                 }
                 return next
               })
             }
           },
           onToolResult: (result: ChatCompletionToolResult) => {
-             setMessages(prev => {
-                const next = [...prev]
-                const last = next[next.length - 1]
-                if (last.role === "assistant") {
-                   if (!last.tool_results) last.tool_results = {}
-                   last.tool_results[result.tool_call_id] = result.content
-                }
-                return next
-             })
+            setMessages(prev => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last.role === "assistant") {
+                if (!last.tool_results) last.tool_results = {}
+                last.tool_results[result.tool_call_id] = result.content
+              }
+              return next
+            })
           },
           onError: (error: ChatCompletionStreamError) => {
-            console.error("Chat error:", error)
-            setMessages(prev => [
-              ...prev,
-              { role: "assistant", content: `Error: ${error.error.message}` }
-            ])
+            setMessages(prev => [...prev, { role: "assistant", content: `Error: ${error.error.message}` }])
           },
-          onDone: () => {
-            setIsStreaming(false)
-          }
+          onDone: () => { setIsStreaming(false) }
         },
         { signal: abortControllerRef.current.signal }
       )
-    } catch (error: any) {
-      if (error.name === "AbortError") {
-        console.log("Stream aborted")
-      } else {
-        console.error("Chat error:", error)
+    } catch (error: unknown) {
+      if ((error as { name?: string })?.name !== "AbortError") {
         setMessages(prev => [
           ...prev,
-          { role: "assistant", content: `Failed to connect to assistant: ${error.message}` }
+          { role: "assistant", content: `Failed to connect to assistant: ${(error as { message?: string })?.message ?? String(error)}` }
         ])
       }
       setIsStreaming(false)
@@ -170,100 +133,91 @@ export function ChatInterface() {
   }
 
   const clearChat = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-    }
+    abortControllerRef.current?.abort()
     setMessages([{ role: "assistant", content: "Hello! I'm your RAG assistant. How can I help you today?" }])
     setIsStreaming(false)
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] max-w-4xl mx-auto w-full border rounded-lg overflow-hidden bg-background/50 backdrop-blur shadow-2xl">
-      <div className="flex items-center justify-between p-4 border-b bg-muted/30">
-        <div className="flex items-center gap-2">
-          <Brain className="size-5 text-primary" />
-          <h2 className="font-semibold tracking-tight">RAG Intelligence</h2>
-        </div>
-        <Button variant="ghost" size="icon" onClick={clearChat} title="Clear chat" className="hover:text-destructive transition-colors">
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-
-      <ScrollArea className="flex-1 p-4 md:p-6">
-        <div className="flex flex-col gap-8">
-          {messages.filter(m => m.role !== 'system').map((message, i) => (
+    <div className="flex flex-col w-full h-[calc(100vh-3rem)]">
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto flex flex-col">
+        <div className="flex-1 flex flex-col max-w-3xl w-full mx-auto px-6 py-8 gap-8">
+          {messages.filter(m => m.role !== "system").map((message, i) => (
             <div
               key={i}
               className={cn(
-                "flex gap-4",
+                "flex gap-4 animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both",
                 message.role === "user" ? "flex-row-reverse" : "flex-row"
               )}
+              style={{ animationDelay: `${i * 20}ms` }}
             >
+              {/* Avatar */}
               <div
                 className={cn(
-                  "size-9 rounded-full flex items-center justify-center shrink-0 border shadow-md",
-                  message.role === "user" ? "bg-primary text-primary-foreground ring-2 ring-primary/20" : "bg-card border-muted-foreground/20"
+                  "size-8 flex items-center justify-center shrink-0 border",
+                  message.role === "user"
+                    ? "bg-primary text-primary-foreground border-primary/30"
+                    : "bg-card border-border text-muted-foreground"
                 )}
               >
-                {message.role === "user" ? <User className="size-5" /> : <Bot className="size-5" />}
+                {message.role === "user" ? <User className="size-4" /> : <Bot className="size-4" />}
               </div>
-              
+
               <div className={cn(
-                "flex flex-col gap-2 max-w-[85%]",
+                "flex flex-col gap-2 max-w-[82%]",
                 message.role === "user" ? "items-end" : "items-start"
               )}>
-                {/* Thinking Block */}
+                {/* Reasoning */}
                 {message.reasoning && (
                   <Accordion type="single" collapsible className="w-full">
                     <AccordionItem value="thinking" className="border-none">
-                      <AccordionTrigger className="py-2 hover:no-underline px-3 rounded-lg bg-muted/30 text-muted-foreground text-xs border border-muted flex gap-2">
-                        <div className="flex items-center gap-2 text-left">
+                      <AccordionTrigger className="py-2 px-3 hover:no-underline bg-muted/20 border border-border text-muted-foreground font-mono text-[10px] uppercase tracking-[1.5px] flex gap-2">
+                        <div className="flex items-center gap-2">
                           <Wand2 className="size-3 animate-pulse text-primary" />
-                          <span>Assistant's Thought Process</span>
+                          Thought process
                         </div>
                       </AccordionTrigger>
                       <AccordionContent className="pt-3 px-3 text-sm text-muted-foreground border-l-2 border-primary/30 ml-2 italic">
-                         <div className="whitespace-pre-wrap font-serif opacity-80">{message.reasoning}</div>
+                        <div className="whitespace-pre-wrap font-serif opacity-80">{message.reasoning}</div>
                       </AccordionContent>
                     </AccordionItem>
                   </Accordion>
                 )}
 
-                {/* Tool Calls */}
+                {/* Tool calls */}
                 {message.tool_calls?.map((tc, idx) => (
-                  <div key={idx} className="w-full rounded-lg border border-primary/20 bg-primary/5 overflow-hidden text-xs shadow-sm">
+                  <div key={idx} className="w-full border border-primary/20 bg-primary/5 overflow-hidden text-xs">
                     <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/10 font-mono font-bold text-primary">
                       <Terminal className="size-3" />
                       <span>{tc.function.name}</span>
                       {message.tool_results?.[tc.id] && <CheckCircle2 className="size-3 text-green-500 ml-auto" />}
                     </div>
-                    <div className="p-2 font-mono text-[10px] opacity-70 truncate max-w-full" title={tc.function.arguments}>
+                    <div className="p-2 font-mono text-[10px] opacity-70 truncate" title={tc.function.arguments}>
                       {tc.function.arguments}
                     </div>
                     {message.tool_results?.[tc.id] && (
-                       <Accordion type="single" collapsible className="w-full border-t border-primary/5">
-                          <AccordionItem value="result" className="border-none">
-                            <AccordionTrigger className="py-1 px-3 text-[10px] hover:no-underline text-primary/60">
-                               View Tool Result
-                            </AccordionTrigger>
-                            <AccordionContent className="p-3 bg-muted/20 max-h-40 overflow-auto border-t border-primary/5">
-                               <pre className="text-[10px] whitespace-pre-wrap font-mono">
-                                  {message.tool_results[tc.id]}
-                               </pre>
-                            </AccordionContent>
-                          </AccordionItem>
-                       </Accordion>
+                      <Accordion type="single" collapsible className="w-full border-t border-primary/5">
+                        <AccordionItem value="result" className="border-none">
+                          <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
+                            View result
+                          </AccordionTrigger>
+                          <AccordionContent className="p-3 bg-muted/20 max-h-40 overflow-auto border-t border-primary/5">
+                            <pre className="text-[10px] whitespace-pre-wrap font-mono">{message.tool_results[tc.id]}</pre>
+                          </AccordionContent>
+                        </AccordionItem>
+                      </Accordion>
                     )}
                   </div>
                 ))}
 
-                {/* Content Block */}
+                {/* Bubble */}
                 <div
                   className={cn(
-                    "rounded-2xl px-5 py-3 shadow-md border leading-relaxed",
-                    message.role === "user" 
-                      ? "bg-[#2563eb] text-white border-blue-600 font-medium" 
-                      : "bg-card text-card-foreground border-muted"
+                    "px-5 py-3 border leading-relaxed",
+                    message.role === "user"
+                      ? "bg-primary text-primary-foreground border-primary/40 shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.2)]"
+                      : "bg-card text-card-foreground border-border"
                   )}
                 >
                   {typeof message.content === "string" ? (
@@ -272,77 +226,83 @@ export function ChatInterface() {
                         <MarkdownView content={message.content} />
                       </div>
                     ) : (
-                       message.role === "assistant" && !message.tool_calls && !message.reasoning ? (
-                          <div className="flex gap-1 py-1">
-                             <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                             <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                             <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                          </div>
-                       ) : null
+                      message.role === "assistant" && !message.tool_calls && !message.reasoning ? (
+                        <div className="flex gap-1 py-1">
+                          <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <div className="size-1.5 bg-muted-foreground/30 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                        </div>
+                      ) : null
                     )
                   ) : (
-                    <pre className="text-xs overflow-auto">
-                      {JSON.stringify(message.content, null, 2)}
-                    </pre>
+                    <pre className="text-xs overflow-auto">{JSON.stringify(message.content, null, 2)}</pre>
                   )}
                 </div>
-                
-                <span className="text-[10px] text-muted-foreground px-1 uppercase font-bold tracking-[0.2em] opacity-40">
+
+                <span className="font-mono text-[9px] text-muted-foreground/40 uppercase tracking-[2px] px-1">
                   {message.role}
                 </span>
               </div>
             </div>
           ))}
-          <div ref={scrollRef} className="h-4" />
+          <div ref={scrollRef} />
         </div>
-      </ScrollArea>
+      </div>
 
-      <div className="p-4 border-t bg-muted/10 backdrop-blur-sm">
+      {/* Input bar */}
+      <div className="border-t border-border bg-background/95 backdrop-blur shrink-0">
         <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            handleSend()
-          }}
-          className="relative flex items-center gap-3 max-w-3xl mx-auto"
+          onSubmit={(e) => { e.preventDefault(); handleSend() }}
+          className="max-w-3xl mx-auto px-6 py-4"
         >
-          <div className="relative flex-1 group">
-            <Input
+          <div
+            className={cn(
+              "relative flex items-center border border-border bg-card transition-all duration-200",
+              "focus-within:border-primary focus-within:[box-shadow:0_0_0_1px_oklch(0.9_0.148_196.3/0.15),inset_0_0_30px_oklch(0.9_0.148_196.3/0.03)]"
+            )}
+          >
+            <span className="px-4 font-mono text-[11px] text-primary select-none shrink-0">›</span>
+            <input
               placeholder="Query intelligence repository..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend() } }}
               disabled={isStreaming}
-              className="pr-12 h-13 bg-background/80 border-muted focus-visible:ring-primary shadow-inner rounded-xl transition-all group-focus-within:shadow-lg"
+              className="flex-1 bg-transparent border-none outline-none py-3.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/60"
             />
-            <div className="absolute inset-y-0 right-3 flex items-center pointer-events-none text-muted-foreground opacity-30 group-focus-within:opacity-100 transition-opacity">
-              <kbd className="hidden sm:inline-flex h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium">
-                Enter
-              </kbd>
-            </div>
+            <button
+              type="submit"
+              disabled={!input.trim() || isStreaming}
+              className={cn(
+                "mx-3 flex items-center gap-1.5 px-3 py-1.5 font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all shrink-0",
+                input.trim() && !isStreaming
+                  ? "bg-primary text-primary-foreground shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.3)] hover:shadow-[0_0_20px_oklch(0.9_0.148_196.3/0.4)]"
+                  : "border border-border text-muted-foreground/40 cursor-not-allowed"
+              )}
+            >
+              {isStreaming ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+            </button>
           </div>
-          <Button
-            type="submit"
-            size="icon"
-            disabled={!input.trim() || isStreaming}
-            className="size-13 rounded-xl shadow-xl transition-all active:scale-95 hover:shadow-primary/20 bg-blue-600 hover:bg-blue-700 text-white"
-          >
-            {isStreaming ? (
-              <Loader2 className="size-5 animate-spin" />
-            ) : (
-              <Send className="size-5" />
-            )}
-          </Button>
+
+          <div className="flex items-center justify-between mt-2">
+            <div className="flex items-center gap-4 opacity-30">
+              <p className="font-mono text-[9px] text-muted-foreground flex items-center gap-1.5 uppercase tracking-[1px]">
+                <Terminal className="size-2.5" /> Agents enabled
+              </p>
+              <div className="w-px h-3 bg-border" />
+              <p className="font-mono text-[9px] text-muted-foreground flex items-center gap-1.5 uppercase tracking-[1px]">
+                <Brain className="size-2.5" /> Cognitive RAG
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={clearChat}
+              className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[1px] text-muted-foreground/40 hover:text-destructive transition-colors"
+            >
+              <Trash2 className="size-2.5" /> Clear
+            </button>
+          </div>
         </form>
-        <div className="flex items-center justify-center gap-4 mt-3 opacity-40 hover:opacity-100 transition-opacity">
-           <p className="text-[10px] text-center text-muted-foreground flex items-center gap-1.5">
-             <Terminal className="size-3" />
-             Autonomous Agents Enabled
-           </p>
-           <div className="w-1 h-1 bg-muted-foreground rounded-full" />
-           <p className="text-[10px] text-center text-muted-foreground flex items-center gap-1.5">
-             <Brain className="size-3" />
-             Cognitive RAG Active
-           </p>
-        </div>
       </div>
     </div>
   )

@@ -2,7 +2,9 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod embedding;
+pub mod manager;
 pub mod mcp;
+pub mod ontology;
 
 use axum::Router;
 

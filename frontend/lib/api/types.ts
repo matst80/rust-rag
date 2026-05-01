@@ -108,6 +108,29 @@ export interface ListItemsRequest {
   sort_order?: SortOrder
 }
 
+export interface LargeItemsRequest {
+  min_chars?: number
+  limit?: number
+  offset?: number
+}
+
+export interface RechunkRequest {
+  max_chars?: number
+  overlap_chars?: number
+}
+
+export interface LlmRechunkRequest {
+  model?: string
+  max_chunks?: number
+}
+
+export interface RechunkResponse {
+  id: string
+  source_id: string
+  created_at: number
+  chunk_ids?: string[]
+}
+
 export interface PagedItems {
   items: Entry[]
   total_count: number
@@ -254,6 +277,121 @@ export type AssistedQueryEvent =
   | AssistedQueryResultEvent
   | AssistedQueryMergedEvent
   | ChatCompletionStreamError
+
+export type MessageSenderKind = "human" | "agent" | "system"
+
+export type MessageKind =
+  | "text"
+  | "permission_request"
+  | "permission_response"
+  | "tool_call"
+  | "agent_chunk"
+  | "agent_root_discovery"
+  | string
+
+export interface PermissionOption {
+  option_id: string
+  name: string
+  kind?: string
+}
+
+export interface PermissionRequestMetadata {
+  request_id: string
+  options: PermissionOption[]
+  tool_call?: {
+    title?: string
+    kind?: string
+    raw_input?: unknown
+  }
+  /** When set, indicates the request has been resolved (mirrors response option_id). */
+  resolved_option_id?: string
+}
+
+export interface PermissionResponseMetadata {
+  request_id: string
+  option_id: string
+}
+
+export interface AgentRootDiscoveryMetadata {
+  root: string
+  folders: string[]
+  agents?: string[]
+}
+
+export interface Message {
+  id: string
+  channel: string
+  sender: string
+  sender_kind: MessageSenderKind
+  text: string
+  kind: MessageKind
+  metadata: Record<string, unknown>
+  created_at: number
+  updated_at: number
+}
+
+export interface UpdateMessageRequest {
+  text?: string
+  metadata?: Record<string, unknown>
+  /** Append text to existing body instead of replacing it. */
+  append?: boolean
+}
+
+export interface MessageChannel {
+  channel: string
+  message_count: number
+  last_message_at: number
+}
+
+export interface SendMessageRequest {
+  channel: string
+  text?: string
+  sender?: string
+  sender_kind?: MessageSenderKind
+  kind?: MessageKind
+  metadata?: Record<string, unknown>
+}
+
+export interface ListMessagesRequest {
+  channel?: string
+  sender?: string
+  kind?: MessageKind
+  since?: number
+  until?: number
+  limit?: number
+  offset?: number
+  sort_order?: SortOrder
+  user?: string
+  user_kind?: MessageSenderKind
+  /** Long-poll wait in seconds (max 30). */
+  wait?: number
+}
+
+export interface ActiveUser {
+  user: string
+  kind: string
+  last_seen: number
+}
+
+export interface MessagesResponse {
+  messages: Message[]
+  total_count: number
+  active_users: ActiveUser[]
+  /** Ids of messages deleted server-side since the request's `since` cursor. */
+  deleted_ids: string[]
+}
+
+export interface ClearChannelResponse {
+  channel: string
+  deleted_count: number
+}
+
+export interface ImageIngestResponse {
+  id: string
+  source_id: string
+  created_at: number
+  source_file: string
+}
 
 export interface AssistedQueryHandlers {
   onQueries?: (event: AssistedQueryQueriesEvent) => void

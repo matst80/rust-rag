@@ -35,8 +35,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     deviceCodeFlow: document.getElementById('device-code-flow'),
 
     connectionStatus: document.getElementById('connection-status'),
-    apiUrlDisplay: document.getElementById('api-url-display')
+    apiUrlDisplay: document.getElementById('api-url-display'),
+    themeToggle: document.getElementById('theme-toggle')
   };
+
+  const THEMES = ['system-theme', 'light-theme', 'dark-theme'];
+  let { theme } = await chrome.storage.local.get(['theme']);
+  if (!theme) theme = 'system-theme';
+  
+  applyTheme(theme);
+
+  elements.themeToggle.addEventListener('click', () => {
+    const currentIndex = THEMES.indexOf(theme);
+    const nextIndex = (currentIndex + 1) % THEMES.length;
+    theme = THEMES[nextIndex];
+    applyTheme(theme);
+    chrome.storage.local.set({ theme });
+  });
+
+  function applyTheme(t) {
+    document.body.classList.remove(...THEMES);
+    document.body.classList.add(t);
+    
+    // Update tooltip or state if needed
+    const label = t.replace('-theme', '').toUpperCase();
+    elements.themeToggle.title = `Theme: ${label}`;
+  }
 
   let config = await chrome.storage.local.get(['apiBaseUrl', 'apiToken']);
   const defaultUrl = 'https://rag.k6n.net';

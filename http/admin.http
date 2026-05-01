@@ -24,3 +24,15 @@ content-type: application/json
 
 ### Delete one item
 DELETE {{baseUrl}}/admin/items/doc-memory-1
+
+### Get oversized items
+# Returns items that are potentially too large for efficient retrieval.
+GET {{baseUrl}}/admin/items/oversized
+
+### Rechunk an item (Standard)
+# Re-splits a document using standard character-based chunking.
+POST {{baseUrl}}/admin/items/doc-memory-1/rechunk
+
+### Rechunk an item (LLM-assisted)
+# Uses an LLM to identify logical boundaries for better chunking.
+POST {{baseUrl}}/admin/items/doc-memory-1/llm-rechunk

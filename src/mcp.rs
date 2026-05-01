@@ -8,14 +8,18 @@
 
 use crate::{
     api::{
-        AdminItemPayload, AdminItemsResponse, AppState, CategoriesResponse,
-        CreateManualEdgeRequest, DeleteResponse, GraphEdgePayload, GraphEdgesResponse,
-        GraphNeighborhoodQuery, GraphNeighborhoodResponse, GraphRebuildResponse,
-        GraphStatusResponse, HealthResponse, ListGraphEdgesQuery, ListItemsQuery, SearchRequest,
-        SearchResponse, SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest,
-        metadata_schema, search_core, store_entry_core,
+        ActiveUserPayload, AdminItemPayload, AdminItemsResponse, AppState, CategoriesResponse,
+        ChannelsResponse, ClearChannelResponse, CreateManualEdgeRequest, DeleteResponse,
+        GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
+        GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
+        ListItemsQuery, MessagePayload, MessagesResponse, SearchRequest, SearchResponse,
+        SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema,
+        search_core, store_entry_core,
     },
-    db::{GraphEdgeType, ItemRecord, ListItemsRequest, ManualEdgeInput, SortOrder},
+    db::{
+        GraphEdgeType, ItemRecord, ListItemsRequest, ManualEdgeInput, MessageQuery,
+        MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
+    },
 };
 use rmcp::{
     ServerHandler,
@@ -81,6 +85,100 @@ pub struct UpdateItemParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SendMessageParams {
+    pub channel: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Option<serde_json::Value>,
+    /// Optional sender override (defaults to "claude-manager").
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// "human" | "agent" | "system" (default "agent").
+    #[serde(default)]
+    pub sender_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ListMessagesParams {
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Inclusive lower bound on created_at (ms since epoch).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Inclusive upper bound on created_at (ms since epoch).
+    #[serde(default)]
+    pub until: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// "asc" | "desc" (default "desc").
+    #[serde(default)]
+    pub sort_order: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateMessageParams {
+    pub id: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Option<serde_json::Value>,
+    /// When true, append `text` to existing body instead of replacing.
+    #[serde(default)]
+    pub append: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ClearChannelParams {
+    pub channel: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ListPresenceParams {
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PresenceChannelEntry {
+    pub channel: String,
+    pub users: Vec<ActiveUserPayload>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PresenceResponse {
+    pub channels: Vec<PresenceChannelEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ChannelSummaryParams {
+    pub channel: String,
+    #[serde(default)]
+    pub preview_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelSummaryPayload {
+    pub channel: String,
+    pub total_recent: i64,
+    pub by_sender: std::collections::HashMap<String, i64>,
+    pub by_kind: std::collections::HashMap<String, i64>,
+    pub last_activity: i64,
+    pub active_users: Vec<ActiveUserPayload>,
+    pub preview: Vec<MessagePayload>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GraphNeighborhoodParams {
     pub id: String,
     pub depth: Option<usize>,
@@ -101,7 +199,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(request): Parameters<StoreRequest>,
     ) -> Result<Json<StoreResponse>, String> {
-        store_entry_core(&self.state, request)
+        store_entry_core(&self.state, request, None)
             .await
             .map(Json)
             .map_err(stringify_api_error)
@@ -115,7 +213,7 @@ impl RustRagMcpServer {
         Parameters(request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
         let query = request.query.clone();
-        let response = search_core(&self.state, request)
+        let response = search_core(&self.state, request, None)
             .await
             .map_err(stringify_api_error)?;
         Ok(format_search_result(&response, &query))
@@ -158,6 +256,9 @@ impl RustRagMcpServer {
             limit: query.limit,
             offset: query.offset,
             sort_order: query.sort_order.unwrap_or(SortOrder::Desc),
+            metadata_filter: query.metadata,
+            min_created_at: query.min_created_at,
+            max_created_at: query.max_created_at,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -223,6 +324,259 @@ impl RustRagMcpServer {
             return Err(format!("item {id} not found"));
         }
         Ok(Json(DeleteResponse { id, deleted }))
+    }
+
+    #[tool(
+        description = "Post a message to a channel. Use this to talk to humans, instruct ACP agents (via the bridge's spawn/inject conventions), or summarize work. Defaults: kind='text', sender_kind='agent', sender='claude-manager'."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(params): Parameters<SendMessageParams>,
+    ) -> Result<Json<MessagePayload>, String> {
+        if params.channel.trim().is_empty() {
+            return Err("channel cannot be empty".to_owned());
+        }
+        let kind = params
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("text")
+            .to_owned();
+        let metadata = params.metadata.unwrap_or_else(|| serde_json::json!({}));
+        if !metadata.is_object() {
+            return Err("metadata must be a JSON object".to_owned());
+        }
+        let metadata_empty = matches!(&metadata, serde_json::Value::Object(map) if map.is_empty());
+        if params.text.trim().is_empty() && metadata_empty {
+            return Err("text or metadata required".to_owned());
+        }
+        let sender = params
+            .sender
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("claude-manager")
+            .to_owned();
+        let sender_kind = match params.sender_kind.as_deref() {
+            Some("human") => MessageSenderKind::Human,
+            Some("system") => MessageSenderKind::System,
+            _ => MessageSenderKind::Agent,
+        };
+        let new_message = NewMessage {
+            id: uuid::Uuid::now_v7().to_string(),
+            channel: params.channel,
+            sender,
+            sender_kind,
+            text: params.text,
+            kind,
+            metadata,
+            created_at: now_ms(),
+        };
+        let messages = self.state.messages.clone();
+        let record = tokio::task::spawn_blocking(move || messages.send_message(new_message))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        self.state.message_notify.notify_waiters();
+        Ok(Json(record.into()))
+    }
+
+    #[tool(
+        description = "List messages with optional filters (channel, sender, kind, since, limit). When `channel` is provided, the response also includes presence (active_users)."
+    )]
+    async fn list_messages(
+        &self,
+        Parameters(params): Parameters<ListMessagesParams>,
+    ) -> Result<Json<MessagesResponse>, String> {
+        let limit = params.limit.unwrap_or(50).min(500);
+        let messages = self.state.messages.clone();
+        let query = MessageQuery {
+            channel: params.channel.clone(),
+            sender: params.sender,
+            kind: params.kind,
+            min_created_at: params.since,
+            max_created_at: params.until,
+            limit: Some(limit),
+            offset: params.offset,
+            sort_order: match params.sort_order.as_deref() {
+                Some("asc") => SortOrder::Asc,
+                _ => SortOrder::Desc,
+            },
+        };
+        let (rows, total) = tokio::task::spawn_blocking(move || messages.list_messages(query))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let active_users: Vec<ActiveUserPayload> = match params.channel.as_deref() {
+            Some(ch) => self
+                .state
+                .presence
+                .list(ch)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            None => Vec::new(),
+        };
+        Ok(Json(MessagesResponse {
+            messages: rows.into_iter().map(Into::into).collect(),
+            total_count: total,
+            active_users,
+            deleted_ids: Vec::new(),
+        }))
+    }
+
+    #[tool(description = "List all known channels with message counts and last activity timestamp.")]
+    async fn list_channels(&self) -> Result<Json<ChannelsResponse>, String> {
+        let messages = self.state.messages.clone();
+        let channels = tokio::task::spawn_blocking(move || messages.list_channels())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        Ok(Json(ChannelsResponse {
+            channels: channels.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Update an existing message body and/or metadata. With append=true, text is appended instead of replaced. Useful for streaming or annotating prior posts."
+    )]
+    async fn update_message(
+        &self,
+        Parameters(params): Parameters<UpdateMessageParams>,
+    ) -> Result<Json<MessagePayload>, String> {
+        let messages = self.state.messages.clone();
+        let id = params.id.clone();
+        let update = MessageUpdate {
+            text: params.text,
+            metadata: params.metadata,
+            append_text: params.append.unwrap_or(false),
+        };
+        let now = now_ms();
+        let record = tokio::task::spawn_blocking(move || messages.update_message(&id, update, now))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("message {} not found", params.id))?;
+        self.state.message_notify.notify_waiters();
+        Ok(Json(record.into()))
+    }
+
+    #[tool(description = "Wipe every message in a channel. Returns the number of rows deleted.")]
+    async fn clear_channel(
+        &self,
+        Parameters(params): Parameters<ClearChannelParams>,
+    ) -> Result<Json<ClearChannelResponse>, String> {
+        let channel = params.channel.trim().to_owned();
+        if channel.is_empty() {
+            return Err("channel cannot be empty".to_owned());
+        }
+        let messages = self.state.messages.clone();
+        let target = channel.clone();
+        let wiped = tokio::task::spawn_blocking(move || messages.clear_channel(&target))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        for row in &wiped {
+            self.state.tombstones.record(&row.channel, &row.id);
+        }
+        if !wiped.is_empty() {
+            self.state.message_notify.notify_waiters();
+        }
+        Ok(Json(ClearChannelResponse {
+            channel,
+            deleted_count: wiped.len(),
+        }))
+    }
+
+    #[tool(
+        description = "List active users (presence). With `channel` returns users active in that channel; without it returns presence for every channel."
+    )]
+    async fn list_presence(
+        &self,
+        Parameters(params): Parameters<ListPresenceParams>,
+    ) -> Result<Json<PresenceResponse>, String> {
+        let entries = match params.channel.as_deref() {
+            Some(ch) => {
+                let users: Vec<ActiveUserPayload> = self
+                    .state
+                    .presence
+                    .list(ch)
+                    .into_iter()
+                    .map(Into::into)
+                    .collect();
+                vec![PresenceChannelEntry {
+                    channel: ch.to_owned(),
+                    users,
+                }]
+            }
+            None => self
+                .state
+                .presence
+                .list_all()
+                .into_iter()
+                .map(|(channel, users)| PresenceChannelEntry {
+                    channel,
+                    users: users.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        };
+        Ok(Json(PresenceResponse { channels: entries }))
+    }
+
+    #[tool(
+        description = "Cheap channel stats (no LLM call): counts by sender + kind, last activity, active users, and last N message previews."
+    )]
+    async fn channel_summary(
+        &self,
+        Parameters(params): Parameters<ChannelSummaryParams>,
+    ) -> Result<Json<ChannelSummaryPayload>, String> {
+        let preview_count = params.preview_count.unwrap_or(5).min(30).max(1);
+        let messages = self.state.messages.clone();
+        let channel = params.channel.clone();
+        let query = MessageQuery {
+            channel: Some(channel.clone()),
+            limit: Some(100),
+            sort_order: SortOrder::Desc,
+            ..Default::default()
+        };
+        let (rows, _) = tokio::task::spawn_blocking(move || messages.list_messages(query))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let total_recent = rows.len();
+        let mut by_sender = std::collections::HashMap::<String, i64>::new();
+        let mut by_kind = std::collections::HashMap::<String, i64>::new();
+        let mut last_activity: i64 = 0;
+        for m in &rows {
+            *by_sender.entry(m.sender.clone()).or_insert(0) += 1;
+            *by_kind.entry(m.kind.clone()).or_insert(0) += 1;
+            if m.created_at > last_activity {
+                last_activity = m.created_at;
+            }
+        }
+        let preview: Vec<MessagePayload> = rows
+            .into_iter()
+            .rev()
+            .take(preview_count)
+            .map(Into::into)
+            .collect();
+        let active_users: Vec<ActiveUserPayload> = self
+            .state
+            .presence
+            .list(&channel)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        Ok(Json(ChannelSummaryPayload {
+            channel,
+            total_recent: total_recent as i64,
+            by_sender,
+            by_kind,
+            last_activity,
+            active_users,
+            preview,
+        }))
     }
 
     #[tool(description = "Return current graph configuration and edge counts.")]
@@ -334,6 +688,13 @@ fn stringify_api_error(error: crate::api::ApiError) -> String {
     error.to_string()
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn format_search_result(response: &SearchResponse, query: &str) -> CallToolResult {
     let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
     let mut result =
@@ -376,6 +737,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
                 distance: related.distance,
+                chunk_context: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

@@ -297,6 +297,8 @@ function refineWithForces(
 
     // 3. Semantic Similarity Link Attraction
     for (const distInfo of (pairwiseDistances || [])) {
+      if (!distInfo || !Number.isFinite(distInfo.distance)) continue
+
       const nodeA = nodeById.get(distInfo.from_item_id)
       const nodeB = nodeById.get(distInfo.to_item_id)
       if (nodeA && nodeB) {
@@ -327,12 +329,17 @@ function refineWithForces(
       node.vy += dy * CENTER_PULL * alpha
     }
 
-    // 5. Update positions
+    // 5. Update positions and check for finiteness
     for (const node of nodes) {
-      node.x += node.vx
-      node.y += node.vy
+      if (Number.isFinite(node.vx)) node.x += node.vx
+      if (Number.isFinite(node.vy)) node.y += node.vy
+      
       node.vx *= FRICTION
       node.vy *= FRICTION
+
+      // Safeguard against runaway positions
+      if (!Number.isFinite(node.x)) node.x = 0
+      if (!Number.isFinite(node.y)) node.y = 0
     }
   }
 

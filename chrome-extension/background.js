@@ -6,11 +6,36 @@ chrome.runtime.onInstalled.addListener(() => {
     title: "Store in RAG",
     contexts: ["selection"]
   });
+  chrome.contextMenus.create({
+    id: "smart-store-in-rag",
+    title: "Smart save to RAG (AI-assisted)",
+    contexts: ["selection"]
+  });
+  chrome.contextMenus.create({
+    id: "store-image-in-rag",
+    title: "Store Image in RAG",
+    contexts: ["image"]
+  });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "store-in-rag") {
-    storeSelection(info.selectionText, tab.url, tab.title);
+  // info.selectionText is truncated by Chrome for large selections;
+  // use executeScript to get the full selection from the page instead.
+  if (info.menuItemId === "store-in-rag" || info.menuItemId === "smart-store-in-rag") {
+    chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.getSelection().toString()
+    }, (results) => {
+      const text = results?.[0]?.result || info.selectionText;
+      if (!text) return;
+      if (info.menuItemId === "store-in-rag") {
+        storeSelection(text, tab.url, tab.title);
+      } else {
+        smartStoreSelection(text, tab.url, tab.title);
+      }
+    });
+  } else if (info.menuItemId === "store-image-in-rag") {
+    storeImage(info.srcUrl, tab.url, tab.title);
   }
 });
 
@@ -23,6 +48,17 @@ chrome.commands.onCommand.addListener((command) => {
       }, (results) => {
         if (results && results[0].result) {
           storeSelection(results[0].result, tabs[0].url, tabs[0].title);
+        }
+      });
+    });
+  } else if (command === "smart-store-selection") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      chrome.scripting.executeScript({
+        target: { tabId: tabs[0].id },
+        func: () => window.getSelection().toString()
+      }, (results) => {
+        if (results && results[0].result) {
+          smartStoreSelection(results[0].result, tabs[0].url, tabs[0].title);
         }
       });
     });
@@ -77,6 +113,119 @@ async function storeSelection(text, url, title) {
       iconUrl: "icons/icon48.png",
       title: "rust-rag Error",
       message: `Failed to store: ${error.message}`
+    });
+  }
+}
+
+async function storeImage(imageUrl, pageUrl, pageTitle) {
+  const { apiBaseUrl, apiToken } = await chrome.storage.local.get(['apiBaseUrl', 'apiToken']);
+  
+  if (!apiBaseUrl || !apiToken) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag",
+      message: "Please configure API URL and Token in the extension popup."
+    });
+    return;
+  }
+
+  try {
+    const imgResponse = await fetch(imageUrl);
+    const blob = await imgResponse.blob();
+    
+    let filename = imageUrl.split('/').pop().split('?')[0] || 'image.jpg';
+    if (!filename.includes('.')) filename += '.jpg';
+
+    const formData = new FormData();
+    formData.append('file', blob, filename);
+    formData.append('source_id', 'chrome-extension');
+    formData.append('metadata', JSON.stringify({
+      url: pageUrl,
+      title: pageTitle,
+      stored_at: new Date().toISOString(),
+      source_url: imageUrl
+    }));
+
+    const response = await fetch(`${apiBaseUrl}/api/ingest/image`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiToken}`
+      },
+      body: formData
+    });
+
+    if (response.ok) {
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icons/icon48.png",
+        title: "rust-rag",
+        message: "Successfully ingested image into RAG!"
+      });
+    } else {
+      const error = await response.json();
+      throw new Error(error.error || response.statusText);
+    }
+  } catch (error) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag Error",
+      message: `Failed to ingest image: ${error.message}`
+    });
+  }
+}
+
+async function smartStoreSelection(text, url, title) {
+  const { apiBaseUrl, apiToken } = await chrome.storage.local.get(['apiBaseUrl', 'apiToken']);
+
+  if (!apiBaseUrl || !apiToken) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag",
+      message: "Please configure API URL and Token in the extension popup."
+    });
+    return;
+  }
+
+  try {
+    const context = {};
+    if (url) context.url = url;
+    if (title) context.title = title;
+
+    const response = await fetch(`${apiBaseUrl}/api/store/smart`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiToken}`
+      },
+      body: JSON.stringify({
+        text: text,
+        context: Object.keys(context).length > 0 ? context : undefined
+      })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const count = data.items?.length ?? 0;
+      const sources = [...new Set((data.items ?? []).map(i => i.source_id))].join(', ');
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icons/icon48.png",
+        title: "rust-rag",
+        message: `Smart saved ${count} item${count !== 1 ? 's' : ''} → ${sources}`
+      });
+    } else {
+      const error = await response.json();
+      throw new Error(error.error || response.statusText);
+    }
+  } catch (error) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon48.png",
+      title: "rust-rag Error",
+      message: `Smart save failed: ${error.message}`
     });
   }
 }

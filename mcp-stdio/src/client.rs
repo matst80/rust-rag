@@ -4,10 +4,12 @@ use reqwest::{
     header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
 };
 use rust_rag::api::{
-    AdminItemPayload, AdminItemsResponse, CategoriesResponse, CreateManualEdgeRequest,
-    DeleteResponse, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
-    GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery, ListItemsQuery,
-    SearchRequest, SearchResponse, StoreRequest, StoreResponse, UpdateItemRequest,
+    AdminItemPayload, AdminItemsResponse, CategoriesResponse, ChannelsResponse,
+    CreateManualEdgeRequest, DeleteResponse, GraphEdgesResponse, GraphNeighborhoodQuery,
+    GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse, HealthResponse,
+    ListGraphEdgesQuery, ListItemsQuery, ListMessagesQuery, MessagePayload, MessagesResponse,
+    SearchRequest, SearchResponse, SendMessageRequest, SmartStoreRequest, SmartStoreResponse,
+    StoreRequest, StoreResponse, UpdateItemRequest,
 };
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -82,6 +84,11 @@ impl RustRagHttpClient {
 
     pub async fn store(&self, request: &StoreRequest) -> Result<StoreResponse> {
         self.send_json(Method::POST, "api/store", Some(request), None::<&()>)
+            .await
+    }
+
+    pub async fn smart_store(&self, request: &SmartStoreRequest) -> Result<SmartStoreResponse> {
+        self.send_json(Method::POST, "api/store/smart", Some(request), None::<&()>)
             .await
     }
 
@@ -180,6 +187,26 @@ impl RustRagHttpClient {
             "admin/graph/edges",
             Some(request),
             None::<&()>,
+        )
+        .await
+    }
+
+    pub async fn send_message(&self, request: &SendMessageRequest) -> Result<MessagePayload> {
+        self.send_json(Method::POST, "api/messages", Some(request), None::<&()>)
+            .await
+    }
+
+    pub async fn list_messages(&self, query: &ListMessagesQuery) -> Result<MessagesResponse> {
+        self.send_json(Method::GET, "api/messages", None::<&()>, Some(query))
+            .await
+    }
+
+    pub async fn list_message_channels(&self) -> Result<ChannelsResponse> {
+        self.send_json::<(), (), ChannelsResponse>(
+            Method::GET,
+            "api/messages/channels",
+            None,
+            None,
         )
         .await
     }

@@ -76,6 +76,24 @@ pub(super) fn initialize_schema(
             ON graph_edges(from_item_id, to_item_id, edge_type)
             WHERE edge_type = 'similarity';
 
+        CREATE TABLE IF NOT EXISTS user_events (
+            id TEXT PRIMARY KEY,
+            subject TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK (event_type IN ('search','view','store','chat')),
+            query TEXT,
+            query_embedding BLOB,
+            item_ids TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_events_subject ON user_events(subject, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            subject TEXT PRIMARY KEY,
+            interest_embedding BLOB,
+            event_horizon INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS mcp_tokens (
             id TEXT PRIMARY KEY,
             token_hash TEXT NOT NULL UNIQUE,
@@ -101,6 +119,22 @@ pub(super) fn initialize_schema(
         );
         CREATE INDEX IF NOT EXISTS idx_device_auth_status ON device_auth_requests(status);
         CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth_requests(expires_at);
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            channel TEXT NOT NULL,
+            sender TEXT NOT NULL,
+            sender_kind TEXT NOT NULL DEFAULT 'human' CHECK (sender_kind IN ('human','agent','system')),
+            text TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'text',
+            metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata)),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(sender, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+
         ",
     )?;
     ensure_column_exists(
@@ -114,6 +148,43 @@ pub(super) fn initialize_schema(
         "items",
         "created_at",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        connection,
+        "items",
+        "access_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(connection, "items", "last_accessed", "INTEGER")?;
+    ensure_column_exists(
+        connection,
+        "messages",
+        "kind",
+        "TEXT NOT NULL DEFAULT 'text'",
+    )?;
+    ensure_column_exists(
+        connection,
+        "messages",
+        "metadata",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    ensure_column_exists(
+        connection,
+        "messages",
+        "updated_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // Backfill updated_at = created_at for rows that predate the column.
+    connection.execute_batch(
+        "UPDATE messages SET updated_at = created_at WHERE updated_at = 0;
+         CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages(kind);
+         CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at DESC);",
+    )?;
+    ensure_column_exists(
+        connection,
+        "items",
+        "ontology_status",
+        "TEXT NOT NULL DEFAULT 'pending'",
     )?;
 
     connection.execute_batch(&format!(

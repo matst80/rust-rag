@@ -14,7 +14,6 @@ import {
   ChevronRight,
   ChevronLeft,
   Database,
-  Filter,
   ArrowUpDown,
 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardAction } from "@/components/ui/card"
@@ -122,22 +121,23 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
   }
 
   return (
-    <div className="flex flex-col gap-8 p-8 md:p-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
+    <>
+      <div className="flex flex-col gap-6 md:gap-8 p-4 md:p-10 animate-in fade-in slide-in-from-bottom-4 duration-700">
       {/* Header Area */}
       <div className="space-y-6">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
           <div className="space-y-1.5">
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-primary/60">
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.1em] sm:tracking-[0.2em] text-primary/60">
               <span className="opacity-50">Intelligence Browser</span>
               <ChevronRight className="size-3" />
               <span>{selectedCategory || "Global Memory"}</span>
             </div>
-            <h1 className="text-3xl font-extrabold tracking-tight">
+            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
               {selectedCategory ? `${selectedCategory} Records` : "Unified Knowledge"}
             </h1>
           </div>
 
-          <Button size="lg" className="rounded-2xl shadow-xl shadow-primary/10 transition-all hover:shadow-primary/20" asChild>
+          <Button size="lg" className="hidden md:flex rounded-2xl shadow-xl shadow-primary/10 transition-all hover:shadow-primary/20" asChild>
             <Link href="/entries/new">
               <Plus className="mr-2 size-5" />
               New Record
@@ -152,41 +152,62 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
             <input
               type="text"
               placeholder="Search page content..."
-              className="w-full h-12 bg-muted/20 border-muted/40 rounded-2xl pl-12 pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all hover:bg-muted/30"
+              className="w-full h-12 bg-muted/20 border-muted/40 rounded-2xl pl-12 pr-12 sm:pr-4 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all hover:bg-muted/30"
               value={localSearch}
               onChange={(e) => setLocalSearch(e.target.value)}
             />
+            
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 sm:hidden">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-8 rounded-xl">
+                    <ArrowUpDown className="size-4 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48 rounded-xl p-1">
+                  <DropdownMenuItem 
+                    onClick={() => setSortOrder("desc")}
+                    className={cn("rounded-lg", sortOrder === "desc" && "bg-primary/10 text-primary")}
+                  >
+                    Newest First
+                  </DropdownMenuItem>
+                  <DropdownMenuItem 
+                    onClick={() => setSortOrder("asc")}
+                    className={cn("rounded-lg", sortOrder === "asc" && "bg-primary/10 text-primary")}
+                  >
+                    Oldest First
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
           
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="h-12 rounded-2xl border-muted px-5">
-                <ArrowUpDown className="mr-2 size-4 opacity-60" />
-                <span className="font-semibold text-xs uppercase tracking-wider">
-                  {sortOrder === "desc" ? "Newest First" : "Oldest First"}
-                </span>
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48 rounded-xl p-1">
-              <DropdownMenuItem 
-                onClick={() => setSortOrder("desc")}
-                className={cn("rounded-lg", sortOrder === "desc" && "bg-primary/10 text-primary")}
-              >
-                Newest First
-              </DropdownMenuItem>
-              <DropdownMenuItem 
-                onClick={() => setSortOrder("asc")}
-                className={cn("rounded-lg", sortOrder === "asc" && "bg-primary/10 text-primary")}
-              >
-                Oldest First
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <Button variant="outline" className="h-12 rounded-2xl border-muted px-5">
-            <Filter className="mr-2 size-4 opacity-60" />
-            <span className="font-semibold text-xs uppercase tracking-wider">Filters</span>
-          </Button>
+          <div className="hidden sm:block">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="h-12 rounded-2xl border-muted px-5">
+                  <ArrowUpDown className="mr-2 size-4 opacity-60" />
+                  <span className="font-semibold text-xs uppercase tracking-wider">
+                    {sortOrder === "desc" ? "Newest First" : "Oldest First"}
+                  </span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48 rounded-xl p-1">
+                <DropdownMenuItem 
+                  onClick={() => setSortOrder("desc")}
+                  className={cn("rounded-lg", sortOrder === "desc" && "bg-primary/10 text-primary")}
+                >
+                  Newest First
+                </DropdownMenuItem>
+                <DropdownMenuItem 
+                  onClick={() => setSortOrder("asc")}
+                  className={cn("rounded-lg", sortOrder === "asc" && "bg-primary/10 text-primary")}
+                >
+                  Oldest First
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </div>
 
@@ -208,7 +229,7 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
       </div>
 
       {totalPages > 1 && (
-        <div className="flex items-center justify-between pt-6 border-t border-muted/20">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-6 border-t border-muted/20">
           <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
             Page {page} of {totalPages} — {totalCount} total records
           </div>
@@ -240,7 +261,19 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
           Neural manifold view — {filteredEntries.length} records shown
         </p>
       </div>
-    </div>
+      </div>
+
+      {/* Mobile FAB */}
+      <Button 
+        size="icon" 
+        className="md:hidden fixed bottom-6 right-6 size-14 rounded-full shadow-2xl shadow-primary/40 z-50 animate-in zoom-in duration-300"
+        asChild
+      >
+        <Link href="/entries/new">
+          <Plus className="size-6" />
+        </Link>
+      </Button>
+    </>
   )
 }
 

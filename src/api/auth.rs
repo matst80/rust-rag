@@ -101,8 +101,8 @@ pub(super) fn session_routes(state: AppState) -> Router<AppState> {
         .route("/auth/device", get(device_approval_page))
         .route("/auth/device/verify", get(verify_device))
         .route("/auth/device/approve", post(approve_device))
-        .route("/auth/tokens", get(list_tokens))
-        .route("/auth/tokens/{id}", delete(revoke_token))
+        .route("/api/auth/tokens", get(list_tokens))
+        .route("/api/auth/tokens/{id}", delete(revoke_token))
         .layer(middleware::from_fn_with_state(state, require_session))
 }
 

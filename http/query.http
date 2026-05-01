@@ -1,0 +1,22 @@
+@baseUrl = http://127.0.0.1:4001
+
+### Assisted Query (SSE)
+# Performs query expansion and searches across multiple sub-queries.
+# Returns results as a Server-Sent Events (SSE) stream.
+POST {{baseUrl}}/api/query/assisted
+Content-Type: application/json
+
+{
+  "query": "How does memory management work in Rust and how is it used in this project?",
+  "top_k": 5,
+  "max_distance": 0.8
+}
+
+### Simple Search
+POST {{baseUrl}}/api/search
+Content-Type: application/json
+
+{
+  "query": "Rust memory management",
+  "top_k": 3
+}

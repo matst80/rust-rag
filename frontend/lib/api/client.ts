@@ -14,6 +14,10 @@ import type {
   GraphNodeDistance,
   GraphStatus,
   ListItemsRequest,
+  LargeItemsRequest,
+  RechunkRequest,
+  LlmRechunkRequest,
+  RechunkResponse,
   PagedItems,
   ChatCompletionChunk,
   ChatCompletionToolResult,
@@ -25,6 +29,13 @@ import type {
   AssistedQueryQueriesEvent,
   AssistedQueryResultEvent,
   AssistedQueryMergedEvent,
+  ImageIngestResponse,
+  Message,
+  MessageChannel,
+  SendMessageRequest,
+  ListMessagesRequest,
+  MessagesResponse,
+  ClearChannelResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -390,11 +401,68 @@ export async function getItem(id: string): Promise<Entry> {
   return item
 }
 
+export async function getLargeItems(
+  options: LargeItemsRequest = {}
+): Promise<PagedItems> {
+  const params = new URLSearchParams()
+  if (options.min_chars !== undefined) params.append("min_chars", options.min_chars.toString())
+  if (options.limit !== undefined) params.append("limit", options.limit.toString())
+  if (options.offset !== undefined) params.append("offset", options.offset.toString())
+  const queryString = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<{ items: Entry[]; total_count: number }>(
+    `/admin/items/oversized${queryString}`
+  )
+  return {
+    items: ensureArray(response.items, "large items"),
+    total_count: response.total_count,
+  }
+}
+
+export async function rechunkItem(
+  id: string,
+  config: RechunkRequest = {}
+): Promise<RechunkResponse> {
+  return request<RechunkResponse>(`/admin/items/${encodeURIComponent(id)}/rechunk`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  })
+}
+
+export async function llmRechunkItem(
+  id: string,
+  config: LlmRechunkRequest = {}
+): Promise<RechunkResponse> {
+  return request<RechunkResponse>(`/admin/items/${encodeURIComponent(id)}/llm-rechunk`, {
+    method: "POST",
+    body: JSON.stringify(config),
+  })
+}
+
 export async function createItem(data: StoreRequest): Promise<Entry> {
   return request<Entry>("/api/store", {
     method: "POST",
     body: JSON.stringify(data),
   })
+}
+
+export async function uploadImage(
+  file: File,
+  sourceId: string = "images"
+): Promise<ImageIngestResponse> {
+  const form = new FormData()
+  form.append("file", file)
+  form.append("source_id", sourceId)
+
+  const response = await fetch(`${API_BASE_URL}/api/ingest/image`, {
+    method: "POST",
+    body: form,
+  })
+
+  if (!response.ok) {
+    throw new APIError(response.status, `Upload failed: ${response.statusText}`)
+  }
+
+  return response.json()
 }
 
 export async function updateItem(
@@ -493,6 +561,124 @@ export async function deleteEdge(id: string): Promise<void> {
   })
 }
 
+// Messages API
+export async function sendMessage(data: SendMessageRequest): Promise<Message> {
+  return request<Message>("/api/messages", {
+    method: "POST",
+    body: JSON.stringify(data),
+  })
+}
+
+export async function listMessages(
+  options: ListMessagesRequest = {}
+): Promise<MessagesResponse> {
+  const params = new URLSearchParams()
+  if (options.channel) params.append("channel", options.channel)
+  if (options.sender) params.append("sender", options.sender)
+  if (options.kind) params.append("kind", options.kind)
+  if (options.since !== undefined) params.append("since", String(options.since))
+  if (options.until !== undefined) params.append("until", String(options.until))
+  if (options.limit !== undefined) params.append("limit", String(options.limit))
+  if (options.offset !== undefined) params.append("offset", String(options.offset))
+  if (options.sort_order) params.append("sort_order", options.sort_order)
+  if (options.user) params.append("user", options.user)
+  if (options.user_kind) params.append("user_kind", options.user_kind)
+  if (options.wait !== undefined) params.append("wait", String(options.wait))
+  const qs = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<MessagesResponse>(`/api/messages${qs}`)
+  return {
+    messages: ensureArray(response.messages, "messages"),
+    total_count: response.total_count,
+    active_users: response.active_users ?? [],
+    deleted_ids: response.deleted_ids ?? [],
+  }
+}
+
+export async function deleteMessage(id: string): Promise<void> {
+  await request<void>(`/api/messages/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function listMessageChannels(): Promise<MessageChannel[]> {
+  const response = await request<{ channels: MessageChannel[] }>(
+    "/api/messages/channels"
+  )
+  return ensureArray(response.channels, "message channels")
+}
+
+export async function clearMessageChannel(
+  channel: string
+): Promise<ClearChannelResponse> {
+  return request<ClearChannelResponse>(
+    `/api/messages/channels/${encodeURIComponent(channel)}`,
+    { method: "DELETE" }
+  )
+}
+
+export interface ManagerMemoryRecord {
+  id: string
+  kind: string
+  content: string
+  metadata: Record<string, unknown>
+  created_at: number
+  source_id: string
+}
+
+export const MANAGER_MEMORY_SOURCE_ID = "manager_memory"
+
+export async function listManagerMemory(params?: {
+  kind?: string
+  search?: string
+  limit?: number
+}): Promise<ManagerMemoryRecord[]> {
+  const limit = params?.limit ?? 100
+  const { items } = await getItems({
+    source_id: MANAGER_MEMORY_SOURCE_ID,
+    limit,
+    sort_order: "desc",
+  })
+  const search = params?.search?.trim().toLowerCase()
+  return items
+    .filter((item) => {
+      const meta = (item.metadata ?? {}) as Record<string, unknown>
+      if (params?.kind && meta.kind !== params.kind) return false
+      if (search && !item.text.toLowerCase().includes(search)) return false
+      return true
+    })
+    .map((item) => {
+      const meta = (item.metadata ?? {}) as Record<string, unknown>
+      return {
+        id: item.id,
+        kind: typeof meta.kind === "string" ? meta.kind : "note",
+        content: item.text,
+        metadata: meta,
+        created_at: item.created_at,
+        source_id: item.source_id,
+      }
+    })
+}
+
+export async function deleteManagerMemory(id: string): Promise<void> {
+  await deleteItem(id)
+}
+
+export async function clearManagerMemory(
+  kind?: string
+): Promise<{ deleted_count: number }> {
+  const memories = await listManagerMemory({ kind, limit: 1000 })
+  let deleted_count = 0
+  for (const m of memories) {
+    try {
+      await deleteItem(m.id)
+      deleted_count += 1
+    } catch (err) {
+      console.warn("clearManagerMemory: failed to delete", m.id, err)
+    }
+  }
+  return { deleted_count }
+}
+
 // Export API client as object
 export const api = {
   categories: {
@@ -513,8 +699,24 @@ export const api = {
     create: createItem,
     update: updateItem,
     delete: deleteItem,
+    listLarge: getLargeItems,
+    rechunk: rechunkItem,
+    llmRechunk: llmRechunkItem,
+    uploadImage,
   },
   search,
+  messages: {
+    send: sendMessage,
+    list: listMessages,
+    channels: listMessageChannels,
+    delete: deleteMessage,
+    clearChannel: clearMessageChannel,
+  },
+  manager: {
+    memory: listManagerMemory,
+    deleteMemory: deleteManagerMemory,
+    clearMemory: clearManagerMemory,
+  },
   edges: {
     list: getEdges,
     listForItem: getEdgesForItem,
