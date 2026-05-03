@@ -15,6 +15,8 @@ data:
   ZITADEL_ISSUER: "https://auth.k6n.net"
   ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"
+  ACP_WS_PUBLIC_URL: "ws://10.10.11.37:9001/"
+  ACP_WS_TOKEN: "test-token"
 ---
 apiVersion: apps/v1
 kind: Deployment
