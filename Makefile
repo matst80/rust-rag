@@ -15,6 +15,7 @@ RAG_GRAPH_CROSS_SOURCE ?= false
 RAG_AUTH_ENABLED ?= false
 RAG_FRONTEND_API_KEY ?= replace-with-shared-frontend-backend-key
 RAG_MCP_AUTH_BEARER ?=
+RAG_MCP_ALLOWED_HOSTS ?= localhost,127.0.0.1,::1,rag.k6n.net
 AUTH_SESSION_SECRET ?= replace-with-a-long-random-secret
 RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:8081/v1
 RAG_OPENAI_API_KEY ?=
@@ -49,6 +50,7 @@ RAG_MANAGER_MODEL ?= grok-4-1-fast-reasoning
 RAG_MANAGER_TIMEOUT_SECS ?= 120
 RAG_MANAGER_MAX_ITERATIONS ?= 8
 RAG_MANAGER_MEMORY_SOURCE_ID ?= manager_memory
+RAG_MANAGER_SYSTEM_PROMPT_FILE ?= $(CURDIR)/manager-system-prompt.txt
 
 # Chunking — tune to your embedding model's context window.
 # RAG_LARGE_ITEM_THRESHOLD defaults to RAG_CHUNK_MAX_CHARS when unset.
@@ -244,11 +246,16 @@ run:
 	RAG_MULTIMODAL_MODEL="$(RAG_MULTIMODAL_MODEL)" \
 	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
 	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
+	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
 	cargo run 2>&1 | tee "$(LOG_FILE)"
 
 run-cuda:
 	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
 	@printf 'Logging to %s — run "make tail-logs" in another terminal to follow\n' "$(LOG_FILE)"
+	ORT_STRATEGY="system" \
+	ORT_LIB_LOCATION="/home/mats/github.com/matst80/rust-rag/test_ort_env/lib/python3.12/site-packages/onnxruntime/capi" \
+	ORT_PREFER_DYNAMIC_LINK="1" \
+	LD_LIBRARY_PATH="/home/mats/github.com/matst80/rust-rag/test_ort_env/lib/python3.12/site-packages/onnxruntime/capi:$$LD_LIBRARY_PATH" \
 	RUST_LOG="$(RUST_LOG)" \
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
 	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
@@ -288,6 +295,7 @@ run-cuda:
 	RAG_MANAGER_TIMEOUT_SECS="$(RAG_MANAGER_TIMEOUT_SECS)" \
 	RAG_MANAGER_MAX_ITERATIONS="$(RAG_MANAGER_MAX_ITERATIONS)" \
 	RAG_MANAGER_MEMORY_SOURCE_ID="$(RAG_MANAGER_MEMORY_SOURCE_ID)" \
+	RAG_MANAGER_SYSTEM_PROMPT="$$(cat $(RAG_MANAGER_SYSTEM_PROMPT_FILE) 2>/dev/null)" \
 	RAG_CHUNK_MAX_CHARS="$(RAG_CHUNK_MAX_CHARS)" \
 	RAG_CHUNK_OVERLAP_CHARS="$(RAG_CHUNK_OVERLAP_CHARS)" \
 	RAG_LARGE_ITEM_THRESHOLD="$(RAG_LARGE_ITEM_THRESHOLD)" \
@@ -298,6 +306,7 @@ run-cuda:
 	RAG_MULTIMODAL_MODEL="$(RAG_MULTIMODAL_MODEL)" \
 	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
 	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
+	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
 	cargo run --features cuda 2>&1 | tee "$(LOG_FILE)"
 
 run-mcp:

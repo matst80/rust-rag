@@ -127,7 +127,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Store a text entry with metadata and source_id in rust-rag."
+        description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability."
     )]
     async fn store_entry(
         &self,
@@ -155,7 +155,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Run semantic search against stored entries. Returns ranked vector hits plus `related` items that the user manually linked from the top hit (not just vector-similar)."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar)."
     )]
     async fn search_entries(
         &self,
@@ -174,7 +174,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Fetch a single stored entry by its id. Use this to look up the full text and metadata of a specific entry returned from search_entries or graph tools."
+        description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or when a hand-off message references a specific entry id."
     )]
     async fn get_entry(
         &self,
@@ -316,7 +316,7 @@ impl RustRagMcpServer {
 #[rmcp::tool_router(router = messages_tools)]
 impl RustRagMcpServer {
     #[tool(
-        description = "Send a chat message to a channel. Used for agent <-> human and agent <-> agent communication. Provide channel and text; sender_kind defaults to 'agent' when called by an MCP/agent client."
+        description = "Post updates, status, or hand-offs to a channel for humans or other agents. Standard hand-off pattern: finish work, `store_entry` the details, then `send_message` summarizing + citing the stored entry id (e.g. 'Part 1 done. Specs in entry `part1_summary`. Over to Agent B.'). Channels: `general` for broad updates, `agent-collaboration` / `task-handover` for structured hand-offs. sender_kind defaults to 'agent' when called by an MCP/agent client."
     )]
     async fn send_message(
         &self,
@@ -334,7 +334,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "List messages with optional filters: channel, sender, since (ms epoch), until (ms epoch), limit, offset, sort_order ('asc' or 'desc')."
+        description = "Read messages from a channel — use on agent startup to pick up hand-offs directed at you. Filters: channel, sender, since (ms epoch), until (ms epoch), limit, offset, sort_order ('asc' or 'desc')."
     )]
     async fn message_history(
         &self,
