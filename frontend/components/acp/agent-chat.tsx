@@ -1,6 +1,11 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Loader2, Send } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { MessageMarkdown } from "@/components/messages/message-markdown"
+
+const EMPTY_USERS: Set<string> = new Set()
 
 type AcpEnvelope = Record<string, unknown>
 
@@ -356,23 +361,46 @@ export function AgentChat() {
 							))}
 						</div>
 
-						<footer className="border-t border-border p-3 flex gap-2">
-							<input
-								value={draft}
-								onChange={(e) => setDraft(e.target.value)}
-								onKeyDown={(e) => {
-									if (e.key === "Enter" && !e.shiftKey) {
-										e.preventDefault()
-										sendPrompt()
-									}
-								}}
-								placeholder="Send prompt…"
-								className="flex-1 bg-background border border-border rounded px-2 py-1 text-xs"
-							/>
-							<button onClick={sendPrompt} className="text-xs px-3 py-1 border border-primary text-primary rounded hover:bg-primary/10">
-								Send
-							</button>
-						</footer>
+						<form
+							className="border-t border-border p-4"
+							onSubmit={(e) => {
+								e.preventDefault()
+								sendPrompt()
+							}}
+						>
+							<div className="flex items-end gap-2 rounded-lg border border-input bg-background p-2">
+								<textarea
+									value={draft}
+									onChange={(e) => setDraft(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter" && !e.shiftKey) {
+											e.preventDefault()
+											sendPrompt()
+										}
+									}}
+									placeholder={`Message session ${activeSessionId.slice(0, 8)}…`}
+									rows={1}
+									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
+								/>
+								<button
+									type="submit"
+									disabled={!draft.trim() || conn.status !== "open"}
+									className={cn(
+										"flex size-9 items-center justify-center rounded-md transition-colors",
+										draft.trim() && conn.status === "open"
+											? "bg-primary text-primary-foreground hover:bg-primary/90"
+											: "bg-muted text-muted-foreground",
+									)}
+									aria-label="Send"
+								>
+									{conn.status !== "open" ? (
+										<Loader2 className="size-4 animate-spin" />
+									) : (
+										<Send className="size-4" />
+									)}
+								</button>
+							</div>
+						</form>
 					</>
 				)}
 			</section>
@@ -580,8 +608,8 @@ function BlockView({ block }: { block: Block }) {
 	if (block.kind === "user") {
 		return (
 			<div className="flex flex-col items-end">
-				<div className="max-w-[80%] rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm whitespace-pre-wrap break-words">
-					{block.text}
+				<div className="max-w-[80%] rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm">
+					<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} className="prose-invert" />
 				</div>
 				<div className="text-[10px] text-muted-foreground mt-1">user · {timeOf(block.ts)}</div>
 			</div>
@@ -590,8 +618,12 @@ function BlockView({ block }: { block: Block }) {
 	if (block.kind === "assistant") {
 		return (
 			<div className="flex flex-col items-start">
-				<div className="max-w-[90%] rounded-lg bg-accent px-3 py-2 text-sm whitespace-pre-wrap break-words">
-					{block.text || <span className="text-muted-foreground italic">…</span>}
+				<div className="max-w-[90%] rounded-lg bg-accent px-3 py-2 text-sm">
+					{block.text ? (
+						<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+					) : (
+						<span className="text-muted-foreground italic">…</span>
+					)}
 				</div>
 				<div className="text-[10px] text-muted-foreground mt-1">agent · {timeOf(block.ts)}</div>
 			</div>
@@ -601,7 +633,9 @@ function BlockView({ block }: { block: Block }) {
 		return (
 			<details className="text-xs text-muted-foreground border-l-2 border-border pl-3">
 				<summary className="cursor-pointer select-none">thought · {timeOf(block.ts)}</summary>
-				<div className="whitespace-pre-wrap break-words mt-1 italic">{block.text}</div>
+				<div className="mt-1 italic">
+					<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+				</div>
 			</details>
 		)
 	}
