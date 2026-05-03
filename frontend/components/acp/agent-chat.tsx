@@ -124,7 +124,7 @@ export function AgentChat() {
 
 			const k = kind.toLowerCase()
 
-			if (k === "snapshot") {
+			if (k === "state_snapshot" || (k === "snapshot" && Array.isArray((payload as { sessions?: unknown }).sessions))) {
 				const list = Array.isArray((payload as { sessions?: unknown }).sessions)
 					? (payload as { sessions: SessionInfo[] }).sessions
 					: []
@@ -553,6 +553,8 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 
 		if (
 			k === "snapshot" ||
+			k === "state_snapshot" ||
+			k === "commands_snapshot" ||
 			k === "session_started" || k === "sessionstarted" ||
 			k === "session_switched" || k === "sessionswitched" ||
 			k === "session_ended" || k === "sessionended" ||

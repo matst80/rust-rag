@@ -23,7 +23,10 @@ use tracing::{debug, info, warn};
 use crate::config::AcpWsConfig;
 
 fn is_snapshot(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("Snapshot") || kind.eq_ignore_ascii_case("snapshot")
+    kind.eq_ignore_ascii_case("Snapshot")
+        || kind.eq_ignore_ascii_case("snapshot")
+        || kind == "state_snapshot"
+        || kind == "commands_snapshot"
 }
 fn is_permission_request(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("PermissionRequest") || kind == "permission_request"
