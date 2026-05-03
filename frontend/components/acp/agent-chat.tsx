@@ -396,9 +396,10 @@ type Block =
 		toolKind?: string
 		status: string
 		content: string
+		locations?: string[]
 		ts: number
 	}
-	| { key: string; kind: "plan"; entries: { content: string; status?: string }[]; ts: number }
+	| { key: string; kind: "plan"; entries: { title: string; status?: string; depth: number }[]; ts: number }
 	| { key: string; kind: "raw"; eventKind: string; payload: unknown; ts: number }
 
 function extractText(content: unknown): string {
@@ -444,10 +445,17 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 
 		if (k === "agent_update" || k === "agentupdate") {
 			const inner = (payload.event as Record<string, unknown>) ?? payload
-			const su = (inner.sessionUpdate as string) ?? ""
+			const suRaw = inner.sessionUpdate
+			// Per spec: sessionUpdate is an object { type: "<variant>", ...fields }.
+			// Tolerate the legacy flat shape too (string variant + sibling fields).
+			const su: Record<string, unknown> =
+				suRaw && typeof suRaw === "object"
+					? (suRaw as Record<string, unknown>)
+					: (inner as Record<string, unknown>)
+			const variant = typeof suRaw === "string" ? suRaw : (su.type as string) ?? ""
 
-			if (su === "agent_message_chunk") {
-				const text = extractText(inner.content)
+			if (variant === "agent_message_chunk") {
+				const text = extractText(su.content)
 				if (assistantBuf) {
 					const b = blocks[assistantBuf.idx]
 					if (b.kind === "assistant") b.text += text
@@ -459,8 +467,8 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 				continue
 			}
 
-			if (su === "agent_thought_chunk") {
-				const text = extractText(inner.content)
+			if (variant === "agent_thought_chunk") {
+				const text = extractText(su.content)
 				if (thoughtBuf) {
 					const b = blocks[thoughtBuf.idx]
 					if (b.kind === "thought") b.text += text
@@ -472,29 +480,49 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 				continue
 			}
 
-			if (su === "tool_call" || su === "tool_call_update") {
-				const toolId = (inner.toolCallId as string) ?? `unknown-${ev.localSeq}`
-				const title = (inner.title as string) ?? toolId
-				const status = (inner.status as string) ?? "pending"
-				const content = extractText(inner.content)
-				const toolKind = (inner.kind as string) ?? undefined
+			if (variant === "tool_call" || variant === "tool_call_update") {
+				// tool_call_update wraps mutable fields under `.fields`. Missing fields = unchanged.
+				const fields: Record<string, unknown> =
+					variant === "tool_call_update" && su.fields && typeof su.fields === "object"
+						? (su.fields as Record<string, unknown>)
+						: su
+				const toolId = (su.toolCallId as string) ?? (fields.toolCallId as string) ?? `unknown-${ev.localSeq}`
+				const title = (fields.title as string) ?? undefined
+				const status = (fields.status as string) ?? undefined
+				const content = fields.content !== undefined ? extractText(fields.content) : undefined
+				const toolKind = (fields.kind as string) ?? undefined
+				const locations = Array.isArray(fields.locations)
+					? (fields.locations as unknown[])
+							.map((l) => {
+								if (typeof l === "string") return l
+								if (l && typeof l === "object") {
+									const o = l as { path?: string; line?: number }
+									return o.path ? (o.line ? `${o.path}:${o.line}` : o.path) : ""
+								}
+								return ""
+							})
+							.filter(Boolean)
+					: undefined
+
 				if (toolIndex[toolId] !== undefined) {
 					const b = blocks[toolIndex[toolId]]
 					if (b.kind === "tool") {
-						b.title = title || b.title
-						b.status = status
-						b.toolKind = toolKind ?? b.toolKind
+						if (title) b.title = title
+						if (status) b.status = status
+						if (toolKind) b.toolKind = toolKind
 						if (content) b.content = content
+						if (locations && locations.length > 0) b.locations = locations
 					}
 				} else {
 					blocks.push({
 						key: `tc-${toolId}`,
 						kind: "tool",
 						toolId,
-						title,
+						title: title ?? toolId,
 						toolKind,
-						status,
-						content,
+						status: status ?? "pending",
+						content: content ?? "",
+						locations,
 						ts,
 					})
 					toolIndex[toolId] = blocks.length - 1
@@ -504,16 +532,20 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 				continue
 			}
 
-			if (su === "plan") {
-				const entries = Array.isArray(inner.entries) ? (inner.entries as { content: string; status?: string }[]) : []
+			if (variant === "plan") {
+				const rawEntries = Array.isArray(su.entries) ? (su.entries as Record<string, unknown>[]) : []
+				const entries = rawEntries.map((e) => ({
+					title: (e.title as string) ?? (e.content as string) ?? "",
+					status: e.status as string | undefined,
+					depth: typeof e.depth === "number" ? (e.depth as number) : 0,
+				}))
 				blocks.push({ key: `p-${ev.localSeq}`, kind: "plan", entries, ts })
 				assistantBuf = null
 				thoughtBuf = null
 				continue
 			}
 
-			// Unknown sessionUpdate variant
-			blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: `agent_update/${su}`, payload, ts })
+			blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: `agent_update/${variant}`, payload, ts })
 			assistantBuf = null
 			thoughtBuf = null
 			continue
@@ -575,7 +607,8 @@ function BlockView({ block }: { block: Block }) {
 		const statusColor =
 			block.status === "completed" ? "text-green-500" :
 			block.status === "failed" || block.status === "error" ? "text-red-500" :
-			"text-amber-500"
+			block.status === "in_progress" ? "text-amber-500" :
+			"text-muted-foreground"
 		return (
 			<div className="border border-border rounded px-3 py-2 text-xs">
 				<div className="flex items-center gap-2 flex-wrap">
@@ -583,6 +616,11 @@ function BlockView({ block }: { block: Block }) {
 					<span className="font-medium">{block.title}</span>
 					<span className={`ml-auto ${statusColor}`}>{block.status}</span>
 				</div>
+				{block.locations && block.locations.length > 0 && (
+					<div className="mt-1 text-[10px] text-muted-foreground font-mono truncate">
+						{block.locations.join(" · ")}
+					</div>
+				)}
 				{block.content && (
 					<pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground max-h-64 overflow-auto">
 						{block.content}
@@ -595,13 +633,18 @@ function BlockView({ block }: { block: Block }) {
 		return (
 			<div className="border border-border rounded px-3 py-2 text-xs">
 				<div className="font-medium mb-1">Plan</div>
-				<ol className="list-decimal pl-5 space-y-0.5">
+				<ul className="space-y-0.5">
 					{block.entries.map((e, i) => (
-						<li key={i} className={e.status === "completed" ? "line-through text-muted-foreground" : ""}>
-							{e.content}
+						<li
+							key={i}
+							style={{ paddingLeft: `${(e.depth ?? 0) * 16}px` }}
+							className={`flex items-start gap-2 ${e.status === "completed" ? "line-through text-muted-foreground" : ""}`}
+						>
+							<span className="font-mono text-[10px] text-muted-foreground w-20 flex-shrink-0">{e.status ?? "pending"}</span>
+							<span>{e.title}</span>
 						</li>
 					))}
-				</ol>
+				</ul>
 			</div>
 		)
 	}
