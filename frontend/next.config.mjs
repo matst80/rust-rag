@@ -11,20 +11,25 @@ const nextConfig = {
     unoptimized: true,
   },
   async rewrites() {
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${RAG_API_URL}/api/:path*`,
-      },
-      {
-        source: '/admin/:path*',
-        destination: `${RAG_API_URL}/admin/:path*`,
-      },
-      {
-        source: '/assets/:path*',
-        destination: `${RAG_API_URL}/assets/:path*`,
-      },
-    ]
+    return {
+      beforeFiles: [],
+      afterFiles: [],
+      fallback: [
+        // Only rewrite to backend when no Next.js route handler matched.
+        {
+          source: '/api/:path*',
+          destination: `${RAG_API_URL}/api/:path*`,
+        },
+        {
+          source: '/admin/:path*',
+          destination: `${RAG_API_URL}/admin/:path*`,
+        },
+        {
+          source: '/assets/:path*',
+          destination: `${RAG_API_URL}/assets/:path*`,
+        },
+      ],
+    }
   },
 }
 
