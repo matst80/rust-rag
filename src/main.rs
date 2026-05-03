@@ -71,6 +71,10 @@ async fn main() -> Result<()> {
         config.chunking.clone(),
     )
     .with_manager(config.manager.clone());
+
+    let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
+    let mut state = state;
+    state.acp_ws = acp_ws_handle.clone();
     let app = build_app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;

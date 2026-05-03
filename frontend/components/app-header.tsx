@@ -19,6 +19,7 @@ import {
   MessageSquare,
   Search,
   Sparkles,
+  Terminal,
   User,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -30,6 +31,7 @@ const navigation = [
   { name: "Search", href: "/", icon: Search },
   { name: "Chat", href: "/chat", icon: MessageSquare },
   { name: "Swarm", href: "/messages", icon: Hash },
+  { name: "Agents", href: "/acp", icon: Terminal },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },

@@ -667,7 +667,7 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "post_message",
-                "description": "Post a message to a channel. Use this to talk to humans, instruct ACP agents (via the bridge's spawn/inject conventions), or summarize. sender_kind defaults to 'system'.",
+                "description": "Post a message to a rust-rag channel. Use for human-visible status, agent-to-agent collaboration handoffs, or summaries. NOT used for ACP agent control — use the acp_* tools for that. sender_kind defaults to 'system'.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -861,6 +861,159 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        // --- ACP WebSocket tools (telegram-acp surface) ---
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_list_sessions",
+                "description": "Ask telegram-acp to send a fresh ListSessions response over WS. Inspect the result via acp_recent_events with kind=ListSessions.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_spawn",
+                "description": "Spawn a new headless ACP session via WS. Returns immediately; new session id arrives as a SessionStarted event.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_path": {"type": "string"},
+                        "agent_command": {"type": "string"},
+                        "metadata": {"type": "object"}
+                    },
+                    "required": ["project_path"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_send_prompt",
+                "description": "Send a prompt to an existing ACP session over WS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "attachments": {"type": "array"}
+                    },
+                    "required": ["session_id", "text"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_cancel",
+                "description": "Cancel the currently running prompt on an ACP session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"session_id": {"type": "string"}},
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_end_session",
+                "description": "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "thread_id": {"type": "integer"}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_set_permission_mode",
+                "description": "Switch a session between auto and manual tool-call approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["auto", "manual"]}
+                    },
+                    "required": ["session_id", "mode"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_set_config",
+                "description": "Set a per-session config option on an ACP agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "key": {"type": "string"},
+                        "value": {}
+                    },
+                    "required": ["session_id", "key", "value"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_permission_respond",
+                "description": "Reply to an outstanding PermissionRequest. decision ∈ allow_once|allow_always|deny|deny_always.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "decision": {"type": "string", "enum": ["allow_once", "allow_always", "deny", "deny_always"]}
+                    },
+                    "required": ["request_id", "decision"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_recent_events",
+                "description": "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Manager process buffers up to ~200 events per session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "since_local_seq": {"type": "integer"},
+                        "kinds": {"type": "array", "items": {"type": "string"}},
+                        "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_pending_permissions",
+                "description": "List outstanding PermissionRequest events awaiting a decision.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "acp_get_snapshot",
+                "description": "Return the most recent Snapshot event the WS client has seen (or null if none yet).",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+            }
+        }),
     ]
 }
 
@@ -884,8 +1037,103 @@ async fn execute_tool(
         "list_tasks" => tool_list_tasks(state, cfg, &function.arguments).await,
         "update_task" => tool_update_task(state, &function.arguments).await,
         "promote_memory" => tool_promote_memory(state, &function.arguments).await,
+        "acp_list_sessions" => tool_acp_simple(state, "ListSessions", json!({})).await,
+        "acp_spawn" => tool_acp_passthrough(state, "SpawnSession", &function.arguments).await,
+        "acp_send_prompt" => tool_acp_passthrough(state, "SendPrompt", &function.arguments).await,
+        "acp_cancel" => tool_acp_passthrough(state, "Cancel", &function.arguments).await,
+        "acp_end_session" => tool_acp_passthrough(state, "EndSession", &function.arguments).await,
+        "acp_set_permission_mode" => {
+            tool_acp_passthrough(state, "SetPermissionMode", &function.arguments).await
+        }
+        "acp_set_config" => tool_acp_passthrough(state, "SetConfigOption", &function.arguments).await,
+        "acp_permission_respond" => tool_acp_permission_respond(state, &function.arguments).await,
+        "acp_recent_events" => tool_acp_recent_events(state, &function.arguments).await,
+        "acp_pending_permissions" => tool_acp_pending_permissions(state).await,
+        "acp_get_snapshot" => tool_acp_get_snapshot(state).await,
         other => Err(anyhow!("unsupported tool {other}")),
     }
+}
+
+fn require_acp(state: &AppState) -> Result<&crate::acp_ws::AcpWsHandle> {
+    state
+        .acp_ws
+        .as_ref()
+        .ok_or_else(|| anyhow!("ACP WS client not configured (set RAG_ACP_WS_URL)"))
+}
+
+async fn tool_acp_simple(state: &AppState, variant: &str, payload: Value) -> Result<String> {
+    let handle = require_acp(state)?;
+    handle.command(variant, payload)?;
+    Ok(json!({"ok": true, "sent": variant}).to_string())
+}
+
+async fn tool_acp_passthrough(state: &AppState, variant: &str, args: &str) -> Result<String> {
+    let handle = require_acp(state)?;
+    let payload: Value = if args.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(args)
+            .map_err(|err| anyhow!("invalid JSON args for {variant}: {err}"))?
+    };
+    handle.command(variant, payload)?;
+    Ok(json!({"ok": true, "sent": variant}).to_string())
+}
+
+async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<String> {
+    let handle = require_acp(state)?;
+    let payload: Value = serde_json::from_str(args)
+        .map_err(|err| anyhow!("invalid JSON args for PermissionResponse: {err}"))?;
+    let request_id = payload
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("request_id required"))?
+        .to_owned();
+    handle.command("PermissionResponse", payload.clone())?;
+    crate::acp_ws::mark_permission_resolved(handle, &request_id).await;
+    Ok(json!({"ok": true, "request_id": request_id}).to_string())
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AcpRecentEventsArgs {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    since_local_seq: Option<u64>,
+    #[serde(default)]
+    kinds: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> {
+    let handle = require_acp(state)?;
+    let parsed: AcpRecentEventsArgs = if args.trim().is_empty() {
+        AcpRecentEventsArgs::default()
+    } else {
+        serde_json::from_str(args)
+            .map_err(|err| anyhow!("invalid JSON args for acp_recent_events: {err}"))?
+    };
+    let events = handle
+        .recent_events(
+            parsed.session_id.as_deref(),
+            parsed.since_local_seq,
+            parsed.kinds.as_deref(),
+            parsed.limit,
+        )
+        .await;
+    Ok(serde_json::to_string(&events)?)
+}
+
+async fn tool_acp_pending_permissions(state: &AppState) -> Result<String> {
+    let handle = require_acp(state)?;
+    let events = handle.pending_permissions().await;
+    Ok(serde_json::to_string(&events)?)
+}
+
+async fn tool_acp_get_snapshot(state: &AppState) -> Result<String> {
+    let handle = require_acp(state)?;
+    let snap = handle.latest_snapshot().await;
+    Ok(serde_json::to_string(&snap)?)
 }
 
 async fn tool_list_agents(state: &AppState) -> Result<String> {
