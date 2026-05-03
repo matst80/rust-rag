@@ -122,7 +122,9 @@ export function AgentChat() {
 				localSeq: seqRef.current,
 			}
 
-			if (kind === "Snapshot") {
+			const k = kind.toLowerCase()
+
+			if (k === "snapshot") {
 				const list = Array.isArray((payload as { sessions?: unknown }).sessions)
 					? (payload as { sessions: SessionInfo[] }).sessions
 					: []
@@ -136,7 +138,7 @@ export function AgentChat() {
 				}
 			}
 
-			if (kind === "SessionStarted" || kind === "SessionSwitched") {
+			if (k === "sessionstarted" || k === "session_started" || k === "sessionswitched" || k === "session_switched") {
 				const sid = sessionIdOf(payload)
 				if (sid) {
 					setSessions((prev) => ({ ...prev, [sid]: { acp_session_id: sid, ...payload } }))
@@ -144,7 +146,7 @@ export function AgentChat() {
 				}
 			}
 
-			if (kind === "SessionEnded") {
+			if (k === "sessionended" || k === "session_ended") {
 				const sid = sessionIdOf(payload)
 				if (sid) {
 					setSessions((prev) => {
@@ -154,15 +156,15 @@ export function AgentChat() {
 					})
 					setPendingPermissions((prev) => {
 						const next: Record<string, AcpEvent> = {}
-						for (const [k, v] of Object.entries(prev)) {
-							if (sessionIdOf(v.payload) !== sid) next[k] = v
+						for (const [kk, v] of Object.entries(prev)) {
+							if (sessionIdOf(v.payload) !== sid) next[kk] = v
 						}
 						return next
 					})
 				}
 			}
 
-			if (kind === "PermissionRequest") {
+			if (k === "permissionrequest" || k === "permission_request") {
 				const reqId = payload["request_id"]
 				if (typeof reqId === "string") {
 					setPendingPermissions((prev) => ({ ...prev, [reqId]: ev }))

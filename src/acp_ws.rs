@@ -22,8 +22,15 @@ use tracing::{debug, info, warn};
 
 use crate::config::AcpWsConfig;
 
-const SNAPSHOT_KIND: &str = "Snapshot";
-const PERMISSION_REQUEST_KIND: &str = "PermissionRequest";
+fn is_snapshot(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("Snapshot") || kind.eq_ignore_ascii_case("snapshot")
+}
+fn is_permission_request(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("PermissionRequest") || kind == "permission_request"
+}
+fn is_session_ended(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("SessionEnded") || kind == "session_ended"
+}
 
 /// One event captured from the WS stream.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -313,11 +320,11 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         received_at: now_ms,
     };
 
-    if kind == SNAPSHOT_KIND {
+    if is_snapshot(&kind) {
         g.latest_snapshot = Some(event.clone());
     }
 
-    if kind == PERMISSION_REQUEST_KIND {
+    if is_permission_request(&kind) {
         if let Some(req_id) = payload.get("request_id").and_then(Value::as_str) {
             g.pending_permissions
                 .insert(req_id.to_owned(), event.clone());
@@ -325,7 +332,7 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
     }
 
     // Permission resolution: a SessionEnded for a session clears its pending perms.
-    if kind == "SessionEnded" {
+    if is_session_ended(&kind) {
         if let Some(sid) = &session_id {
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
