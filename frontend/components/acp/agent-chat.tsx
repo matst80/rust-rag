@@ -129,12 +129,42 @@ export function AgentChat() {
 					? (payload as { sessions: SessionInfo[] }).sessions
 					: []
 				const map: Record<string, SessionInfo> = {}
+				const ingestedBySession: Record<string, AcpEvent[]> = {}
 				for (const s of list) {
-					if (s?.acp_session_id) map[s.acp_session_id] = s
+					if (!s?.acp_session_id) continue
+					map[s.acp_session_id] = s
+					const hist = Array.isArray(s.history) ? s.history : []
+					const arr: AcpEvent[] = []
+					for (const h of hist) {
+						if (!h || typeof h !== "object") continue
+						const hp = h as Record<string, unknown>
+						const hkind = typeof hp.type === "string" ? hp.type : "unknown"
+						seqRef.current += 1
+						arr.push({
+							kind: hkind,
+							payload: hp,
+							receivedAt: Date.now(),
+							localSeq: seqRef.current,
+						})
+					}
+					if (arr.length > 0) ingestedBySession[s.acp_session_id] = arr
 				}
 				setSessions(map)
-				if (!activeSessionId && list[0]?.acp_session_id) {
-					setActiveSessionId(list[0].acp_session_id)
+				if (Object.keys(ingestedBySession).length > 0) {
+					setEventsBySession((prev) => {
+						const next = { ...prev }
+						for (const [sid, arr] of Object.entries(ingestedBySession)) {
+							const merged = [...(next[sid] ?? []), ...arr]
+							if (merged.length > 500) merged.splice(0, merged.length - 500)
+							next[sid] = merged
+						}
+						return next
+					})
+				}
+				if (!activeSessionId) {
+					const prompting = list.find((s) => s.status === "Prompting")
+					const pick = prompting ?? list[0]
+					if (pick?.acp_session_id) setActiveSessionId(pick.acp_session_id)
 				}
 			}
 
