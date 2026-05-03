@@ -211,6 +211,7 @@ export function AgentChat() {
 		() => (activeSessionId ? eventsBySession[activeSessionId] ?? [] : []),
 		[activeSessionId, eventsBySession],
 	)
+	const blocks = useMemo(() => buildBlocks(activeEvents), [activeEvents])
 	const pendingForActive = useMemo(
 		() =>
 			activeSessionId
@@ -316,19 +317,12 @@ export function AgentChat() {
 							</div>
 						)}
 
-						<div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2 font-mono text-xs">
-							{activeEvents.length === 0 && (
-								<div className="text-muted-foreground italic">No events yet</div>
+						<div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+							{blocks.length === 0 && (
+								<div className="text-xs text-muted-foreground italic">No events yet</div>
 							)}
-							{activeEvents.map((ev) => (
-								<div key={ev.localSeq} className="border-l-2 border-border pl-2">
-									<div className="text-[10px] text-muted-foreground uppercase tracking-wider">
-										{new Date(ev.receivedAt).toLocaleTimeString()} · {ev.kind}
-									</div>
-									<pre className="whitespace-pre-wrap break-words text-[11px]">
-										{JSON.stringify(ev.payload, null, 2)}
-									</pre>
-								</div>
+							{blocks.map((b) => (
+								<BlockView key={b.key} block={b} />
 							))}
 						</div>
 
@@ -353,5 +347,238 @@ export function AgentChat() {
 				)}
 			</section>
 		</div>
+	)
+}
+
+// --------------------------------------------------------------------------
+// Event → Block transform + rendering
+// --------------------------------------------------------------------------
+
+type Block =
+	| { key: string; kind: "user"; text: string; ts: number }
+	| { key: string; kind: "assistant"; text: string; ts: number }
+	| { key: string; kind: "thought"; text: string; ts: number }
+	| {
+		key: string
+		kind: "tool"
+		toolId: string
+		title: string
+		toolKind?: string
+		status: string
+		content: string
+		ts: number
+	}
+	| { key: string; kind: "plan"; entries: { content: string; status?: string }[]; ts: number }
+	| { key: string; kind: "raw"; eventKind: string; payload: unknown; ts: number }
+
+function extractText(content: unknown): string {
+	if (!content) return ""
+	if (typeof content === "string") return content
+	if (Array.isArray(content)) {
+		return content
+			.map((c) => {
+				if (!c || typeof c !== "object") return ""
+				const o = c as { type?: string; text?: string; content?: unknown }
+				if (o.type === "text" && typeof o.text === "string") return o.text
+				if (o.type === "content" && o.content) return extractText(o.content)
+				return ""
+			})
+			.join("")
+	}
+	if (typeof content === "object") {
+		const o = content as { type?: string; text?: string; content?: unknown }
+		if (o.type === "text" && typeof o.text === "string") return o.text
+		if (o.content) return extractText(o.content)
+	}
+	return ""
+}
+
+function buildBlocks(events: AcpEvent[]): Block[] {
+	const blocks: Block[] = []
+	const toolIndex: Record<string, number> = {}
+	let assistantBuf: { idx: number } | null = null
+	let thoughtBuf: { idx: number } | null = null
+
+	for (const ev of events) {
+		const k = ev.kind.toLowerCase()
+		const ts = ev.receivedAt
+		const payload = ev.payload as Record<string, unknown>
+
+		if (k === "user_prompt" || k === "userprompt") {
+			assistantBuf = null
+			thoughtBuf = null
+			const text = (typeof payload.text === "string" && payload.text) || extractText(payload.content)
+			blocks.push({ key: `u-${ev.localSeq}`, kind: "user", text, ts })
+			continue
+		}
+
+		if (k === "agent_update" || k === "agentupdate") {
+			const inner = (payload.event as Record<string, unknown>) ?? payload
+			const su = (inner.sessionUpdate as string) ?? ""
+
+			if (su === "agent_message_chunk") {
+				const text = extractText(inner.content)
+				if (assistantBuf) {
+					const b = blocks[assistantBuf.idx]
+					if (b.kind === "assistant") b.text += text
+				} else {
+					blocks.push({ key: `a-${ev.localSeq}`, kind: "assistant", text, ts })
+					assistantBuf = { idx: blocks.length - 1 }
+				}
+				thoughtBuf = null
+				continue
+			}
+
+			if (su === "agent_thought_chunk") {
+				const text = extractText(inner.content)
+				if (thoughtBuf) {
+					const b = blocks[thoughtBuf.idx]
+					if (b.kind === "thought") b.text += text
+				} else {
+					blocks.push({ key: `t-${ev.localSeq}`, kind: "thought", text, ts })
+					thoughtBuf = { idx: blocks.length - 1 }
+				}
+				assistantBuf = null
+				continue
+			}
+
+			if (su === "tool_call" || su === "tool_call_update") {
+				const toolId = (inner.toolCallId as string) ?? `unknown-${ev.localSeq}`
+				const title = (inner.title as string) ?? toolId
+				const status = (inner.status as string) ?? "pending"
+				const content = extractText(inner.content)
+				const toolKind = (inner.kind as string) ?? undefined
+				if (toolIndex[toolId] !== undefined) {
+					const b = blocks[toolIndex[toolId]]
+					if (b.kind === "tool") {
+						b.title = title || b.title
+						b.status = status
+						b.toolKind = toolKind ?? b.toolKind
+						if (content) b.content = content
+					}
+				} else {
+					blocks.push({
+						key: `tc-${toolId}`,
+						kind: "tool",
+						toolId,
+						title,
+						toolKind,
+						status,
+						content,
+						ts,
+					})
+					toolIndex[toolId] = blocks.length - 1
+				}
+				assistantBuf = null
+				thoughtBuf = null
+				continue
+			}
+
+			if (su === "plan") {
+				const entries = Array.isArray(inner.entries) ? (inner.entries as { content: string; status?: string }[]) : []
+				blocks.push({ key: `p-${ev.localSeq}`, kind: "plan", entries, ts })
+				assistantBuf = null
+				thoughtBuf = null
+				continue
+			}
+
+			// Unknown sessionUpdate variant
+			blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: `agent_update/${su}`, payload, ts })
+			assistantBuf = null
+			thoughtBuf = null
+			continue
+		}
+
+		if (
+			k === "snapshot" ||
+			k === "session_started" || k === "sessionstarted" ||
+			k === "session_switched" || k === "sessionswitched" ||
+			k === "session_ended" || k === "sessionended" ||
+			k === "permission_request" || k === "permissionrequest"
+		) {
+			// Lifecycle / control events — surfaced elsewhere in the UI; skip in the chat log.
+			continue
+		}
+
+		blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: ev.kind, payload, ts })
+		assistantBuf = null
+		thoughtBuf = null
+	}
+
+	return blocks
+}
+
+function timeOf(ts: number): string {
+	return new Date(ts).toLocaleTimeString()
+}
+
+function BlockView({ block }: { block: Block }) {
+	if (block.kind === "user") {
+		return (
+			<div className="flex flex-col items-end">
+				<div className="max-w-[80%] rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm whitespace-pre-wrap break-words">
+					{block.text}
+				</div>
+				<div className="text-[10px] text-muted-foreground mt-1">user · {timeOf(block.ts)}</div>
+			</div>
+		)
+	}
+	if (block.kind === "assistant") {
+		return (
+			<div className="flex flex-col items-start">
+				<div className="max-w-[90%] rounded-lg bg-accent px-3 py-2 text-sm whitespace-pre-wrap break-words">
+					{block.text || <span className="text-muted-foreground italic">…</span>}
+				</div>
+				<div className="text-[10px] text-muted-foreground mt-1">agent · {timeOf(block.ts)}</div>
+			</div>
+		)
+	}
+	if (block.kind === "thought") {
+		return (
+			<details className="text-xs text-muted-foreground border-l-2 border-border pl-3">
+				<summary className="cursor-pointer select-none">thought · {timeOf(block.ts)}</summary>
+				<div className="whitespace-pre-wrap break-words mt-1 italic">{block.text}</div>
+			</details>
+		)
+	}
+	if (block.kind === "tool") {
+		const statusColor =
+			block.status === "completed" ? "text-green-500" :
+			block.status === "failed" || block.status === "error" ? "text-red-500" :
+			"text-amber-500"
+		return (
+			<div className="border border-border rounded px-3 py-2 text-xs">
+				<div className="flex items-center gap-2 flex-wrap">
+					<span className="font-mono text-muted-foreground">{block.toolKind ?? "tool"}</span>
+					<span className="font-medium">{block.title}</span>
+					<span className={`ml-auto ${statusColor}`}>{block.status}</span>
+				</div>
+				{block.content && (
+					<pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground max-h-64 overflow-auto">
+						{block.content}
+					</pre>
+				)}
+			</div>
+		)
+	}
+	if (block.kind === "plan") {
+		return (
+			<div className="border border-border rounded px-3 py-2 text-xs">
+				<div className="font-medium mb-1">Plan</div>
+				<ol className="list-decimal pl-5 space-y-0.5">
+					{block.entries.map((e, i) => (
+						<li key={i} className={e.status === "completed" ? "line-through text-muted-foreground" : ""}>
+							{e.content}
+						</li>
+					))}
+				</ol>
+			</div>
+		)
+	}
+	return (
+		<details className="text-xs text-muted-foreground border-l-2 border-border pl-2">
+			<summary className="cursor-pointer">{block.eventKind} · {timeOf(block.ts)}</summary>
+			<pre className="whitespace-pre-wrap break-words mt-1 text-[10px]">{JSON.stringify(block.payload, null, 2)}</pre>
+		</details>
 	)
 }
