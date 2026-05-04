@@ -897,7 +897,7 @@ fn tool_definitions() -> Vec<Value> {
                     "properties": {
                         "session_id": {"type": "string"},
                         "text": {"type": "string"},
-                        "attachments": {"type": "array"}
+                        "attachments": {"type": "array", "items": {"type": "string"}}
                     },
                     "required": ["session_id", "text"],
                     "additionalProperties": false
@@ -958,7 +958,7 @@ fn tool_definitions() -> Vec<Value> {
                     "properties": {
                         "session_id": {"type": "string"},
                         "key": {"type": "string"},
-                        "value": {}
+                        "value": {"type": "string", "description": "JSON-encoded value. Server parses."}
                     },
                     "required": ["session_id", "key", "value"],
                     "additionalProperties": false
