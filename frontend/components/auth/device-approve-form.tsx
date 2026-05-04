@@ -40,7 +40,7 @@ export function DeviceApproveForm({ initialUserCode }: DeviceApproveFormProps) {
 		setVerified(null)
 		try {
 			const response = await fetch(
-				`/api/device/verify?user_code=${encodeURIComponent(userCode.trim())}`
+				`/bff/device/verify?user_code=${encodeURIComponent(userCode.trim())}`
 			)
 			if (response.ok) {
 				setVerified((await response.json()) as VerifyResponse)
@@ -68,7 +68,7 @@ export function DeviceApproveForm({ initialUserCode }: DeviceApproveFormProps) {
 		setSubmitting(true)
 		setResult(null)
 		try {
-			const response = await fetch("/api/device/approve", {
+			const response = await fetch("/bff/device/approve", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({

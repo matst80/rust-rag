@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
 			},
 		})
 	} catch (error) {
-		console.error("Backend fetch failed in /api/device/approve:", error)
+		console.error("Backend fetch failed in /bff/device/approve:", error)
 		return NextResponse.json({ error: "Backend communication failed" }, { status: 500 })
 	}
 }

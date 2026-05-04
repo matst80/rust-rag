@@ -495,7 +495,7 @@ export function MessagesInterface() {
   // Resolve user identity once.
   useEffect(() => {
     let cancelled = false
-    fetch("/api/auth/session", { cache: "no-store" })
+    fetch("/bff/auth/session", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((session: SessionUser | null) => {
         if (cancelled) return

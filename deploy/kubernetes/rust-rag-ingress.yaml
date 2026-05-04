@@ -11,22 +11,8 @@ spec:
     - host: rag.k6n.net
       http:
         paths:
-          # Frontend Next.js API routes (must precede /api backend prefix via longest-match)
-          - path: /api/device
-            pathType: Prefix
-            backend:
-              service:
-                name: rag-frontend
-                port:
-                  number: 3000
-          - path: /api/auth/session
-            pathType: Prefix
-            backend:
-              service:
-                name: rag-frontend
-                port:
-                  number: 3000
-          - path: /api/acp
+          # Frontend Next.js BFF routes (server proxies to backend with API key)
+          - path: /bff
             pathType: Prefix
             backend:
               service:
@@ -78,7 +64,7 @@ spec:
                   number: 4001
           # Frontend catch-all (rag-frontend → 10.10.11.135:3000)
           # Handles /auth/device approval UI, /auth/login, /auth/callback,
-          # /api/device/{approve,verify} server proxies, and the Next.js app.
+          # /bff/* server proxies, and the Next.js app.
           - path: /
             pathType: Prefix
             backend:

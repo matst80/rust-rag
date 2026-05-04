@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
 			},
 		})
 	} catch (error) {
-		console.error("Backend fetch failed in /api/device/verify:", error)
+		console.error("Backend fetch failed in /bff/device/verify:", error)
 		return NextResponse.json({ error: "Backend communication failed" }, { status: 500 })
 	}
 }

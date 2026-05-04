@@ -25,6 +25,14 @@ interface SessionInfo {
 	history?: unknown[]
 }
 
+interface AcpInstance {
+	name: string
+	host: string
+	port: number
+	url: string
+	txt: Record<string, string>
+}
+
 interface ConnectionState {
 	status: "connecting" | "open" | "closed" | "error" | "disabled"
 	error?: string
@@ -45,6 +53,18 @@ function envelopeKind(envelope: AcpEnvelope): { kind: string; payload: Record<st
 	return null
 }
 
+function detachAndClose(ws: WebSocket) {
+	ws.onopen = null
+	ws.onmessage = null
+	ws.onerror = null
+	ws.onclose = null
+	try {
+		ws.close()
+	} catch {
+		// ignore — closing a connecting socket can throw on some browsers
+	}
+}
+
 function sessionIdOf(payload: Record<string, unknown>): string | undefined {
 	const a = payload["acp_session_id"]
 	if (typeof a === "string") return a
@@ -60,9 +80,23 @@ export function AgentChat() {
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
 	const [draft, setDraft] = useState("")
+	const [instances, setInstances] = useState<AcpInstance[]>([])
+	const [activeInstance, setActiveInstance] = useState<string | null>(null)
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
+
+	const refreshInstances = useCallback(async () => {
+		try {
+			const res = await fetch("/bff/acp/instances", { credentials: "include" })
+			if (!res.ok) return
+			const data = (await res.json()) as { instances: AcpInstance[]; active: string | null }
+			setInstances(data.instances)
+			setActiveInstance(data.active)
+		} catch (err) {
+			console.warn("acp instances fetch failed", err)
+		}
+	}, [])
 
 	const send = useCallback((envelope: AcpEnvelope) => {
 		const ws = wsRef.current
@@ -79,7 +113,7 @@ export function AgentChat() {
 		let url: string
 		let token: string
 		try {
-			const res = await fetch("/api/acp/config", { credentials: "include" })
+			const res = await fetch("/bff/acp/config", { credentials: "include" })
 			if (res.status === 503) {
 				setConn({ status: "disabled", error: "ACP WS endpoint not configured" })
 				return
@@ -234,13 +268,51 @@ export function AgentChat() {
 
 	useEffect(() => {
 		connect()
+		void refreshInstances()
+		const t = window.setInterval(() => void refreshInstances(), 10_000)
 		return () => {
+			window.clearInterval(t)
 			const ws = wsRef.current
 			wsRef.current = null
-			if (ws) ws.close()
+			if (ws) detachAndClose(ws)
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [])
+
+	const selectInstance = useCallback(
+		async (name: string) => {
+			if (name === activeInstance) return
+			try {
+				const res = await fetch("/bff/acp/select", {
+					method: "POST",
+					credentials: "include",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ name }),
+				})
+				if (!res.ok) {
+					console.error("acp select failed", await res.text())
+					return
+				}
+				setActiveInstance(name)
+				// Backend swapped its client; force browser reconnect to new URL.
+				// Detach handlers before close so any in-flight messages from the
+				// old socket don't double-dispatch into the new state.
+				const ws = wsRef.current
+				wsRef.current = null
+				reconnectAttemptRef.current = 0
+				if (ws) detachAndClose(ws)
+				// Reset session view; new instance has its own state.
+				setSessions({})
+				setEventsBySession({})
+				setActiveSessionId(null)
+				setPendingPermissions({})
+				connect()
+			} catch (err) {
+				console.error("acp select error", err)
+			}
+		},
+		[activeInstance, connect],
+	)
 
 	const sessionList = useMemo(() => Object.values(sessions), [sessions])
 	const activeEvents = useMemo(
@@ -370,6 +442,25 @@ export function AgentChat() {
 						</button>
 					</div>
 				</div>
+				{instances.length > 0 && (
+					<div className="border-b border-border px-3 py-2">
+						<label className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1">
+							ACP instance
+						</label>
+						<select
+							value={activeInstance ?? ""}
+							onChange={(e) => void selectInstance(e.target.value)}
+							className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
+						>
+							{!activeInstance && <option value="">— pick instance —</option>}
+							{instances.map((inst) => (
+								<option key={inst.name} value={inst.name}>
+									{inst.name} ({inst.host}:{inst.port})
+								</option>
+							))}
+						</select>
+					</div>
+				)}
 				{conn.error && (
 					<div className="border-b border-border px-4 py-2 text-[11px] text-red-500">
 						{conn.error}
