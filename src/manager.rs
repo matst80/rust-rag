@@ -1037,15 +1037,15 @@ async fn execute_tool(
         "list_tasks" => tool_list_tasks(state, cfg, &function.arguments).await,
         "update_task" => tool_update_task(state, &function.arguments).await,
         "promote_memory" => tool_promote_memory(state, &function.arguments).await,
-        "acp_list_sessions" => tool_acp_simple(state, "ListSessions", json!({})).await,
-        "acp_spawn" => tool_acp_passthrough(state, "SpawnSession", &function.arguments).await,
-        "acp_send_prompt" => tool_acp_passthrough(state, "SendPrompt", &function.arguments).await,
-        "acp_cancel" => tool_acp_passthrough(state, "Cancel", &function.arguments).await,
-        "acp_end_session" => tool_acp_passthrough(state, "EndSession", &function.arguments).await,
+        "acp_list_sessions" => tool_acp_simple(state, "list_sessions", json!({})).await,
+        "acp_spawn" => tool_acp_passthrough(state, "spawn_session", &function.arguments).await,
+        "acp_send_prompt" => tool_acp_passthrough(state, "send_prompt", &function.arguments).await,
+        "acp_cancel" => tool_acp_passthrough(state, "cancel", &function.arguments).await,
+        "acp_end_session" => tool_acp_passthrough(state, "end_session", &function.arguments).await,
         "acp_set_permission_mode" => {
-            tool_acp_passthrough(state, "SetPermissionMode", &function.arguments).await
+            tool_acp_passthrough(state, "set_permission_mode", &function.arguments).await
         }
-        "acp_set_config" => tool_acp_passthrough(state, "SetConfigOption", &function.arguments).await,
+        "acp_set_config" => tool_acp_passthrough(state, "set_config_option", &function.arguments).await,
         "acp_permission_respond" => tool_acp_permission_respond(state, &function.arguments).await,
         "acp_recent_events" => tool_acp_recent_events(state, &function.arguments).await,
         "acp_pending_permissions" => tool_acp_pending_permissions(state).await,
@@ -1088,7 +1088,7 @@ async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<Str
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("request_id required"))?
         .to_owned();
-    handle.command("PermissionResponse", payload.clone())?;
+    handle.command("permission_response", payload.clone())?;
     crate::acp_ws::mark_permission_resolved(handle, &request_id).await;
     Ok(json!({"ok": true, "request_id": request_id}).to_string())
 }

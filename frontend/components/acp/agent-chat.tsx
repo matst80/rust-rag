@@ -257,22 +257,22 @@ export function AgentChat() {
 
 	const sendPrompt = () => {
 		if (!activeSessionId || !draft.trim()) return
-		send({ SendPrompt: { session_id: activeSessionId, text: draft } })
+		send({ type: "send_prompt", session_id: activeSessionId, text: draft })
 		setDraft("")
 	}
 
 	const cancelActive = () => {
 		if (!activeSessionId) return
-		send({ Cancel: { session_id: activeSessionId } })
+		send({ type: "cancel", session_id: activeSessionId })
 	}
 
 	const endActive = () => {
 		if (!activeSessionId) return
-		send({ EndSession: { session_id: activeSessionId } })
+		send({ type: "end_session", session_id: activeSessionId })
 	}
 
 	const respondPermission = (requestId: string, decision: string) => {
-		send({ PermissionResponse: { request_id: requestId, decision } })
+		send({ type: "permission_response", request_id: requestId, decision })
 		setPendingPermissions((prev) => {
 			const next = { ...prev }
 			delete next[requestId]
@@ -283,7 +283,7 @@ export function AgentChat() {
 	const spawn = () => {
 		const projectPath = window.prompt("project_path")
 		if (!projectPath) return
-		send({ SpawnSession: { project_path: projectPath } })
+		send({ type: "spawn_session", project_path: projectPath })
 	}
 
 	return (

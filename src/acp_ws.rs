@@ -89,10 +89,19 @@ impl AcpWsHandle {
             .map_err(|err| anyhow!("acp_ws outbound channel closed: {err}"))
     }
 
-    /// Convenience wrapper: build the canonical `{ "<Variant>": <payload> }` envelope.
+    /// Build the canonical lowercase-tagged envelope: `{ "type": "<variant>", ...payload }`.
+    /// `variant` should be `snake_case`.
     pub fn command(&self, variant: &str, payload: Value) -> Result<()> {
-        let mut map = serde_json::Map::new();
-        map.insert(variant.to_string(), payload);
+        let mut map = match payload {
+            Value::Object(m) => m,
+            Value::Null => serde_json::Map::new(),
+            other => {
+                let mut m = serde_json::Map::new();
+                m.insert("payload".to_string(), other);
+                m
+            }
+        };
+        map.insert("type".to_string(), Value::String(variant.to_string()));
         self.send_raw(Value::Object(map))
     }
 
