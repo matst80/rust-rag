@@ -1,3 +1,4 @@
+pub mod acp_discovery;
 pub mod acp_ws;
 pub mod api;
 pub mod config;

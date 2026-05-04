@@ -79,6 +79,29 @@ pub struct AcpWsHandle {
     cap_per_session: usize,
     /// Wakes anyone watching for new events (optional).
     pub event_notify: Arc<Notify>,
+    /// Target (url, optional token). Updating + signalling `target_changed`
+    /// causes the run loop to drop its current connection and reconnect.
+    target: Arc<Mutex<(String, Option<String>)>>,
+    target_changed: Arc<Notify>,
+}
+
+impl AcpWsHandle {
+    /// Swap the active WS target. Any existing connection is dropped and a
+    /// new one opens against `url` with `token`.
+    pub async fn set_target(&self, url: String, token: Option<String>) {
+        {
+            let mut g = self.target.lock().await;
+            if g.0 == url && g.1 == token {
+                return;
+            }
+            *g = (url, token);
+        }
+        self.target_changed.notify_waiters();
+    }
+
+    pub async fn current_target(&self) -> (String, Option<String>) {
+        self.target.lock().await.clone()
+    }
 }
 
 impl AcpWsHandle {
@@ -164,10 +187,11 @@ impl AcpWsHandle {
     }
 }
 
-/// Spawn the long-lived WS client task. Returns the handle, or `None` if the
-/// config has no URL set (feature disabled).
+/// Spawn the long-lived WS client task. Returns the handle even when no URL
+/// is configured up-front; callers can later point it at a discovered target
+/// via `set_target`. Returns `None` only when ring buffer config is invalid.
 pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
-    let url = cfg.url.clone()?;
+    let url = cfg.url.clone();
     let token = cfg.token.clone();
     let cap = cfg.ring_buffer_per_session.max(20);
     let initial = cfg.reconnect_initial_secs.max(1);
@@ -176,21 +200,34 @@ pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
     let inner = Arc::new(Mutex::new(InnerState::default()));
     let (tx, rx) = mpsc::unbounded_channel::<Value>();
     let notify = Arc::new(Notify::new());
+    let target = Arc::new(Mutex::new((url.unwrap_or_default(), token)));
+    let target_changed = Arc::new(Notify::new());
 
     let handle = AcpWsHandle {
         inner: inner.clone(),
         outbound: tx,
         cap_per_session: cap,
         event_notify: notify.clone(),
+        target: target.clone(),
+        target_changed: target_changed.clone(),
     };
 
-    tokio::spawn(run_loop(url, token, cap, initial, max, inner, rx, notify));
+    tokio::spawn(run_loop(
+        target,
+        target_changed,
+        cap,
+        initial,
+        max,
+        inner,
+        rx,
+        notify,
+    ));
     Some(handle)
 }
 
 async fn run_loop(
-    url: String,
-    token: Option<String>,
+    target: Arc<Mutex<(String, Option<String>)>>,
+    target_changed: Arc<Notify>,
     cap_per_session: usize,
     initial_backoff: u64,
     max_backoff: u64,
@@ -199,9 +236,17 @@ async fn run_loop(
     notify: Arc<Notify>,
 ) {
     let mut backoff = initial_backoff;
-    info!("acp_ws: client starting, target={url}");
 
     loop {
+        let (url, token) = target.lock().await.clone();
+        if url.is_empty() {
+            // No target yet; park until set_target signals.
+            target_changed.notified().await;
+            backoff = initial_backoff;
+            continue;
+        }
+        info!("acp_ws: connecting target={url}");
+
         match connect(&url, token.as_deref()).await {
             Ok(ws) => {
                 {
@@ -216,6 +261,10 @@ async fn run_loop(
 
                 loop {
                     tokio::select! {
+                        _ = target_changed.notified() => {
+                            info!("acp_ws: target changed; dropping current connection");
+                            break;
+                        }
                         Some(value) = outbound_rx.recv() => {
                             let text = match serde_json::to_string(&value) {
                                 Ok(t) => t,
@@ -269,7 +318,13 @@ async fn run_loop(
             let mut g = inner.lock().await;
             g.connected = false;
         }
-        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+            _ = target_changed.notified() => {
+                backoff = initial_backoff;
+                continue;
+            }
+        }
         backoff = (backoff * 2).min(max_backoff);
     }
 }

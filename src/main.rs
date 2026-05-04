@@ -75,6 +75,21 @@ async fn main() -> Result<()> {
     let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
     let mut state = state;
     state.acp_ws = acp_ws_handle.clone();
+
+    // mDNS browser for `_acp-ws._tcp`. When an instance is selected (auto on
+    // first sight or via API), point the existing acp_ws client at it.
+    let acp_token = config.acp_ws.token.clone();
+    let ws_for_disc = acp_ws_handle.clone();
+    let discovery = rust_rag::acp_discovery::spawn(move |instance| {
+        let Some(handle) = ws_for_disc.clone() else { return };
+        let url = instance.url.clone();
+        let token = acp_token.clone();
+        tokio::spawn(async move {
+            handle.set_target(url, token).await;
+        });
+    });
+    state.acp_discovery = discovery;
+
     let app = build_app(state.clone());
 
     let listener = tokio::net::TcpListener::bind(config.bind_address()).await?;

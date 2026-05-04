@@ -78,6 +78,7 @@ pub struct AppState {
     pub messages: Arc<dyn MessageStore>,
     pub manager_runtime: Option<Arc<ManagerConfig>>,
     pub acp_ws: Option<crate::acp_ws::AcpWsHandle>,
+    pub acp_discovery: Option<crate::acp_discovery::AcpDiscoveryHandle>,
     pub presence: Arc<PresenceTracker>,
     pub tombstones: Arc<TombstoneTracker>,
     pub message_notify: Arc<tokio::sync::Notify>,
@@ -114,6 +115,7 @@ impl AppState {
             messages,
             manager_runtime: None,
             acp_ws: None,
+            acp_discovery: None,
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
@@ -161,6 +163,7 @@ impl AppState {
             messages: Arc::new(NoopMessages),
             manager_runtime: None,
             acp_ws: None,
+            acp_discovery: None,
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
@@ -796,6 +799,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ingest/image", post(multimodal::ingest_image))
         .route("/api/messages", post(send_message).get(list_messages))
         .route("/api/messages/channels", get(list_message_channels))
+        .route("/api/acp/instances", get(list_acp_instances))
+        .route("/api/acp/select", post(select_acp_instance))
         .route(
             "/api/messages/channels/{channel}",
             delete(clear_message_channel),
@@ -2343,6 +2348,46 @@ async fn clear_message_channel(
         channel: trimmed,
         deleted_count: wiped.len(),
     }))
+}
+
+#[derive(Serialize)]
+struct AcpInstancesResponse {
+    instances: Vec<crate::acp_discovery::AcpInstance>,
+    active: Option<String>,
+}
+
+async fn list_acp_instances(
+    State(state): State<AppState>,
+) -> Result<Json<AcpInstancesResponse>, ApiError> {
+    let Some(disc) = state.acp_discovery.clone() else {
+        return Ok(Json(AcpInstancesResponse {
+            instances: vec![],
+            active: None,
+        }));
+    };
+    let instances = disc.list().await;
+    let active = disc.active().await.map(|i| i.name);
+    Ok(Json(AcpInstancesResponse { instances, active }))
+}
+
+#[derive(Deserialize)]
+struct SelectAcpInstanceRequest {
+    name: String,
+}
+
+async fn select_acp_instance(
+    State(state): State<AppState>,
+    Json(req): Json<SelectAcpInstanceRequest>,
+) -> Result<Json<crate::acp_discovery::AcpInstance>, ApiError> {
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let inst = disc
+        .select(&req.name)
+        .await
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown acp instance: {}", req.name)))?;
+    Ok(Json(inst))
 }
 
 const MESSAGE_AUTH_METADATA_KEY: &str = "__auth";
