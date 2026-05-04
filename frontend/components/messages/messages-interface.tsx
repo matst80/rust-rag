@@ -21,10 +21,12 @@ import {
   Eraser,
   Hash,
   Loader2,
+  Menu,
   Plus,
   Send,
   Trash2,
   User2,
+  X,
 } from "lucide-react"
 import { api } from "@/lib/api"
 import type {
@@ -456,6 +458,20 @@ export function MessagesInterface() {
   const [newChannelOpen, setNewChannelOpen] = useState(false)
   const [newChannelName, setNewChannelName] = useState("")
   const [user, setUser] = useState<string>("")
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(false)
+  const [isDesktop, setIsDesktop] = useState<boolean>(false)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const mql = window.matchMedia("(min-width: 768px)")
+    const sync = () => {
+      setIsDesktop(mql.matches)
+      setSidebarOpen(mql.matches)
+    }
+    sync()
+    mql.addEventListener("change", sync)
+    return () => mql.removeEventListener("change", sync)
+  }, [])
 
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -998,21 +1014,51 @@ export function MessagesInterface() {
   }, [messages])
 
   return (
-    <div className="flex h-[calc(100vh-49px)]">
+    <div className="relative flex h-[calc(100dvh-49px)]">
+      {sidebarOpen && !isDesktop ? (
+        <button
+          type="button"
+          aria-label="Close channels"
+          onClick={() => setSidebarOpen(false)}
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+        />
+      ) : null}
+
       {/* Sidebar */}
-      <aside className="flex w-64 flex-col border-r border-border bg-muted/20">
+      <aside
+        className={cn(
+          "z-40 flex w-64 flex-col border-r border-border bg-background transition-transform duration-200 md:bg-muted/20",
+          isDesktop
+            ? sidebarOpen
+              ? "relative translate-x-0"
+              : "hidden"
+            : sidebarOpen
+              ? "fixed inset-y-0 left-0 translate-x-0"
+              : "fixed inset-y-0 left-0 -translate-x-full"
+        )}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground">
             Channels
           </span>
-          <button
-            type="button"
-            onClick={() => setNewChannelOpen((v) => !v)}
-            className="text-muted-foreground hover:text-foreground"
-            aria-label="New channel"
-          >
-            <Plus className="size-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setNewChannelOpen((v) => !v)}
+              className="text-muted-foreground hover:text-foreground"
+              aria-label="New channel"
+            >
+              <Plus className="size-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="text-muted-foreground hover:text-foreground md:hidden"
+              aria-label="Close channels"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
         </div>
         {newChannelOpen ? (
           <div className="flex gap-1 border-b border-border p-2">
@@ -1041,7 +1087,10 @@ export function MessagesInterface() {
             <li key={c.channel} className="group/row relative">
               <button
                 type="button"
-                onClick={() => setActiveChannel(c.channel)}
+                onClick={() => {
+                  setActiveChannel(c.channel)
+                  if (!isDesktop) setSidebarOpen(false)
+                }}
                 className={cn(
                   "flex w-full items-center justify-between gap-2 px-4 py-1.5 pr-9 text-left text-sm transition-colors",
                   c.channel === activeChannel
@@ -1082,15 +1131,36 @@ export function MessagesInterface() {
       </aside>
 
       {/* Thread */}
-      <section className="flex flex-1 flex-col">
-        <div className="flex items-center justify-between gap-2 border-b border-border px-6 py-3">
-          <div className="flex items-center gap-2">
-            <Hash className="size-4 text-muted-foreground" />
-            <h1 className="font-semibold">{activeChannel}</h1>
+      <section className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((v) => !v)}
+            className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            aria-label={sidebarOpen ? "Hide channels" : "Show channels"}
+            title={sidebarOpen ? "Hide channels" : "Show channels"}
+          >
+            <Menu className="size-4" />
+          </button>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <Hash className="size-4 shrink-0 text-muted-foreground" />
+            <h1 className="truncate font-semibold">{activeChannel}</h1>
+            <div className="hidden items-center gap-1.5 rounded-md bg-muted/40 px-2 py-1 sm:flex">
+              <Circle className="size-2 fill-emerald-500 text-emerald-500" />
+              <span className="text-xs">{activeUsers.length}</span>
+              <span className="hidden text-xs text-muted-foreground lg:inline">
+                {activeUsers.length > 0
+                  ? `· ${activeUsers
+                      .map((u) => u.user)
+                      .slice(0, 3)
+                      .join(", ")}${activeUsers.length > 3 ? ` +${activeUsers.length - 3}` : ""}`
+                  : "active"}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5">
             {user ? (
-              <span className="font-mono text-[10px] uppercase tracking-[2px] text-muted-foreground">
+              <span className="hidden font-mono text-[10px] uppercase tracking-[2px] text-muted-foreground md:inline">
                 you: {user}
               </span>
             ) : null}
@@ -1100,7 +1170,7 @@ export function MessagesInterface() {
                 onClick={() => void requestNotificationPermission()}
                 disabled={notifPermission === "denied"}
                 className={cn(
-                  "flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs",
+                  "flex size-8 items-center justify-center rounded-md border border-border bg-background",
                   notifPermission === "granted"
                     ? "text-emerald-600 dark:text-emerald-400"
                     : notifPermission === "denied"
@@ -1109,11 +1179,12 @@ export function MessagesInterface() {
                 )}
                 title={
                   notifPermission === "granted"
-                    ? "Notifications on for permission requests"
+                    ? "Notifications on"
                     : notifPermission === "denied"
-                      ? "Notifications blocked — enable in browser settings"
-                      : "Enable notifications for permission requests"
+                      ? "Notifications blocked"
+                      : "Enable notifications"
                 }
+                aria-label="Toggle notifications"
               >
                 {notifPermission === "denied" ? (
                   <BellOff className="size-3.5" />
@@ -1131,28 +1202,19 @@ export function MessagesInterface() {
               type="button"
               onClick={() => void handleClearActive()}
               disabled={!activeChannel || messages.length === 0}
-              className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:hover:text-muted-foreground"
-              title="Clear all messages in this channel"
+              className="flex size-8 items-center justify-center gap-1 rounded-md border border-border bg-background text-xs text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:hover:text-muted-foreground md:size-auto md:px-2 md:py-1"
+              title="Clear all messages"
+              aria-label="Clear channel"
             >
               <Eraser className="size-3.5" />
-              Clear
+              <span className="hidden md:inline">Clear</span>
             </button>
-            <div className="flex items-center gap-1.5 rounded-md bg-muted/40 px-2 py-1">
-              <Circle className="size-2 fill-emerald-500 text-emerald-500" />
-              <span className="text-xs">{activeUsers.length} active</span>
-              {activeUsers.length > 0 ? (
-                <span className="text-xs text-muted-foreground">
-                  · {activeUsers.map((u) => u.user).slice(0, 5).join(", ")}
-                  {activeUsers.length > 5 ? ` +${activeUsers.length - 5}` : ""}
-                </span>
-              ) : null}
-            </div>
           </div>
         </div>
 
         <div
           ref={scrollContainerRef}
-          className="flex-1 overflow-y-auto px-6 py-4"
+          className="flex-1 overflow-y-auto px-3 py-3 md:px-6 md:py-4"
         >
           {hasMore ? (
             <div className="mb-3 flex justify-center">
