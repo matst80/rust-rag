@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Bot, Circle, Loader2, Plus, Send, Square, X } from "lucide-react"
+import { Bot, Circle, Link2, Loader2, Plus, Send, Square, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { MessageMarkdown } from "@/components/messages/message-markdown"
 
@@ -286,6 +286,31 @@ export function AgentChat() {
 		send({ type: "spawn_session", project_path: projectPath })
 	}
 
+	const bindTelegramThread = () => {
+		if (!activeSessionId) return
+		const raw = window.prompt(
+			"Telegram thread_id (leave blank to auto-create a new forum topic):",
+			"",
+		)
+		if (raw === null) return
+		const trimmed = raw.trim()
+		const payload: Record<string, unknown> = {
+			type: "bind_telegram_thread",
+			session_id: activeSessionId,
+		}
+		if (trimmed === "") {
+			payload.thread_id = null
+		} else {
+			const n = Number(trimmed)
+			if (!Number.isInteger(n) || n <= 0) {
+				window.alert("thread_id must be a positive integer or blank")
+				return
+			}
+			payload.thread_id = n
+		}
+		send(payload)
+	}
+
 	const active = activeSessionId ? sessions[activeSessionId] : undefined
 	const statusDot =
 		conn.status === "open" ? "fill-emerald-500 text-emerald-500" :
@@ -382,6 +407,24 @@ export function AgentChat() {
 									</span>
 								</span>
 							</div>
+							<button
+								type="button"
+								onClick={bindTelegramThread}
+								className={cn(
+									"flex size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
+									active?.thread_id != null && active.thread_id > 0
+										? "text-emerald-500"
+										: "text-muted-foreground",
+								)}
+								title={
+									active?.thread_id != null && active.thread_id > 0
+										? `Bound to Telegram thread ${active.thread_id} (click to rebind)`
+										: "Bind to Telegram thread"
+								}
+								aria-label="Bind Telegram thread"
+							>
+								<Link2 className="size-4" />
+							</button>
 							<button
 								type="button"
 								onClick={cancelActive}

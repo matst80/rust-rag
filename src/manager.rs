@@ -1009,6 +1009,22 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "acp_bind_telegram_thread",
+                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to use an existing topic, or null to let the daemon create a new topic named after the project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "thread_id": {"type": ["integer", "null"]}
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "acp_get_snapshot",
                 "description": "Return the most recent Snapshot event the WS client has seen (or null if none yet).",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
@@ -1046,6 +1062,9 @@ async fn execute_tool(
             tool_acp_passthrough(state, "set_permission_mode", &function.arguments).await
         }
         "acp_set_config" => tool_acp_passthrough(state, "set_config_option", &function.arguments).await,
+        "acp_bind_telegram_thread" => {
+            tool_acp_passthrough(state, "bind_telegram_thread", &function.arguments).await
+        }
         "acp_permission_respond" => tool_acp_permission_respond(state, &function.arguments).await,
         "acp_recent_events" => tool_acp_recent_events(state, &function.arguments).await,
         "acp_pending_permissions" => tool_acp_pending_permissions(state).await,
