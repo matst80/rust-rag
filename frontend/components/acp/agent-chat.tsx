@@ -1,7 +1,7 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Bot, Circle, Link2, Loader2, Plus, Send, Square, X } from "lucide-react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { Bot, Circle, Link2, Loader2, Plus, Send, Square, User2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { MessageMarkdown } from "@/components/messages/message-markdown"
 
@@ -32,6 +32,7 @@ interface ConnectionState {
 
 const RECONNECT_INITIAL_MS = 1000
 const RECONNECT_MAX_MS = 30000
+const NEAR_BOTTOM_PX = 80
 
 function envelopeKind(envelope: AcpEnvelope): { kind: string; payload: Record<string, unknown> } | null {
 	if (!envelope || typeof envelope !== "object") return null
@@ -311,6 +312,32 @@ export function AgentChat() {
 		send(payload)
 	}
 
+	const scrollContainerRef = useRef<HTMLDivElement>(null)
+	const messagesEndRef = useRef<HTMLDivElement>(null)
+	const wasNearBottomRef = useRef(true)
+
+	useLayoutEffect(() => {
+		const el = scrollContainerRef.current
+		if (!el) return
+		const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+		wasNearBottomRef.current = distance <= NEAR_BOTTOM_PX
+	})
+
+	useLayoutEffect(() => {
+		const el = scrollContainerRef.current
+		if (!el) return
+		if (wasNearBottomRef.current) {
+			messagesEndRef.current?.scrollIntoView({ block: "end" })
+		}
+	}, [blocks, pendingForActive])
+
+	useLayoutEffect(() => {
+		const el = scrollContainerRef.current
+		if (!el) return
+		el.scrollTop = el.scrollHeight
+		wasNearBottomRef.current = true
+	}, [activeSessionId])
+
 	const active = activeSessionId ? sessions[activeSessionId] : undefined
 	const statusDot =
 		conn.status === "open" ? "fill-emerald-500 text-emerald-500" :
@@ -463,13 +490,17 @@ export function AgentChat() {
 							</div>
 						)}
 
-						<div className="flex-1 overflow-y-auto px-4 py-4 md:px-6 flex flex-col gap-3">
+						<div
+							ref={scrollContainerRef}
+							className="flex-1 overflow-y-auto px-3 py-3 md:px-6 md:py-4"
+						>
 							{blocks.length === 0 && (
 								<div className="text-xs text-muted-foreground italic">No events yet</div>
 							)}
 							{blocks.map((b) => (
-								<BlockView key={b.key} block={b} />
+								<BlockView key={b.key} block={b} sessionAgent={active?.agent_command} />
 							))}
+							<div ref={messagesEndRef} />
 						</div>
 
 						<form
@@ -539,6 +570,8 @@ type Block =
 		ts: number
 	}
 	| { key: string; kind: "plan"; entries: { title: string; status?: string; depth: number }[]; ts: number }
+	| { key: string; kind: "status"; status: string; ts: number }
+	| { key: string; kind: "error"; text: string; ts: number }
 	| { key: string; kind: "raw"; eventKind: string; payload: unknown; ts: number }
 
 function extractText(content: unknown): string {
@@ -592,6 +625,32 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 					? (suRaw as Record<string, unknown>)
 					: (inner as Record<string, unknown>)
 			const variant = typeof suRaw === "string" ? suRaw : (su.type as string) ?? ""
+
+			if (variant === "working" || variant === "idle" || variant === "ready") {
+				// Collapse consecutive status updates: replace last status block.
+				const last = blocks[blocks.length - 1]
+				if (last && last.kind === "status") {
+					last.status = variant
+					last.ts = ts
+				} else {
+					blocks.push({ key: `s-${ev.localSeq}`, kind: "status", status: variant, ts })
+				}
+				assistantBuf = null
+				thoughtBuf = null
+				continue
+			}
+
+			if (variant === "error") {
+				const text =
+					(typeof su.content === "string" && su.content) ||
+					extractText(su.content) ||
+					(typeof su.message === "string" ? (su.message as string) : "") ||
+					"agent error"
+				blocks.push({ key: `e-${ev.localSeq}`, kind: "error", text, ts })
+				assistantBuf = null
+				thoughtBuf = null
+				continue
+			}
 
 			if (variant === "agent_message_chunk") {
 				const text = extractText(su.content)
@@ -715,61 +774,99 @@ function timeOf(ts: number): string {
 	return new Date(ts).toLocaleTimeString()
 }
 
-function BlockView({ block }: { block: Block }) {
+function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
 	if (block.kind === "user") {
 		return (
-			<div className="flex flex-col items-end">
-				<div className="max-w-[80%] rounded-lg bg-primary text-primary-foreground px-3 py-2 text-sm">
-					<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} className="prose-invert" />
+			<div className="mb-3 flex gap-3">
+				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-secondary text-secondary-foreground">
+					<User2 className="size-4" />
 				</div>
-				<div className="text-[10px] text-muted-foreground mt-1">user · {timeOf(block.ts)}</div>
+				<div className="min-w-0 flex-1">
+					<div className="flex items-baseline gap-2">
+						<span className="font-semibold text-sm">you</span>
+						<span className="text-[10px] uppercase tracking-wide text-muted-foreground">human</span>
+						<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
+					</div>
+					<div className="break-words text-sm text-foreground">
+						<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+					</div>
+				</div>
 			</div>
 		)
 	}
 	if (block.kind === "assistant") {
 		return (
-			<div className="flex flex-col items-start">
-				<div className="max-w-[90%] rounded-lg bg-accent px-3 py-2 text-sm">
-					{block.text ? (
-						<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
-					) : (
-						<span className="text-muted-foreground italic">…</span>
-					)}
+			<div className="mb-3 flex gap-3">
+				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+					<Bot className="size-4" />
 				</div>
-				<div className="text-[10px] text-muted-foreground mt-1">agent · {timeOf(block.ts)}</div>
+				<div className="min-w-0 flex-1">
+					<div className="flex items-baseline gap-2">
+						<span className="font-semibold text-sm">{sessionAgent ?? "agent"}</span>
+						<span className="text-[10px] uppercase tracking-wide text-muted-foreground">agent</span>
+						<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
+					</div>
+					<div className="break-words text-sm text-foreground">
+						{block.text ? (
+							<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+						) : (
+							<span className="text-muted-foreground italic">…</span>
+						)}
+					</div>
+				</div>
 			</div>
 		)
 	}
 	if (block.kind === "thought") {
 		return (
-			<details className="text-xs text-muted-foreground border-l-2 border-border pl-3">
-				<summary className="cursor-pointer select-none">thought · {timeOf(block.ts)}</summary>
-				<div className="mt-1 italic">
-					<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+			<div className="mb-3 flex gap-3">
+				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+					<Bot className="size-4" />
 				</div>
-			</details>
+				<div className="min-w-0 flex-1">
+					<details>
+						<summary className="cursor-pointer select-none flex items-baseline gap-2">
+							<span className="font-semibold text-sm">{sessionAgent ?? "agent"}</span>
+							<span className="text-[10px] uppercase tracking-wide text-muted-foreground">thought</span>
+							<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
+						</summary>
+						<div className="mt-1 italic text-sm text-muted-foreground">
+							<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
+						</div>
+					</details>
+				</div>
+			</div>
 		)
 	}
 	if (block.kind === "tool") {
 		const statusColor =
-			block.status === "completed" ? "text-green-500" :
+			block.status === "completed" ? "text-emerald-500" :
 			block.status === "failed" || block.status === "error" ? "text-red-500" :
 			block.status === "in_progress" ? "text-amber-500" :
 			"text-muted-foreground"
+		const statusBg =
+			block.status === "completed" ? "bg-emerald-500/10 border-emerald-500/30" :
+			block.status === "failed" || block.status === "error" ? "bg-red-500/10 border-red-500/30" :
+			block.status === "in_progress" ? "bg-amber-500/10 border-amber-500/30" :
+			"bg-muted/40 border-border"
 		return (
-			<div className="border border-border rounded px-3 py-2 text-xs">
+			<div className="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2.5">
 				<div className="flex items-center gap-2 flex-wrap">
-					<span className="font-mono text-muted-foreground">{block.toolKind ?? "tool"}</span>
-					<span className="font-medium">{block.title}</span>
-					<span className={`ml-auto ${statusColor}`}>{block.status}</span>
+					<span className="rounded bg-background px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground border border-border">
+						{block.toolKind ?? "tool"}
+					</span>
+					<span className="font-medium text-sm truncate">{block.title}</span>
+					<span className={cn("ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium border", statusBg, statusColor)}>
+						{block.status}
+					</span>
 				</div>
 				{block.locations && block.locations.length > 0 && (
-					<div className="mt-1 text-[10px] text-muted-foreground font-mono truncate">
+					<div className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
 						{block.locations.join(" · ")}
 					</div>
 				)}
 				{block.content && (
-					<pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground max-h-64 overflow-auto">
+					<pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-zinc-100 bg-zinc-900 border border-border rounded p-2 max-h-64 overflow-auto">
 						{block.content}
 					</pre>
 				)}
@@ -778,14 +875,17 @@ function BlockView({ block }: { block: Block }) {
 	}
 	if (block.kind === "plan") {
 		return (
-			<div className="border border-border rounded px-3 py-2 text-xs">
-				<div className="font-medium mb-1">Plan</div>
-				<ul className="space-y-0.5">
+			<div className="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2.5 text-xs">
+				<div className="font-semibold mb-1.5 text-sm">Plan</div>
+				<ul className="space-y-1">
 					{block.entries.map((e, i) => (
 						<li
 							key={i}
 							style={{ paddingLeft: `${(e.depth ?? 0) * 16}px` }}
-							className={`flex items-start gap-2 ${e.status === "completed" ? "line-through text-muted-foreground" : ""}`}
+							className={cn(
+								"flex items-start gap-2",
+								e.status === "completed" && "line-through text-muted-foreground",
+							)}
 						>
 							<span className="font-mono text-[10px] text-muted-foreground w-20 flex-shrink-0">{e.status ?? "pending"}</span>
 							<span>{e.title}</span>
@@ -795,8 +895,33 @@ function BlockView({ block }: { block: Block }) {
 			</div>
 		)
 	}
+	if (block.kind === "status") {
+		return (
+			<div className="mb-3 flex items-center gap-2 text-[11px] text-muted-foreground">
+				<span className={cn(
+					"inline-block size-1.5 rounded-full",
+					block.status === "working" ? "bg-amber-500 animate-pulse" :
+					block.status === "idle" || block.status === "ready" ? "bg-emerald-500" :
+					"bg-muted-foreground",
+				)} />
+				<span className="font-mono uppercase tracking-wide">{block.status}</span>
+				<span>· {timeOf(block.ts)}</span>
+			</div>
+		)
+	}
+	if (block.kind === "error") {
+		return (
+			<div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2.5">
+				<div className="flex items-center gap-2 mb-1">
+					<span className="font-semibold text-sm text-red-600 dark:text-red-400">Error</span>
+					<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
+				</div>
+				<div className="text-sm text-foreground whitespace-pre-wrap break-words">{block.text}</div>
+			</div>
+		)
+	}
 	return (
-		<details className="text-xs text-muted-foreground border-l-2 border-border pl-2">
+		<details className="mb-3 text-xs text-muted-foreground border-l-2 border-border pl-2">
 			<summary className="cursor-pointer">{block.eventKind} · {timeOf(block.ts)}</summary>
 			<pre className="whitespace-pre-wrap break-words mt-1 text-[10px]">{JSON.stringify(block.payload, null, 2)}</pre>
 		</details>
