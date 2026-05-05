@@ -10,6 +10,8 @@ export interface Entry {
   metadata: EntryMetadata
   source_id: string
   created_at: number
+  /** Optional: present on /admin/items/oversized when embedder is ready. */
+  token_count?: number
 }
 
 export interface Category {

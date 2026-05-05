@@ -452,6 +452,10 @@ pub struct AdminItemPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    /// Token count under the embedding tokenizer, untruncated. Populated by
+    /// endpoints that opt in (currently `/admin/items/oversized`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub token_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -787,6 +791,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
         .route("/admin/items/oversized", get(list_large_items))
+        .route("/admin/tokens/count", post(count_tokens))
         .route(
             "/admin/items/{id}",
             get(get_item).put(update_item).delete(delete_item),
@@ -1601,9 +1606,68 @@ async fn list_large_items(
             .await
             .map_err(ApiError::TaskJoin)?
             .map_err(ApiError::Internal)?;
+
+    // Annotate with real token counts. Skip silently if embedder isn't ready
+    // (e.g. boot) — char-only response is still useful.
+    let token_counts: Option<Vec<Option<usize>>> = if let Ok(embedder) = state.embedder.get_ready()
+    {
+        let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
+        let counts = tokio::task::spawn_blocking(move || {
+            texts
+                .into_iter()
+                .map(|t| embedder.count_tokens(&t).ok())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?;
+        Some(counts)
+    } else {
+        None
+    };
+
+    let payloads = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut p: AdminItemPayload = item.into();
+            if let Some(ref counts) = token_counts {
+                p.token_count = counts.get(i).copied().flatten();
+            }
+            p
+        })
+        .collect();
+
     Ok(Json(AdminItemsResponse {
-        items: items.into_iter().map(Into::into).collect(),
+        items: payloads,
         total_count,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CountTokensRequest {
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CountTokensResponse {
+    token_count: usize,
+    char_count: usize,
+}
+
+async fn count_tokens(
+    State(state): State<AppState>,
+    Json(body): Json<CountTokensRequest>,
+) -> Result<Json<CountTokensResponse>, ApiError> {
+    let embedder = state.embedder.get_ready()?;
+    let text = body.text;
+    let char_count = text.chars().count();
+    let token_count = tokio::task::spawn_blocking(move || embedder.count_tokens(&text))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+    Ok(Json(CountTokensResponse {
+        token_count,
+        char_count,
     }))
 }
 
@@ -2629,6 +2693,7 @@ impl From<ItemRecord> for AdminItemPayload {
             metadata: value.metadata,
             source_id: value.source_id,
             created_at: value.created_at,
+            token_count: None,
         }
     }
 }
@@ -2812,6 +2877,10 @@ mod tests {
                 .expect("embedder mutex poisoned")
                 .push(text.to_owned());
             Ok(self.embedding.clone())
+        }
+
+        fn count_tokens(&self, text: &str) -> Result<usize> {
+            Ok(text.split_whitespace().count())
         }
     }
 

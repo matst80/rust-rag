@@ -1532,6 +1532,10 @@ mod tests {
         fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
             Ok(vec![0.1, 0.2, 0.3, 0.4])
         }
+
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.split_whitespace().count())
+        }
     }
 
     #[test]

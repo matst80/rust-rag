@@ -13,6 +13,11 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 pub trait EmbeddingService: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Count tokens for `text` without the truncation/padding the embedder
+    /// applies during inference. Used by admin tools to display real token
+    /// budgets per item.
+    fn count_tokens(&self, text: &str) -> Result<usize>;
 }
 
 pub trait InferenceBackend: Send + Sync {
@@ -34,6 +39,10 @@ pub struct TokenizedInput {
 
 pub struct Embedder<B = OrtBackend> {
     tokenizer: Tokenizer,
+    /// Untruncated, unpadded clone of the same tokenizer used for accurate
+    /// token-count reporting. Inference path keeps `tokenizer` (clamped to
+    /// 512) so this avoids re-encoding twice in the hot path.
+    count_tokenizer: Tokenizer,
     backend: B,
 }
 
@@ -54,6 +63,8 @@ impl Embedder<OrtBackend> {
             .with_context(|| {
                 format!("failed to load tokenizer from {}", tokenizer_path.display())
             })?;
+        // Snapshot the raw tokenizer (no truncation/padding) for token counting.
+        let count_tokenizer = tokenizer.clone();
         tokenizer.with_padding(Some(PaddingParams {
             strategy: PaddingStrategy::Fixed(512),
             ..Default::default()
@@ -68,7 +79,11 @@ impl Embedder<OrtBackend> {
         println!("embedder: tokenizer loaded in {:?}", started.elapsed());
 
         let backend = OrtBackend::new(model_path, intra_threads, ort_dylib_path)?;
-        Ok(Self { tokenizer, backend })
+        Ok(Self {
+            tokenizer,
+            count_tokenizer,
+            backend,
+        })
     }
 }
 
@@ -77,7 +92,12 @@ where
     B: InferenceBackend,
 {
     pub fn with_backend(tokenizer: Tokenizer, backend: B) -> Self {
-        Self { tokenizer, backend }
+        let count_tokenizer = tokenizer.clone();
+        Self {
+            tokenizer,
+            count_tokenizer,
+            backend,
+        }
     }
 
     pub fn tokenize(&self, text: &str) -> Result<TokenizedInput> {
@@ -140,6 +160,15 @@ where
         let hidden_state = output.index_axis(Axis(0), 0);
 
         mean_pool_and_normalize(hidden_state, &attention_mask_values)
+    }
+
+    fn count_tokens(&self, text: &str) -> Result<usize> {
+        let encoding = self
+            .count_tokenizer
+            .encode(text, true)
+            .map_err(|error| anyhow!(error.to_string()))
+            .context("failed to tokenize input for count")?;
+        Ok(encoding.len())
     }
 }
 

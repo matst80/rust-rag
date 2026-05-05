@@ -130,6 +130,11 @@ export function LargeItemsPanel() {
                   <Badge variant="outline" className="shrink-0 text-[10px] font-bold text-amber-600 border-amber-500/30 bg-amber-500/5">
                     {item.text.length.toLocaleString()} chars
                   </Badge>
+                  {typeof item.token_count === "number" ? (
+                    <Badge variant="outline" className="shrink-0 text-[10px] font-bold text-orange-600 border-orange-500/30 bg-orange-500/5">
+                      {item.token_count.toLocaleString()} tokens
+                    </Badge>
+                  ) : null}
                   <span className="text-[10px] text-muted-foreground/50 shrink-0">
                     oversized
                   </span>
