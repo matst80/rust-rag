@@ -76,6 +76,7 @@ ZITADEL_CLIENT_SECRET ?= U8opCVRn3hrFNcyXDJpb7DLQAa5aHEikjuQn2Rr5KwG7RiofvzKifxd
 ZITADEL_REDIRECT_URI ?= https://rag.k6n.net/auth/callback
 ZITADEL_SCOPES ?= openid profile email
 IMAGE_NAME ?= matst80/rust-rag:latest
+CUDA_IMAGE_NAME ?= matst80/rust-rag:cuda
 FRONTEND_IMAGE_NAME ?= matst80/rust-rag-frontend:latest
 FRONTEND_DIR ?= $(CURDIR)/frontend
 APP_BASE_URL ?= http://localhost:3000
@@ -84,6 +85,9 @@ K8S_FRONTEND_MANIFEST ?= deploy/kubernetes/rust-rag-frontend.yaml
 K8S_FRONTEND_HOST_MANIFEST ?= deploy/kubernetes/rust-rag-frontend-host.yaml
 K8S_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-ingress.yaml
 K8S_MCP_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-mcp-ingress.yaml
+K8S_CUDA_MANIFEST ?= deploy/kubernetes/rust-rag-cuda.yaml
+K8S_RUNTIMECLASS_MANIFEST ?= deploy/kubernetes/rust-rag-runtimeclass.yaml
+K8S_NVIDIA_PLUGIN_MANIFEST ?= deploy/kubernetes/nvidia-device-plugin.yaml
 FRONTEND_DEV_PORT ?= 3000
 FRONTEND_DEV_HOST ?= 0.0.0.0
 K8S_NAMESPACE ?= home
@@ -342,6 +346,12 @@ docker-build:
 docker-push:
 	docker push "$(IMAGE_NAME)"
 
+docker-build-cuda:
+	docker build -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
+
+docker-push-cuda:
+	docker push "$(CUDA_IMAGE_NAME)"
+
 docker-run:
 	mkdir -p "$(CURDIR)/data"
 	docker run --rm \
@@ -441,6 +451,25 @@ k8s-delete-frontend-host:
 k8s-apply-ingress:
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_INGRESS_MANIFEST)"
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_MCP_INGRESS_MANIFEST)"
+
+# RuntimeClass is cluster-scoped — no namespace.
+k8s-apply-runtimeclass:
+	kubectl apply -f "$(K8S_RUNTIMECLASS_MANIFEST)"
+
+k8s-delete-runtimeclass:
+	kubectl delete -f "$(K8S_RUNTIMECLASS_MANIFEST)"
+
+k8s-apply-cuda:
+	kubectl $(KUBECTL_NS) apply -f "$(K8S_CUDA_MANIFEST)"
+
+k8s-delete-cuda:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_CUDA_MANIFEST)"
+
+k8s-apply-nvidia-plugin:
+	kubectl apply -f "$(K8S_NVIDIA_PLUGIN_MANIFEST)"
+
+k8s-delete-nvidia-plugin:
+	kubectl delete -f "$(K8S_NVIDIA_PLUGIN_MANIFEST)"
 
 k8s-delete-ingress:
 	kubectl $(KUBECTL_NS) delete -f "$(K8S_MCP_INGRESS_MANIFEST)" --ignore-not-found

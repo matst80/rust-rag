@@ -1,0 +1,68 @@
+## CUDA-enabled image for rust-rag.
+##
+## Builder uses the standard Rust toolchain; ort's `download-binaries` feature
+## fetches the ONNX Runtime shared library with the CUDA execution provider.
+## Runtime layer ships on top of `nvidia/cuda:*-cudnn-runtime` so that
+## libcuda*, libcudart, and cuDNN are present without relying on host-mounted
+## copies past what the NVIDIA container runtime injects.
+
+# Builder runs on Ubuntu 24.04 (glibc 2.39) so that the prebuilt ORT runtime
+# downloaded by `ort` (which references __isoc23_strto* from glibc 2.38+) links
+# cleanly. Same family as the runtime image below.
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		ca-certificates curl build-essential pkg-config libssl-dev \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Install rustup + stable toolchain.
+ENV RUSTUP_HOME=/usr/local/rustup \
+	CARGO_HOME=/usr/local/cargo \
+	PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+		| sh -s -- -y --profile minimal --default-toolchain 1.94.0
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY assets ./assets
+COPY mcp-stdio ./mcp-stdio
+
+RUN cargo build --release --features cuda --bin rust-rag
+
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& groupadd --system rustrag \
+	&& useradd --system --gid rustrag --create-home --home-dir /app rustrag
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/rust-rag /usr/local/bin/rust-rag
+COPY --from=builder /app/assets /app/assets
+
+RUN mkdir -p /app/data /app/data/uploads \
+	&& chown -R rustrag:rustrag /app
+
+ENV RAG_HOST=0.0.0.0 \
+	RAG_PORT=4001 \
+	RAG_DB_PATH=/app/data/rag.db \
+	RAG_UPLOAD_PATH=/app/data/uploads \
+	RAG_MODEL_PATH=/app/assets/bge-small-en-v1.5/model.onnx \
+	RAG_TOKENIZER_PATH=/app/assets/bge-small-en-v1.5/tokenizer.json \
+	RAG_EMBEDDING_DIMENSION=384 \
+	RAG_INTRA_THREADS=2 \
+	NVIDIA_VISIBLE_DEVICES=all \
+	NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+USER rustrag
+
+EXPOSE 4001
+
+CMD ["rust-rag"]

@@ -1,0 +1,10 @@
+# Cluster-scoped RuntimeClass that points containerd at the NVIDIA runtime
+# configured by `nvidia-ctk runtime configure --runtime=containerd
+# --config=/etc/k0s/containerd.d/nvidia.toml`.
+#
+# Pods opt in via spec.runtimeClassName: nvidia.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
