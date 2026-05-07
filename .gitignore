@@ -11,3 +11,4 @@ data/
 .env
 .env.*
 common-secret.yaml
+test_ort_env/
