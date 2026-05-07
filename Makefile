@@ -83,6 +83,7 @@ K8S_MANIFEST ?= deploy/kubernetes/rust-rag.yaml
 K8S_FRONTEND_MANIFEST ?= deploy/kubernetes/rust-rag-frontend.yaml
 K8S_FRONTEND_HOST_MANIFEST ?= deploy/kubernetes/rust-rag-frontend-host.yaml
 K8S_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-ingress.yaml
+K8S_MCP_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-mcp-ingress.yaml
 FRONTEND_DEV_PORT ?= 3000
 FRONTEND_DEV_HOST ?= 0.0.0.0
 K8S_NAMESPACE ?= home
@@ -439,8 +440,10 @@ k8s-delete-frontend-host:
 
 k8s-apply-ingress:
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_INGRESS_MANIFEST)"
+	kubectl $(KUBECTL_NS) apply -f "$(K8S_MCP_INGRESS_MANIFEST)"
 
 k8s-delete-ingress:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_MCP_INGRESS_MANIFEST)" --ignore-not-found
 	kubectl $(KUBECTL_NS) delete -f "$(K8S_INGRESS_MANIFEST)"
 
 k8s-apply-all: k8s-apply k8s-apply-frontend

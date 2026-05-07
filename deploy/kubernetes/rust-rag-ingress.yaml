@@ -16,7 +16,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rag-frontend
+                name: rust-rag-frontend
                 port:
                   number: 3000
           # Backend (rag-service → 10.10.11.135:4001)
@@ -28,13 +28,6 @@ spec:
                 port:
                   number: 4001
           - path: /admin
-            pathType: Prefix
-            backend:
-              service:
-                name: rag-service
-                port:
-                  number: 4001
-          - path: /mcp
             pathType: Prefix
             backend:
               service:
@@ -69,7 +62,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rag-frontend
+                name: rust-rag-frontend
                 port:
                   number: 3000
   tls:

@@ -1,0 +1,38 @@
+# Dedicated Ingress for /mcp.
+#
+# MCP streamable HTTP holds long-lived SSE-style connections; nginx defaults
+# (60s read/send timeout + proxy_buffering on + HTTP/1.0) kill these for
+# clients that don't send aggressive keepalives (e.g. VS Code Copilot).
+#
+# Splitting into its own Ingress lets us crank timeouts and disable buffering
+# without affecting normal short-lived HTTP traffic on the main ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rag-mcp-ingress
+  namespace: home
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: rag.k6n.net
+      http:
+        paths:
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service
+                port:
+                  number: 4001
+  tls:
+    - hosts:
+        - rag.k6n.net
+      secretName: rag-k6n-net-tls
