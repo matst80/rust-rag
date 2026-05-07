@@ -6,7 +6,7 @@ WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
 
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 FROM node:22-alpine AS builder
 
@@ -17,10 +17,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1 \
+	CI=true
 
 RUN pnpm build \
-	&& pnpm prune --prod
+	&& pnpm prune --prod --ignore-scripts
 
 FROM node:22-alpine AS runner
 
