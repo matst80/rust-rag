@@ -29,7 +29,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
   tls:

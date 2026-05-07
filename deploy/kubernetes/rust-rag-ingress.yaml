@@ -24,35 +24,35 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
           - path: /admin
             pathType: Prefix
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
           - path: /healthz
             pathType: Exact
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
           - path: /auth/device/code
             pathType: Exact
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
           - path: /auth/device/token
             pathType: Exact
             backend:
               service:
-                name: rag-service
+                name: rag-service-cuda
                 port:
                   number: 4001
           # Frontend catch-all (rag-frontend → 10.10.11.135:3000)
