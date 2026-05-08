@@ -90,6 +90,13 @@ pub struct AppState {
     /// Token + markdown-aware chunker. Set when bge-m3 is loaded; absent in
     /// pure-SQLite mode where the legacy char-based chunker is still used.
     pub md_chunker: Option<Arc<crate::chunking_md::MarkdownChunker>>,
+    /// Cross-encoder reranker; `None` when `RAG_RERANKER_ENABLED` is unset.
+    /// When present, hybrid search pulls the top-N candidate pool from the
+    /// store and re-scores it with this model before truncating to top-K.
+    pub reranker: Option<Arc<dyn crate::reranker::Reranker>>,
+    /// Pool size for the reranker candidate stage. Ignored when
+    /// `reranker` is None.
+    pub reranker_top_n: usize,
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
@@ -128,6 +135,8 @@ impl AppState {
             upload_path: Arc::new(upload_path),
             chunking: Arc::new(chunking),
             md_chunker: None,
+            reranker: None,
+            reranker_top_n: 50,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
@@ -142,6 +151,16 @@ impl AppState {
 
     pub fn with_manager(mut self, manager: ManagerConfig) -> Self {
         self.manager_runtime = Some(Arc::new(manager));
+        self
+    }
+
+    pub fn with_reranker(
+        mut self,
+        reranker: Arc<dyn crate::reranker::Reranker>,
+        top_n: usize,
+    ) -> Self {
+        self.reranker = Some(reranker);
+        self.reranker_top_n = top_n.max(1);
         self
     }
 
@@ -177,6 +196,8 @@ impl AppState {
             upload_path: Arc::new("uploads".to_owned()),
             chunking: Arc::new(ChunkingConfig::default()),
             md_chunker: None,
+            reranker: None,
+            reranker_top_n: 50,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -321,6 +342,13 @@ pub struct SearchRequest {
     /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
     #[serde(default = "default_hybrid")]
     pub hybrid: bool,
+    /// When `Some(true)`, run the cross-encoder reranker on the top-N
+    /// candidate pool and return the reranked top-K. `Some(false)` skips
+    /// reranking even when the server has one loaded. `None` defaults to
+    /// the server-side `RAG_RERANKER_DEFAULT` (false unless explicitly set).
+    /// Has no effect when the server is started without a reranker.
+    #[serde(default)]
+    pub rerank: Option<bool>,
     /// Maximum distance threshold for results. Default 0.8.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
@@ -417,6 +445,16 @@ pub struct SearchResultPayload {
     /// its immediate neighbours. Null for non-chunk entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_context: Option<String>,
+    /// Header breadcrumb of the chunk that scored best for this document.
+    /// Empty for non-markdown content or for stores that don't track
+    /// section paths (sqlite legacy).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub section_path: Vec<String>,
+    /// Which retrievers contributed to this hit. `["dense"]` for non-hybrid
+    /// search, `["dense","sparse"]` when hybrid RRF saw the hit on both
+    /// sides, `["sparse"]` when only sparse matched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retrievers: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -976,6 +1014,43 @@ async fn require_api_key(
         "unauthorized request: no valid credential found"
     );
 
+    // MCP HTTP clients do auto-discovery via the WWW-Authenticate header on
+    // a 401 to the resource (`/mcp`). Without this, Claude Code etc. just
+    // give up. The `resource_metadata` URL points the client at our
+    // `.well-known/oauth-protected-resource` document, which in turn names
+    // the authorization server (us).
+    let path = request.uri().path();
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        let base = request
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(|host| {
+                let proto = request
+                    .headers()
+                    .get("x-forwarded-proto")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("https");
+                format!("{}://{}", proto, host)
+            })
+            .unwrap_or_else(|| state.auth.app_base_url.clone().unwrap_or_default());
+        let resource_metadata =
+            format!("{}/.well-known/oauth-protected-resource", base.trim_end_matches('/'));
+        let www_auth = format!(
+            "Bearer realm=\"rust-rag-mcp\", resource_metadata=\"{}\"",
+            resource_metadata
+        );
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            [
+                (axum::http::header::WWW_AUTHENTICATE, www_auth),
+                (axum::http::header::CONTENT_TYPE, "application/json".to_owned()),
+            ],
+            "{\"error\":\"unauthorized\"}",
+        )
+            .into_response());
+    }
+
     Err(ApiError::Unauthorized(
         "missing x-api-key header, bearer token or valid session cookie".to_owned(),
     ))
@@ -1203,24 +1278,76 @@ pub(crate) async fn search_core(
     let source_id = request.source_id;
     let max_distance = request.max_distance;
     let now_ms = current_timestamp_millis()?;
+    // Reranker is **opt-in**: the cross-encoder adds noticeable latency
+    // (seconds on consumer GPUs without tensor cores), so we run it only
+    // when the request explicitly asks for it. `RAG_RERANKER_DEFAULT=true`
+    // flips the server-side default for callers that don't pass the field.
+    let reranker = state.reranker.clone();
+    let server_default_rerank = std::env::var("RAG_RERANKER_DEFAULT")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let do_rerank = reranker.is_some() && request.rerank.unwrap_or(server_default_rerank);
+    let reranker_top_n = state.reranker_top_n;
+    let candidate_top_k = if do_rerank {
+        reranker_top_n.max(top_k)
+    } else {
+        top_k
+    };
 
     let (results, related, raw_embedding) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
-            let raw = embedder.embed(&query)?;
+            // Hybrid path needs the bge-m3 sparse output too; embed once.
+            let (raw, sparse) = if request.hybrid {
+                embedder.embed_both(&query)?
+            } else {
+                (embedder.embed(&query)?, Vec::new())
+            };
             let embedding = if let Some(ref interest) = interest_embedding {
                 blend_embeddings(&raw, interest, 0.8)
             } else {
                 raw.clone()
             };
             let hits = if request.hybrid {
-                store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
+                store.search_hybrid(
+                    &query,
+                    &embedding,
+                    &sparse,
+                    candidate_top_k,
+                    source_id.as_deref(),
+                )?
             } else {
-                store.search(&embedding, top_k, source_id.as_deref())?
+                store.search(&embedding, candidate_top_k, source_id.as_deref())?
             };
             let mut filtered: Vec<SearchHit> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
                 .collect();
+
+            // Cross-encoder reranking. Replaces `distance` with
+            // (1 - score) so existing percentage UIs keep working
+            // (lower=better; reranker score 1.0 → distance 0.0).
+            if do_rerank {
+                if let Some(reranker) = reranker.as_ref() {
+                    let passages: Vec<&str> =
+                        filtered.iter().map(|h| h.text.as_str()).collect();
+                    if !passages.is_empty() {
+                        let scores = reranker.rerank(&query, &passages)?;
+                        for (hit, score) in filtered.iter_mut().zip(scores.into_iter()) {
+                            hit.distance = 1.0 - score;
+                            if !hit.retrievers.iter().any(|r| r == "rerank") {
+                                hit.retrievers.push("rerank".to_owned());
+                            }
+                        }
+                    }
+                    filtered.sort_by(|a, b| {
+                        a.distance
+                            .partial_cmp(&b.distance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    filtered.truncate(top_k);
+                }
+            }
 
             // Sort by decay-adjusted score but keep the raw semantic distance for
             // the response so the reported values remain pure vector/BM25 distances.
@@ -2579,6 +2706,9 @@ fn authorize_message_mutation(
             let Some(subject) = auth.subject.as_deref() else {
                 return Err(ApiError::Unauthorized("session subject missing".to_owned()));
             };
+            if is_admin_subject(Some(subject)) {
+                return Ok(());
+            }
             let owned = message_owner_subject(record) == Some(subject)
                 || (record.sender_kind == MessageSenderKind::Human && record.sender == subject);
             if owned {
@@ -2595,6 +2725,9 @@ fn authorize_message_mutation(
                     "token subject required for message mutation".to_owned(),
                 ));
             };
+            if is_admin_subject(Some(subject)) {
+                return Ok(());
+            }
             if message_owner_subject(record) == Some(subject) {
                 Ok(())
             } else {
@@ -2606,6 +2739,18 @@ fn authorize_message_mutation(
     }
 }
 
+fn is_admin_subject(subject: Option<&str>) -> bool {
+    let Some(subject) = subject else { return false };
+    let raw = match std::env::var("RAG_ADMIN_SUBJECTS") {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|allowed| allowed == subject)
+}
+
 fn authorize_channel_clear(
     auth: &RequestAuthContext,
     channel: &str,
@@ -2614,6 +2759,12 @@ fn authorize_channel_clear(
     match auth.kind {
         AuthKind::Disabled | AuthKind::ApiKey => Ok(()),
         AuthKind::McpToken | AuthKind::SessionCookie => {
+            // Admin allowlist bypasses per-message ownership: a Zitadel
+            // user listed in `RAG_ADMIN_SUBJECTS` can wipe channels they
+            // don't own messages in (cleanup of test/legacy channels).
+            if is_admin_subject(auth.subject.as_deref()) {
+                return Ok(());
+            }
             if records
                 .iter()
                 .all(|record| authorize_message_mutation(auth, record, "clear").is_ok())
@@ -2712,6 +2863,8 @@ impl From<SearchHit> for SearchResultPayload {
             created_at: value.created_at,
             distance: value.distance,
             chunk_context: None,
+            section_path: value.section_path,
+            retrievers: value.retrievers,
         }
     }
 }
@@ -3021,6 +3174,7 @@ mod tests {
             &self,
             _query_text: &str,
             query_embedding: &[f32],
+            _query_sparse: &[(u32, f32)],
             top_k: usize,
             source_id: Option<&str>,
         ) -> Result<Vec<SearchHit>> {

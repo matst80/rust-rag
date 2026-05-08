@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Wand2, ChevronDown, Sparkles } from "lucide-react"
+import { Wand2, ChevronDown, Sparkles, Layers, Award } from "lucide-react"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import {
@@ -21,6 +21,10 @@ interface SearchInputProps {
   onCategoryFilterChange: (category: string | null) => void
   isAssisted: boolean
   onAssistedChange: (enabled: boolean) => void
+  isHybrid: boolean
+  onHybridChange: (enabled: boolean) => void
+  isRerank: boolean
+  onRerankChange: (enabled: boolean) => void
   onSubmit: () => void
   isLoading?: boolean
 }
@@ -38,6 +42,10 @@ export function SearchInput({
   onCategoryFilterChange,
   isAssisted,
   onAssistedChange,
+  isHybrid,
+  onHybridChange,
+  isRerank,
+  onRerankChange,
   onSubmit,
   isLoading,
 }: SearchInputProps) {
@@ -97,6 +105,44 @@ export function SearchInput({
               <Sparkles className={cn("size-3", isAssisted && "animate-pulse")} />
               Assisted
             </button>
+
+            {!isAssisted && (
+              <button
+                type="button"
+                onClick={() => onHybridChange(!isHybrid)}
+                title={isHybrid
+                  ? "Hybrid retrieval (dense + sparse RRF). Click to switch to dense-only."
+                  : "Dense-only retrieval. Click to enable hybrid (dense + sparse RRF)."}
+                className={cn(
+                  "h-8 px-2.5 flex items-center gap-1.5 border rounded-md font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all",
+                  isHybrid
+                    ? "border-primary/30 bg-primary/5 text-primary"
+                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70"
+                )}
+              >
+                <Layers className="size-3" />
+                {isHybrid ? "Hybrid" : "Dense"}
+              </button>
+            )}
+
+            {!isAssisted && (
+              <button
+                type="button"
+                onClick={() => onRerankChange(!isRerank)}
+                title={isRerank
+                  ? "Cross-encoder reranker active. Click to disable."
+                  : "Click to enable bge-reranker-v2-m3 reranking on top-50 candidates."}
+                className={cn(
+                  "h-8 px-2.5 flex items-center gap-1.5 border rounded-md font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all",
+                  isRerank
+                    ? "border-primary/30 bg-primary/5 text-primary"
+                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70"
+                )}
+              >
+                <Award className="size-3" />
+                Rerank
+              </button>
+            )}
 
             {!isAssisted && (
               <Select

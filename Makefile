@@ -112,7 +112,7 @@ K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -370,6 +370,12 @@ export-bge-m3:
 # once the runtime backend is wired for sparse. Idempotent via marker file.
 export-bge-m3-sparse:
 	@bash scripts/export_bge_m3_sparse.sh
+
+# Phase 3 export: bge-reranker-v2-m3 cross-encoder. Output goes to
+# assets/bge-reranker-v2-m3/. Optional — only needed when running with
+# RAG_RERANKER_ENABLED=true.
+export-bge-reranker:
+	@bash scripts/export_bge_reranker_v2_m3.sh
 
 # Pull the live SQLite DB out of the rust-rag-cuda pod via kubectl-cp. WAL +
 # SHM are copied alongside `rag.db` so SQLite can recover any in-flight

@@ -98,8 +98,8 @@ function GraphViewContent() {
   const debouncedTargetSearch = useDebounce(targetSearch, 300)
 
   // Use search endpoint for selectors
-  const { data: explorerResults, isLoading: isExplorerSearching } = useSearch(debouncedExplorerSearch, undefined, 5)
-  const { data: targetResults, isLoading: isTargetSearching } = useSearch(debouncedTargetSearch, undefined, 5)
+  const { data: explorerResults, isLoading: isExplorerSearching } = useSearch(debouncedExplorerSearch, undefined, true, 5)
+  const { data: targetResults, isLoading: isTargetSearching } = useSearch(debouncedTargetSearch, undefined, true, 5)
 
   const { data: entries } = useItems()
   const { trigger: createEdge, isMutating: isCreating } = useCreateEdge()
@@ -132,8 +132,9 @@ function GraphViewContent() {
   // even if they aren't explicitly connected in the graph DB.
   const centerEntry = useMemo(() => entries?.items.find(e => e.id === centerNode), [entries, centerNode])
   const { data: centerSemanticResults } = useSearch(
-    centerEntry?.text ? centerEntry.text : "", 
-    undefined, 
+    centerEntry?.text ? centerEntry.text : "",
+    undefined,
+    true,
     8
   )
 

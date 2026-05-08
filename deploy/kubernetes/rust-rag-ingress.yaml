@@ -55,6 +55,30 @@ spec:
                 name: rag-service-cuda
                 port:
                   number: 4001
+          # OAuth-MCP discovery + endpoints. MCP HTTP clients hit
+          # /.well-known/* on a 401 from /mcp. nginx-ingress rejects
+          # Exact pathType on dotted paths, so ImplementationSpecific.
+          - path: /.well-known/oauth-protected-resource
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rag-service-cuda
+                port:
+                  number: 4001
+          - path: /.well-known/oauth-authorization-server
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: rag-service-cuda
+                port:
+                  number: 4001
+          - path: /oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service-cuda
+                port:
+                  number: 4001
           # Frontend catch-all (rag-frontend → 10.10.11.135:3000)
           # Handles /auth/device approval UI, /auth/login, /auth/callback,
           # /bff/* server proxies, and the Next.js app.

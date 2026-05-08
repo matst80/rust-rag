@@ -748,6 +748,8 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 created_at: related.created_at,
                 distance: related.distance,
                 chunk_context: None,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

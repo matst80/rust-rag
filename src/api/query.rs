@@ -307,8 +307,14 @@ async fn run_search(
     let source_owned = source_id.map(|s| s.to_owned());
 
     let results = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
-        let embedding = embedder.embed(&query_owned)?;
-        let hits = store.search_hybrid(&query_owned, &embedding, top_k, source_owned.as_deref())?;
+        let (embedding, sparse) = embedder.embed_both(&query_owned)?;
+        let hits = store.search_hybrid(
+            &query_owned,
+            &embedding,
+            &sparse,
+            top_k,
+            source_owned.as_deref(),
+        )?;
         Ok(hits
             .into_iter()
             .filter(|hit| hit.distance <= max_distance)

@@ -20,6 +20,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const [submittedQuery, setSubmittedQuery] = useState("")
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [isAssisted, setIsAssisted] = useState(defaultAssisted)
+  const [isHybrid, setIsHybrid] = useState(true)
+  const [isRerank, setIsRerank] = useState(false)
 
   // Assisted mode state
   const [isStreaming, setIsStreaming] = useState(false)
@@ -31,7 +33,10 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   // Basic search hook
   const { data: basicResults, isLoading: isBasicLoading } = useSearch(
     !isAssisted ? submittedQuery : "",
-    categoryFilter ?? undefined
+    categoryFilter ?? undefined,
+    isHybrid,
+    10,
+    isRerank
   )
 
   const runAssisted = async (q: string) => {
@@ -141,6 +146,10 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                 onCategoryFilterChange={setCategoryFilter}
                 isAssisted={isAssisted}
                 onAssistedChange={setIsAssisted}
+                isHybrid={isHybrid}
+                onHybridChange={setIsHybrid}
+                isRerank={isRerank}
+                onRerankChange={setIsRerank}
                 onSubmit={handleSubmit}
                 isLoading={isLoading}
               />
@@ -156,6 +165,10 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                 onCategoryFilterChange={setCategoryFilter}
                 isAssisted={isAssisted}
                 onAssistedChange={setIsAssisted}
+                isHybrid={isHybrid}
+                onHybridChange={setIsHybrid}
+                isRerank={isRerank}
+                onRerankChange={setIsRerank}
                 onSubmit={handleSubmit}
                 isLoading={isLoading}
               />

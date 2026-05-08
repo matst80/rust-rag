@@ -431,18 +431,26 @@ impl VectorStore for PostgresVectorStore {
 
         self.block(async move {
             let client = pool.get().await?;
-            // Per-document min distance over chunks. Phase 2 will replace this
-            // with RRF-aggregated dense + sparse rankings (see retrieval-shape
-            // notes in docs/postgres-migration.md).
+            // Per-document min distance over chunks. The DISTINCT ON pattern
+            // pulls the section_path of the closest chunk (parent-section
+            // breadcrumb for the UI / LLM) in the same query.
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
-                            MIN(c.dense_embedding <=> $1::vector) AS distance \
-                     FROM chunks c \
-                     JOIN documents d ON d.id = c.document_id \
-                     WHERE ($2::text IS NULL OR d.source_id = $2) \
-                     GROUP BY d.id \
-                     ORDER BY distance ASC \
+                            ranked.distance, ranked.section_path \
+                     FROM ( \
+                         SELECT DISTINCT ON (c.document_id) \
+                                c.document_id, \
+                                (c.dense_embedding <=> $1::vector) AS distance, \
+                                c.section_path \
+                         FROM chunks c \
+                         JOIN documents d ON d.id = c.document_id \
+                         WHERE c.dense_embedding IS NOT NULL \
+                           AND ($2::text IS NULL OR d.source_id = $2) \
+                         ORDER BY c.document_id, c.dense_embedding <=> $1::vector \
+                     ) ranked \
+                     JOIN documents d ON d.id = ranked.document_id \
+                     ORDER BY ranked.distance ASC \
                      LIMIT $3",
                     &[&vector, &source, &limit],
                 )
@@ -452,6 +460,7 @@ impl VectorStore for PostgresVectorStore {
                 .map(|row| {
                     let item = row_to_item(row)?;
                     let distance: f64 = row.try_get("distance")?;
+                    let section_path: Option<Vec<String>> = row.try_get("section_path")?;
                     Ok(SearchHit {
                         id: item.id.clone(),
                         text: item.text.clone(),
@@ -459,6 +468,8 @@ impl VectorStore for PostgresVectorStore {
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
                         distance: distance as f32,
+                        section_path: section_path.unwrap_or_default(),
+                        retrievers: vec!["dense".to_owned()],
                     })
                 })
                 .collect()
@@ -469,11 +480,170 @@ impl VectorStore for PostgresVectorStore {
         &self,
         _query_text: &str,
         query_embedding: &[f32],
+        query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
-        // Sparse retriever lands in phase 2; dense-only fallback for now.
-        self.search(query_embedding, top_k, source_id)
+        if query_embedding.is_empty() {
+            anyhow::bail!("query embedding cannot be empty");
+        }
+        // Empty sparse query collapses to dense-only RRF: useful when the
+        // embedder couldn't produce a sparse output (legacy export, etc.)
+        // or when callers explicitly want dense.
+        if query_sparse.is_empty() {
+            return self.search(query_embedding, top_k, source_id);
+        }
+
+        let pool = self.pool.clone();
+        let dense_vec = pgvector::Vector::from(query_embedding.to_vec());
+        let sparse_vec = match build_sparsevec(query_sparse) {
+            Some(v) => v,
+            None => return self.search(query_embedding, top_k, source_id),
+        };
+        let limit = top_k as i64;
+        let source = source_id.map(str::to_owned);
+        let half_life_days: f64 = std::env::var("RAG_RECENCY_HALF_LIFE_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f64| *v > 0.0)
+            .unwrap_or(365.0);
+
+        // Reciprocal Rank Fusion over per-document scores.
+        //
+        // For each retriever (dense, sparse) we rank all chunks by similarity,
+        // sum 1/(60 + rank) per document so a document with multiple
+        // mid-rank chunks beats a single best-chunk doc, and full-outer-join
+        // the per-doc scores. Final ordering applies an exponential recency
+        // decay using `documents.updated_at`.
+        //
+        // The 60 constant is the canonical RRF k. We pull 200 chunks per
+        // retriever — enough to form a stable per-doc fusion at top_k≤50,
+        // overkill above that; tune via $4 if needed.
+        const RRF_CANDIDATE_LIMIT: i64 = 200;
+        const RRF_K: f64 = 60.0;
+
+        self.block(async move {
+            let client = pool.get().await?;
+            // SQL is verbose because we materialize ranks once and reuse
+            // them across CTEs. Hand-formatted for readability — tokio-postgres
+            // can't bind into a CTE inside a `WITH RECURSIVE` rewrite.
+            // CTEs:
+            //   dense / sparse — per-chunk rank within each retriever (top-N)
+            //   *_doc          — per-document RRF score from chunk ranks
+            //   *_best_chunk   — section_path of the highest-ranked chunk per doc
+            //   fused          — full outer join of the per-doc scores
+            // The final SELECT picks section_path from the dense best chunk
+            // when available, otherwise the sparse one — both come from real
+            // chunks of the same document.
+            let sql = "
+                WITH dense AS (
+                    SELECT c.document_id,
+                           c.section_path,
+                           ROW_NUMBER() OVER (ORDER BY c.dense_embedding <=> $1::vector) AS rank
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.dense_embedding IS NOT NULL
+                      AND ($3::text IS NULL OR d.source_id = $3)
+                    ORDER BY c.dense_embedding <=> $1::vector
+                    LIMIT $5
+                ),
+                sparse AS (
+                    SELECT c.document_id,
+                           c.section_path,
+                           ROW_NUMBER() OVER (ORDER BY c.sparse_embedding <=> $2::sparsevec) AS rank
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE c.sparse_embedding IS NOT NULL
+                      AND ($3::text IS NULL OR d.source_id = $3)
+                    ORDER BY c.sparse_embedding <=> $2::sparsevec
+                    LIMIT $5
+                ),
+                dense_doc AS (
+                    SELECT document_id, SUM(1.0 / ($6::float + rank)) AS score
+                    FROM dense GROUP BY document_id
+                ),
+                sparse_doc AS (
+                    SELECT document_id, SUM(1.0 / ($6::float + rank)) AS score
+                    FROM sparse GROUP BY document_id
+                ),
+                dense_best AS (
+                    SELECT DISTINCT ON (document_id) document_id, section_path
+                    FROM dense ORDER BY document_id, rank ASC
+                ),
+                sparse_best AS (
+                    SELECT DISTINCT ON (document_id) document_id, section_path
+                    FROM sparse ORDER BY document_id, rank ASC
+                ),
+                fused AS (
+                    SELECT COALESCE(d.document_id, s.document_id) AS document_id,
+                           COALESCE(d.score, 0.0) + COALESCE(s.score, 0.0) AS rrf_score,
+                           (d.score IS NOT NULL) AS matched_dense,
+                           (s.score IS NOT NULL) AS matched_sparse
+                    FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
+                )
+                SELECT d.id, d.content, d.metadata, d.source_id, d.created_at,
+                       (f.rrf_score
+                          * exp(- EXTRACT(EPOCH FROM (now() - d.updated_at))
+                                / (86400.0 * $7::float))
+                       )::FLOAT8 AS final_score,
+                       f.matched_dense,
+                       f.matched_sparse,
+                       COALESCE(db.section_path, sb.section_path) AS section_path
+                FROM fused f
+                JOIN documents d ON d.id = f.document_id
+                LEFT JOIN dense_best  db ON db.document_id = f.document_id
+                LEFT JOIN sparse_best sb ON sb.document_id = f.document_id
+                ORDER BY final_score DESC
+                LIMIT $4
+            ";
+            let rows = client
+                .query(
+                    sql,
+                    &[
+                        &dense_vec,                  // $1
+                        &sparse_vec,                 // $2
+                        &source,                     // $3
+                        &limit,                      // $4
+                        &RRF_CANDIDATE_LIMIT,        // $5
+                        &RRF_K,                      // $6
+                        &half_life_days,             // $7
+                    ],
+                )
+                .await?;
+
+            rows.iter()
+                .map(|row| {
+                    let item = row_to_item(row)?;
+                    let final_score: f64 = row.try_get("final_score")?;
+                    let matched_dense: bool = row.try_get("matched_dense")?;
+                    let matched_sparse: bool = row.try_get("matched_sparse")?;
+                    let section_path: Option<Vec<String>> = row.try_get("section_path")?;
+                    // SearchHit.distance is "lower is better" on the dense
+                    // path (cosine distance, 0..2). RRF scores are
+                    // unbounded positive, so map them onto the same shape
+                    // via 1 - tanh(score * 10):
+                    //   score=0    -> distance=1.0  (no signal)
+                    //   score=0.05 -> distance≈0.54
+                    //   score=0.3  -> distance≈0.005
+                    // Keeps frontend percentage bars (computed as
+                    // `1 - distance`) sensible and monotonic in RRF score.
+                    let pseudo = 1.0 - (final_score * 10.0).tanh();
+                    let mut retrievers = Vec::with_capacity(2);
+                    if matched_dense  { retrievers.push("dense".to_owned());  }
+                    if matched_sparse { retrievers.push("sparse".to_owned()); }
+                    Ok(SearchHit {
+                        id: item.id.clone(),
+                        text: item.text.clone(),
+                        metadata: item.metadata.clone(),
+                        source_id: item.source_id.clone(),
+                        created_at: item.created_at,
+                        distance: pseudo as f32,
+                        section_path: section_path.unwrap_or_default(),
+                        retrievers,
+                    })
+                })
+                .collect()
+        })
     }
 
     fn list_categories(&self) -> Result<Vec<CategorySummary>> {
@@ -636,6 +806,8 @@ impl VectorStore for PostgresVectorStore {
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
                         distance: distance as f32,
+                        section_path: Vec::new(),
+                        retrievers: vec!["dense".to_owned()],
                     })
                 })
                 .collect()
@@ -808,8 +980,18 @@ impl VectorStore for PostgresVectorStore {
             } else {
                 "AND da.source_id = db.source_id"
             };
+            // Hybrid similarity:
+            //   dense_pairs / sparse_pairs — per-(da, db) MIN cosine distance
+            //   per retriever, canonical ordering enforced by `db.id > da.id`.
+            //   ranked_*  — per-retriever ranks within each origin / target.
+            //   fused     — UNION + per-pair RRF score across retrievers; a pair
+            //   that scores in only one retriever still appears (single-side
+            //   contribution), but pairs that score in both retrievers win.
+            // The dense_distance fallback is reported in metadata so the UI
+            // can keep showing a meaningful number; pairs that only matched
+            // via sparse get NULL dense_distance (and `retrievers='sparse'`).
             let sql = format!(
-                "WITH cross_doc AS ( \
+                "WITH dense_pairs AS ( \
                      SELECT da.id AS from_id, db.id AS to_id, \
                             MIN(ca.dense_embedding <=> cb.dense_embedding)::REAL AS distance \
                      FROM chunks ca \
@@ -821,16 +1003,53 @@ impl VectorStore for PostgresVectorStore {
                        {source_filter} \
                      GROUP BY da.id, db.id \
                  ), \
-                 ranked AS ( \
+                 sparse_pairs AS ( \
+                     SELECT da.id AS from_id, db.id AS to_id, \
+                            MIN(ca.sparse_embedding <=> cb.sparse_embedding)::REAL AS distance \
+                     FROM chunks ca \
+                     JOIN documents da ON da.id = ca.document_id \
+                     JOIN chunks cb ON cb.document_id > ca.document_id \
+                     JOIN documents db ON db.id = cb.document_id \
+                     WHERE ca.sparse_embedding IS NOT NULL \
+                       AND cb.sparse_embedding IS NOT NULL \
+                       {source_filter} \
+                     GROUP BY da.id, db.id \
+                 ), \
+                 ranked_dense AS ( \
                      SELECT from_id, to_id, distance, \
                             ROW_NUMBER() OVER (PARTITION BY from_id ORDER BY distance ASC, to_id ASC) AS rk_a, \
                             ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY distance ASC, from_id ASC) AS rk_b \
-                     FROM cross_doc \
-                     WHERE distance <= $1 \
+                     FROM dense_pairs WHERE distance <= $1 \
+                 ), \
+                 ranked_sparse AS ( \
+                     SELECT from_id, to_id, distance, \
+                            ROW_NUMBER() OVER (PARTITION BY from_id ORDER BY distance ASC, to_id ASC) AS rk_a, \
+                            ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY distance ASC, from_id ASC) AS rk_b \
+                     FROM sparse_pairs \
+                 ), \
+                 fused AS ( \
+                     SELECT COALESCE(d.from_id, s.from_id) AS from_id, \
+                            COALESCE(d.to_id,   s.to_id)   AS to_id, \
+                            d.distance AS dense_distance, \
+                            s.distance AS sparse_distance, \
+                            (COALESCE(1.0/(60 + LEAST(d.rk_a, d.rk_b)), 0.0) \
+                              + COALESCE(1.0/(60 + LEAST(s.rk_a, s.rk_b)), 0.0))::FLOAT8 AS rrf_score, \
+                            (d.distance IS NOT NULL) AS matched_dense, \
+                            (s.distance IS NOT NULL) AS matched_sparse \
+                     FROM ranked_dense d FULL OUTER JOIN ranked_sparse s \
+                       ON s.from_id = d.from_id AND s.to_id = d.to_id \
+                 ), \
+                 ranked AS ( \
+                     SELECT *, \
+                            ROW_NUMBER() OVER (PARTITION BY from_id ORDER BY rrf_score DESC) AS rk_a, \
+                            ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY rrf_score DESC) AS rk_b \
+                     FROM fused \
                  ) \
-                 SELECT from_id, to_id, distance FROM ranked \
+                 SELECT from_id, to_id, dense_distance, sparse_distance, rrf_score, \
+                        matched_dense, matched_sparse \
+                 FROM ranked \
                  WHERE LEAST(rk_a, rk_b) <= $2 \
-                 ORDER BY from_id, to_id"
+                 ORDER BY from_id, rrf_score DESC, to_id"
             );
             let max_distance = cfg.similarity_max_distance;
             let top_k = cfg.similarity_top_k as i64;
@@ -842,9 +1061,24 @@ impl VectorStore for PostgresVectorStore {
             for row in rows {
                 let from_id: String = row.try_get("from_id")?;
                 let to_id: String = row.try_get("to_id")?;
-                let distance: f32 = row.try_get("distance")?;
-                let weight = 1.0_f32 / (1.0 + distance);
-                let metadata = serde_json::json!({ "distance": distance });
+                let dense_distance: Option<f32> = row.try_get("dense_distance")?;
+                let sparse_distance: Option<f32> = row.try_get("sparse_distance")?;
+                let rrf_score: f64 = row.try_get("rrf_score")?;
+                let matched_dense: bool = row.try_get("matched_dense")?;
+                let matched_sparse: bool = row.try_get("matched_sparse")?;
+                // weight ∈ (0, 1]; rrf_score is bounded by 2/(60+1) ≈ 0.0328 in
+                // the limit (rank 1 from both retrievers), so scale to make the
+                // weight column carry the signal cleanly.
+                let weight = (rrf_score * 30.0).min(1.0).max(0.0) as f32;
+                let mut retrievers: Vec<&'static str> = Vec::with_capacity(2);
+                if matched_dense  { retrievers.push("dense");  }
+                if matched_sparse { retrievers.push("sparse"); }
+                let metadata = serde_json::json!({
+                    "dense_distance": dense_distance,
+                    "sparse_distance": sparse_distance,
+                    "rrf_score": rrf_score,
+                    "retrievers": retrievers,
+                });
                 let edge_id = format!("similarity:{from_id}:{to_id}");
                 tx.execute(
                     "INSERT INTO graph_edges \

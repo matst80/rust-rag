@@ -82,14 +82,22 @@ export function useLlmRechunkItem(id: string) {
 }
 
 // Search hook
-export function useSearch(query: string, sourceId?: string, topK: number = 10) {
+export function useSearch(
+  query: string,
+  sourceId?: string,
+  hybrid: boolean = true,
+  topK: number = 10,
+  rerank: boolean | undefined = undefined,
+) {
   return useSWR<SearchResultsBundle>(
-    query ? ["search", query, sourceId, topK] : null,
+    query ? ["search", query, sourceId, hybrid, topK, rerank ?? null] : null,
     () =>
       api.search({
         query,
         source_id: sourceId,
         top_k: topK,
+        hybrid,
+        ...(rerank !== undefined && { rerank }),
       }),
     {
       revalidateOnFocus: false,

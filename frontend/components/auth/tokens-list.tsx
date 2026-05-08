@@ -42,6 +42,29 @@ function formatRelative(ms: number | null | undefined): string {
 	return date.toLocaleString()
 }
 
+function buildMcpConfig(token: string, name: string): string {
+	const url =
+		typeof window !== "undefined"
+			? `${window.location.origin}/mcp`
+			: "https://rag.k6n.net/mcp"
+	const safeKey = name
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/^-+|-+$/g, "") || "rust-rag"
+	const config = {
+		mcpServers: {
+			[safeKey]: {
+				url,
+				headers: {
+					Authorization: `Bearer ${token}`,
+				},
+			},
+		},
+	}
+	return JSON.stringify(config, null, 2)
+}
+
 function NewTokenBanner({
 	token,
 	onDismiss,
@@ -49,16 +72,24 @@ function NewTokenBanner({
 	token: CreateTokenResponse
 	onDismiss: () => void
 }) {
-	const [copied, setCopied] = useState(false)
+	const [copiedToken, setCopiedToken] = useState(false)
+	const [copiedConfig, setCopiedConfig] = useState(false)
+	const config = buildMcpConfig(token.token, token.name)
 
-	async function handleCopy() {
+	async function handleCopyToken() {
 		await navigator.clipboard.writeText(token.token)
-		setCopied(true)
-		setTimeout(() => setCopied(false), 2000)
+		setCopiedToken(true)
+		setTimeout(() => setCopiedToken(false), 2000)
+	}
+
+	async function handleCopyConfig() {
+		await navigator.clipboard.writeText(config)
+		setCopiedConfig(true)
+		setTimeout(() => setCopiedConfig(false), 2000)
 	}
 
 	return (
-		<div className="rounded-md border border-green-500 bg-green-50 dark:bg-green-950 p-4 space-y-2">
+		<div className="rounded-md border border-green-500 bg-green-50 dark:bg-green-950 p-4 space-y-3">
 			<p className="text-sm font-medium text-green-800 dark:text-green-200">
 				Token created — copy it now, it won&apos;t be shown again.
 			</p>
@@ -66,14 +97,46 @@ function NewTokenBanner({
 				<code className="flex-1 rounded bg-white dark:bg-black border px-2 py-1 text-xs font-mono break-all">
 					{token.token}
 				</code>
-				<Button variant="outline" size="icon" onClick={handleCopy} title="Copy token">
-					{copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
+				<Button variant="outline" size="icon" onClick={handleCopyToken} title="Copy token">
+					{copiedToken ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
 				</Button>
 			</div>
 			<p className="text-xs text-muted-foreground">
 				Name: <strong>{token.name}</strong>
 				{token.expires_at ? ` · Expires ${formatRelative(token.expires_at)}` : ""}
 			</p>
+
+			<div className="space-y-1">
+				<div className="flex items-center justify-between">
+					<p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+						MCP client config
+					</p>
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={handleCopyConfig}
+						className="h-7 px-2"
+					>
+						{copiedConfig ? (
+							<>
+								<Check className="h-3 w-3 mr-1 text-green-600" /> Copied
+							</>
+						) : (
+							<>
+								<Copy className="h-3 w-3 mr-1" /> Copy config
+							</>
+						)}
+					</Button>
+				</div>
+				<pre className="rounded bg-white dark:bg-black border px-2 py-2 text-[11px] font-mono overflow-x-auto whitespace-pre">
+					{config}
+				</pre>
+				<p className="text-[11px] text-muted-foreground">
+					Drop into the <code className="font-mono">mcpServers</code> block of your client
+					config (Claude Desktop, Claude Code, Cursor, etc.). Streamable-HTTP transport.
+				</p>
+			</div>
+
 			<Button variant="outline" size="sm" onClick={onDismiss}>
 				Done
 			</Button>
@@ -113,14 +176,13 @@ export function TokensList() {
 		}
 	}
 
-	async function handleCreate(e: React.FormEvent) {
-		e.preventDefault()
+	async function createToken(name: string) {
 		setCreating(true)
 		try {
 			const response = await fetch(TOKENS_ENDPOINT, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ name: newName }),
+				body: JSON.stringify({ name }),
 			})
 			if (!response.ok) {
 				const body = (await response.json().catch(() => ({}))) as {
@@ -136,6 +198,20 @@ export function TokensList() {
 		} finally {
 			setCreating(false)
 		}
+	}
+
+	async function handleCreate(e: React.FormEvent) {
+		e.preventDefault()
+		await createToken(newName)
+	}
+
+	async function handleQuickCreate() {
+		const ts = new Date()
+			.toISOString()
+			.replace(/[:.]/g, "-")
+			.replace("T", "_")
+			.slice(0, 16)
+		await createToken(`manual-${ts}`)
 	}
 
 	if (isLoading) {
@@ -166,6 +242,16 @@ export function TokensList() {
 				<Button type="submit" disabled={creating || !newName.trim()} size="sm">
 					<Plus className="h-4 w-4 mr-1" />
 					{creating ? "Creating…" : "Create token"}
+				</Button>
+				<Button
+					type="button"
+					variant="outline"
+					size="sm"
+					disabled={creating}
+					onClick={handleQuickCreate}
+					title="Auto-name and create a token, then show MCP client config to paste"
+				>
+					{creating ? "Creating…" : "Quick MCP token"}
 				</Button>
 			</form>
 

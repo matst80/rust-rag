@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { Share2, ChevronRight, Database, Clock } from "lucide-react"
+import { Share2, ChevronRight, Database, Clock, Layers, ChevronsRight } from "lucide-react"
 import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils"
 import { ComboButton } from "@/components/ui/combo-button"
 import {
@@ -26,11 +26,27 @@ function scoreColor(pct: number) {
   return "oklch(0.42 0 0)"                           // muted
 }
 
+function retrieverLabel(retrievers: string[]): { label: string; tone: string } {
+  const has = (r: string) => retrievers.includes(r)
+  const rer = has("rerank")
+  if (has("dense") && has("sparse")) {
+    return { label: rer ? "D+S+R" : "D+S", tone: "oklch(0.916 0.175 156.8)" }
+  }
+  if (has("sparse")) return { label: rer ? "S+R" : "S", tone: "oklch(0.78 0.18 65)" }
+  if (has("dense"))  return { label: rer ? "D+R" : "D", tone: "oklch(0.9 0.148 196.3)" }
+  if (rer)           return { label: "R",   tone: "oklch(0.916 0.175 156.8)" }
+  return { label: "—", tone: "oklch(0.42 0 0)" }
+}
+
 export function EntryCard({ entry, index = 0, onDelete, showScore = false }: EntryCardProps) {
   const isSearchResult = "score" in entry
-  const score = isSearchResult ? (entry as SearchResult).score : null
+  const search = isSearchResult ? (entry as SearchResult) : null
+  const score = search?.score ?? null
   const scorePercent = score !== null ? Math.round(score * 100) : null
   const sourceColor = stringToHslColor(entry.source_id, 60, 45)
+  const sectionPath = search?.section_path?.filter((s) => s.length > 0) ?? []
+  const retrievers = search?.retrievers ?? []
+  const retrieverChip = retrievers.length > 0 ? retrieverLabel(retrievers) : null
 
   return (
     <Link
@@ -86,6 +102,21 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
             {formatRelativeTime(entry.created_at)}
           </div>
 
+          {showScore && retrieverChip && (
+            <div
+              title={`Matched by: ${retrievers.join(" + ")}`}
+              className="flex items-center gap-1 px-1.5 py-0.5 border font-mono text-[10px] font-bold uppercase tracking-wider"
+              style={{
+                color: retrieverChip.tone,
+                borderColor: `${retrieverChip.tone}40`,
+                backgroundColor: `${retrieverChip.tone}10`,
+              }}
+            >
+              <Layers className="size-2.5" />
+              {retrieverChip.label}
+            </div>
+          )}
+
           {showScore && scorePercent !== null && (
             <div
               className="font-mono text-[10px] font-bold uppercase tracking-wider ml-auto"
@@ -95,6 +126,18 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
             </div>
           )}
         </div>
+
+        {/* Section path breadcrumb (chunk's header hierarchy) */}
+        {showScore && sectionPath.length > 0 && (
+          <div className="flex items-center gap-0.5 flex-wrap font-mono text-[10px] text-muted-foreground/70">
+            {sectionPath.map((part, i) => (
+              <span key={i} className="flex items-center gap-0.5">
+                {i > 0 && <ChevronsRight className="size-2.5 opacity-50" />}
+                <span className="truncate max-w-[14rem]">{part}</span>
+              </span>
+            ))}
+          </div>
+        )}
 
         {/* Text */}
         <p className="line-clamp-2 text-sm text-foreground/80 group-hover:text-foreground transition-colors leading-relaxed">

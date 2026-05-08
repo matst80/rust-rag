@@ -873,9 +873,19 @@ async fn search_entries_tool(
 
     let results =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
-            let embedding = embedder.embed(&query)?;
+            let (embedding, sparse) = if hybrid {
+                embedder.embed_both(&query)?
+            } else {
+                (embedder.embed(&query)?, Vec::new())
+            };
             let hits = if hybrid {
-                store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())?
+                store.search_hybrid(
+                    &query,
+                    &embedding,
+                    &sparse,
+                    top_k,
+                    source_id.as_deref(),
+                )?
             } else {
                 store.search(&embedding, top_k, source_id.as_deref())?
             };

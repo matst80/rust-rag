@@ -107,6 +107,19 @@ pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/device/code", post(device_code))
         .route("/auth/device/token", post(device_token))
+        // OAuth-MCP discovery + RFC 6749 token endpoint. Lets MCP HTTP
+        // clients (Claude Code, Cursor) auto-discover and run the device
+        // flow without hand-pasted tokens. See `oauth_*` handlers below.
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_authorization_server_metadata),
+        )
+        .route("/oauth/register", post(oauth_register))
+        .route("/oauth/token", post(oauth_token))
 }
 
 pub(super) fn session_routes(state: AppState) -> Router<AppState> {
@@ -642,6 +655,133 @@ fn device_status_name(status: DeviceAuthStatus) -> &'static str {
         DeviceAuthStatus::Denied => "denied",
         DeviceAuthStatus::Expired => "expired",
     }
+}
+
+// ---- OAuth-MCP (RFC 8414 / 8628 / 7591) ---------------------------------
+
+/// `GET /.well-known/oauth-protected-resource` — RFC 9728. Tells MCP HTTP
+/// clients which authorization server backs the `/mcp` resource.
+async fn oauth_protected_resource_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let base = verification_base_url(&state, &headers);
+    Json(serde_json::json!({
+        "resource": format!("{base}/mcp"),
+        "authorization_servers": [base.clone()],
+        "bearer_methods_supported": ["header"],
+    }))
+}
+
+/// `GET /.well-known/oauth-authorization-server` — RFC 8414. Advertises the
+/// device-authorization grant + the token + registration endpoints.
+async fn oauth_authorization_server_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let base = verification_base_url(&state, &headers);
+    Json(serde_json::json!({
+        "issuer": base.clone(),
+        "device_authorization_endpoint": format!("{base}/auth/device/code"),
+        "token_endpoint": format!("{base}/oauth/token"),
+        "registration_endpoint": format!("{base}/oauth/register"),
+        "grant_types_supported": [
+            "urn:ietf:params:oauth:grant-type:device_code"
+        ],
+        "response_types_supported": [],
+        "token_endpoint_auth_methods_supported": ["none"],
+    }))
+}
+
+/// `POST /oauth/register` — RFC 7591 dynamic client registration. The
+/// device flow doesn't actually need per-client secrets (Zitadel approval
+/// is the real auth gate); we accept any metadata and return a static
+/// `client_id` so MCP clients that insist on registering get a happy
+/// response.
+async fn oauth_register(
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let client_name = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("client_name"))
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "mcp-client".to_owned());
+    Ok(Json(serde_json::json!({
+        "client_id": "rust-rag-mcp",
+        "client_name": client_name,
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
+    })))
+}
+
+/// `POST /oauth/token` — RFC 6749 token endpoint, accepts
+/// `application/x-www-form-urlencoded` with
+/// `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=...`.
+/// Translates to the existing `device_token_inner` so the underlying
+/// state machine stays in one place.
+async fn oauth_token(
+    State(state): State<AppState>,
+    axum::extract::Form(form): axum::extract::Form<OAuthTokenForm>,
+) -> Response {
+    let want_grant = "urn:ietf:params:oauth:grant-type:device_code";
+    if form.grant_type != want_grant {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "unsupported_grant_type",
+                "error_description": format!("only {want_grant} is supported"),
+            })),
+        )
+            .into_response();
+    }
+    let device_code = match form.device_code {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_request", "error_description": "device_code is required"})),
+            )
+                .into_response();
+        }
+    };
+    let req = DeviceTokenRequest { device_code };
+    match device_token_inner(state, req).await {
+        Ok(resp) => {
+            let now = match current_timestamp_millis() {
+                Ok(n) => n,
+                Err(_) => 0,
+            };
+            // RFC 6749 prefers `expires_in` (seconds) over an absolute
+            // `expires_at`. Compute it when available.
+            let expires_in = resp
+                .expires_at
+                .filter(|&exp| exp > now)
+                .map(|exp| ((exp - now) / 1000) as u64);
+            let mut body = serde_json::json!({
+                "access_token": resp.access_token,
+                "token_type": "Bearer",
+                "scope": "mcp",
+            });
+            if let Some(exp) = expires_in {
+                body["expires_in"] = serde_json::Value::from(exp);
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": err.as_str()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct OAuthTokenForm {
+    pub grant_type: String,
+    pub device_code: Option<String>,
+    #[allow(dead_code)]
+    pub client_id: Option<String>,
 }
 
 fn verification_base_url(state: &AppState, headers: &HeaderMap) -> String {

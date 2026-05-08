@@ -35,7 +35,7 @@ pub struct ItemRecord {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchHit {
     pub id: String,
     pub text: String,
@@ -43,6 +43,16 @@ pub struct SearchHit {
     pub source_id: String,
     pub created_at: i64,
     pub distance: f32,
+    /// Header breadcrumb of the chunk that scored best for this document
+    /// (e.g. `["Architecture", "Embedding execution"]`). Empty for hits
+    /// whose chunks had no preceding markdown headers, or for stores that
+    /// don't track section paths.
+    pub section_path: Vec<String>,
+    /// Which retrievers contributed to ranking this hit. `["dense"]` for
+    /// dense-only / non-hybrid search, `["dense","sparse"]` when hybrid
+    /// fusion saw the hit on both sides, `["sparse"]` when only sparse
+    /// matched. Helps the UI show *why* something ranked.
+    pub retrievers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -467,6 +477,7 @@ pub trait VectorStore: Send + Sync {
         &self,
         query_text: &str,
         query_embedding: &[f32],
+        query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
@@ -728,6 +739,7 @@ impl VectorStore for SqliteVectorStore {
         &self,
         query_text: &str,
         query_embedding: &[f32],
+        _query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
@@ -735,6 +747,8 @@ impl VectorStore for SqliteVectorStore {
             anyhow::bail!("top_k must be greater than zero");
         }
 
+        // SQLite path has no sparsevec column — sparse query is ignored;
+        // dense + FTS5 keyword fusion is the legacy hybrid behavior.
         // 1. Vector Search
         let vector_hits = self.search(query_embedding, top_k * 2, source_id)?;
 
@@ -1983,6 +1997,8 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         source_id: row.get(3)?,
         created_at: row.get(4)?,
         distance: row.get(5)?,
+        section_path: Vec::new(),
+        retrievers: vec!["dense".to_owned()],
     })
 }
 

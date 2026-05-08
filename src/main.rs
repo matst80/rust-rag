@@ -137,10 +137,60 @@ async fn main() -> Result<()> {
         std::env::var("RAG_CHUNK_MAX_TOKENS").unwrap_or_else(|_| "500".into()),
         std::env::var("RAG_CHUNK_OVERLAP_TOKENS").unwrap_or_else(|_| "50".into()),
     );
+
+    // Optional cross-encoder reranker. Loaded only when explicitly enabled —
+    // it's a second ORT session that takes ~1.1 GB fp16 GPU and adds
+    // ~50–150 ms / batch latency. Both env knobs must be set.
+    let reranker_enabled = std::env::var("RAG_RERANKER_ENABLED")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let reranker: Option<std::sync::Arc<dyn rust_rag::reranker::Reranker>> = if reranker_enabled {
+        let model_path = std::env::var_os("RAG_RERANKER_MODEL_PATH")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!(
+                "RAG_RERANKER_ENABLED=true but RAG_RERANKER_MODEL_PATH is unset"
+            ))?;
+        let tokenizer_path = std::env::var_os("RAG_RERANKER_TOKENIZER_PATH")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!(
+                "RAG_RERANKER_ENABLED=true but RAG_RERANKER_TOKENIZER_PATH is unset"
+            ))?;
+        let max_length = std::env::var("RAG_RERANKER_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512_usize);
+        let intra_threads = std::env::var("RAG_RERANKER_INTRA_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_usize);
+        let dylib = std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from);
+        let dylib_ref = dylib.as_deref();
+        let backend = rust_rag::reranker::OrtReranker::from_paths(
+            &model_path,
+            &tokenizer_path,
+            intra_threads,
+            max_length,
+            dylib_ref,
+        )?;
+        info!("reranker loaded from {}", model_path.display());
+        Some(std::sync::Arc::new(backend))
+    } else {
+        None
+    };
+    let reranker_top_n = std::env::var("RAG_RERANKER_TOP_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50_usize);
+
     let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
     let mut state = state;
     state.md_chunker = md_chunker;
     state.acp_ws = acp_ws_handle.clone();
+    if let Some(r) = reranker {
+        state.reranker = Some(r);
+        state.reranker_top_n = reranker_top_n.max(1);
+    }
 
     // mDNS browser for `_acp-ws._tcp`. When an instance is selected (auto on
     // first sight or via API), point the existing acp_ws client at it.

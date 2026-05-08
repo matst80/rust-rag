@@ -1643,8 +1643,8 @@ async fn tool_search_rag(state: &AppState, args: &str) -> Result<String> {
     let query = args.query.clone();
     let source_id = args.source_id.clone();
     let hits = tokio::task::spawn_blocking(move || -> Result<_> {
-        let embedding = embedder.embed(&query)?;
-        store.search_hybrid(&query, &embedding, top_k, source_id.as_deref())
+        let (embedding, sparse) = embedder.embed_both(&query)?;
+        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref())
     })
     .await??;
     let payload: Vec<Value> = hits
@@ -1702,8 +1702,14 @@ async fn recall_items(
         let q_owned = q.to_owned();
         let source_for_search = source_id.clone();
         let hits = tokio::task::spawn_blocking(move || -> Result<_> {
-            let embedding = embedder.embed(&q_owned)?;
-            store.search_hybrid(&q_owned, &embedding, limit * 2, Some(&source_for_search))
+            let (embedding, sparse) = embedder.embed_both(&q_owned)?;
+            store.search_hybrid(
+                &q_owned,
+                &embedding,
+                &sparse,
+                limit * 2,
+                Some(&source_for_search),
+            )
         })
         .await??;
         // Map hits to ItemRecord-shape via get_item lookups (cheap; small N).

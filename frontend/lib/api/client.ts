@@ -59,6 +59,8 @@ interface RawSearchResult {
   source_id: string
   created_at: number
   distance: number
+  section_path?: string[]
+  retrievers?: string[]
 }
 
 interface RawRelatedResult extends RawSearchResult {
@@ -118,6 +120,8 @@ function toSearchResult(result: RawSearchResult): SearchResult {
     source_id: result.source_id,
     created_at: result.created_at,
     score: Math.max(0, Math.min(1, 1 - result.distance)),
+    section_path: result.section_path,
+    retrievers: result.retrievers,
   }
 }
 
@@ -490,6 +494,8 @@ export async function search(data: SearchRequest): Promise<SearchResultsBundle> 
       top_k: data.top_k ?? 10,
       ...(data.source_id && { source_id: data.source_id }),
       ...(data.max_distance !== undefined && { max_distance: data.max_distance }),
+      ...(data.hybrid !== undefined && { hybrid: data.hybrid }),
+      ...(data.rerank !== undefined && { rerank: data.rerank }),
     }),
   })
   return {

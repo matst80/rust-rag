@@ -38,16 +38,32 @@ data:
   RAG_CHUNK_OVERLAP_TOKENS: "50"
   RAG_INTRA_THREADS: "2"
   RAG_CUDA_DEVICE_ID: "0"
-  ## Larger model + larger vectors. Bumped from 2048.
-  RAG_CUDA_MEM_LIMIT_MB: "4096"
+  ## GPU is shared with the reranker arena; total budget on a 6 GB card
+  ## (1660 SUPER on sunk) is ~5500 MB usable. Embedder gets the bulk.
+  RAG_CUDA_MEM_LIMIT_MB: "3000"
   ## Hard-fail at session creation if CUDA EP doesn't register (instead of
   ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
   RAG_CUDA_STRICT: "true"
   ## Verbose ORT log during cutover — drop back to "warning" once stable.
   RAG_ORT_LOG_LEVEL: "info"
+  ## Phase 3 cross-encoder reranker. Toggle "true" once the bge-reranker-v2-m3
+  ## ONNX export has been fetched (initContainer below) and the image carries
+  ## the matching binary. ~1.1 GB additional VRAM, ~50–150 ms / batch.
+  RAG_RERANKER_ENABLED: "true"
+  RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-v2-m3/model_fp16.onnx"
+  RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-v2-m3/tokenizer.json"
+  RAG_RERANKER_TOP_N: "15"
+  RAG_RERANKER_MAX_TOKENS: "512"
+  RAG_RERANKER_INTRA_THREADS: "2"
+  RAG_RERANKER_CUDA_MEM_LIMIT_MB: "1500"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
+  ## Comma-separated list of Zitadel subject IDs (the JWT `sub` claim)
+  ## that bypass per-message ownership checks for channel clear and
+  ## individual message delete/update. ApiKey + Disabled auth paths are
+  ## already unrestricted; this knob covers session-cookie users.
+  RAG_ADMIN_SUBJECTS: "369527412653951321"
   RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
   RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
   ZITADEL_ISSUER: "https://auth.k6n.net"
@@ -155,6 +171,54 @@ spec:
             limits:
               cpu: "1"
               memory: 3Gi
+        ## Optional reranker assets. Skipped at runtime when
+        ## RAG_RERANKER_ENABLED is unset; the fetch itself runs unconditionally
+        ## so toggling the flag later doesn't require a re-roll. ~600 MB.
+        - name: fetch-bge-reranker
+          image: curlimages/curl:8.10.1
+          env:
+            ## BAAI's own bge-reranker-v2-m3 repo ships only safetensors —
+            ## use onnx-community's pre-converted mirror, which carries fp16
+            ## (~1.1 GB) under onnx/.
+            - name: HF_REPO
+              value: "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              cd /models
+              mkdir -p bge-reranker-v2-m3 && cd bge-reranker-v2-m3
+              fetch() {
+                local name=$1
+                local url=$2
+                local min_bytes=${3:-1}
+                if [ -s "$name" ] && [ "$(stat -c%s "$name")" -ge "$min_bytes" ]; then
+                  echo "skip: $name already present ($(stat -c%s "$name") bytes)"
+                  return
+                fi
+                echo "fetching $name from $url"
+                curl --fail --location --retry 5 --retry-delay 5 \
+                  --output "$name.tmp" "$url"
+                mv "$name.tmp" "$name"
+              }
+              # fp16 single-file (~1.1 GB resident). int8 was tried but ORT's
+              # CUDA EP lacks accelerated int8 kernels for QDQ ops — falls
+              # back to CPU partial and runs ~5× slower than fp16. Stick to
+              # fp16 unless we move to TensorRT EP.
+              fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 800000000
+              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        5000000
+              echo "reranker cache ready:"
+              ls -lh
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 3Gi
       containers:
         - name: rust-rag
           image: matst80/rust-rag:cuda
@@ -179,6 +243,10 @@ spec:
             - name: models
               mountPath: /app/assets/bge-m3
               subPath: bge-m3
+              readOnly: true
+            - name: models
+              mountPath: /app/assets/bge-reranker-v2-m3
+              subPath: bge-reranker-v2-m3
               readOnly: true
           startupProbe:
             httpGet:

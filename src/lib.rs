@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod manager;
 pub mod mcp;
 pub mod ontology;
+pub mod reranker;
 
 use axum::Router;
 

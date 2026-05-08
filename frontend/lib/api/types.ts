@@ -27,6 +27,10 @@ export interface SearchResult {
   source_id: string
   created_at: number
   score: number
+  /** Header breadcrumb of the chunk that matched best (e.g. ["Architecture", "Embedding execution"]). */
+  section_path?: string[]
+  /** Which retrievers contributed: ["dense"] | ["sparse"] | ["dense","sparse"]. */
+  retrievers?: string[]
 }
 
 export interface RelatedResult extends SearchResult {
@@ -93,6 +97,10 @@ export interface SearchRequest {
   top_k?: number
   source_id?: string
   max_distance?: number
+  /** Hybrid (dense + sparse RRF) when true, dense-only when false. Backend defaults to true. */
+  hybrid?: boolean
+  /** Cross-encoder reranking on top-N candidates. Has no effect when the server has no reranker loaded. */
+  rerank?: boolean
 }
 
 export interface UpdateItemRequest {

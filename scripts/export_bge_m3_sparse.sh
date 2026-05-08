@@ -26,6 +26,7 @@ if [ ! -x "$VENV/bin/python" ]; then
         "huggingface_hub>=0.23" \
         sentencepiece \
         onnx \
+        onnxscript \
         protobuf
 fi
 

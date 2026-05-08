@@ -481,6 +481,13 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
     vec![CPUExecutionProvider::default().build()]
 }
 
+/// Reranker shares the embedder's process-wide `ort::init()` call. Exposed
+/// so `src/reranker.rs` can lazily lazily ensure the runtime is up before
+/// committing its own session.
+pub fn initialize_ort_for_reranker(ort_dylib_path: Option<&Path>) -> Result<()> {
+    initialize_ort(ort_dylib_path)
+}
+
 fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {
     static ORT_INITIALIZED: OnceLock<()> = OnceLock::new();
 
