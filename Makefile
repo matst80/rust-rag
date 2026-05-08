@@ -112,7 +112,7 @@ K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets export-bge-m3 fetch-prod-snapshot migrate-prod e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -365,6 +365,12 @@ eval:
 export-bge-m3:
 	@bash scripts/export_bge_m3.sh
 
+# Phase 2 export: encoder + sparse_linear in one ONNX graph with two outputs
+# (last_hidden_state, sparse_logits). Replaces the dense-only export above
+# once the runtime backend is wired for sparse. Idempotent via marker file.
+export-bge-m3-sparse:
+	@bash scripts/export_bge_m3_sparse.sh
+
 # Pull the live SQLite DB out of the rust-rag-cuda pod via kubectl-cp. WAL +
 # SHM are copied alongside `rag.db` so SQLite can recover any in-flight
 # transactions on first open. Requires `kubectl` access to the cluster.
@@ -390,6 +396,26 @@ migrate-prod: export-bge-m3
 	RAG_EMBEDDING_POOLING="cls" \
 	RAG_INTRA_THREADS="4" \
 	cargo run --release --bin migrate_sqlite_to_pg -- "$(PROD_SNAPSHOT_DB)"
+
+# Regroup legacy `<id>:c:N` documents (artifact of pre-Postgres API-layer
+# chunking) into single parents. Pass DRY=1 to log the plan without writes.
+cleanup-legacy-chunks:
+	@test -f "$(M3_MODEL_PATH)" || { echo "missing $(M3_MODEL_PATH) — run \`make export-bge-m3\` first"; exit 1; }
+	RAG_DATABASE_URL="$(RAG_DATABASE_URL)" \
+	RAG_MODEL_PATH="$(M3_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(M3_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_POOLING="cls" \
+	RAG_INTRA_THREADS="4" \
+	cargo run --release --bin cleanup_legacy_chunks -- $(if $(DRY),--dry-run,)
+
+# Recompute and write `chunks.section_path` for existing documents (no
+# re-embedding). Used after the section-path tracking landed but data was
+# already migrated.
+backfill-section-paths:
+	@test -f "$(M3_TOKENIZER_PATH)" || { echo "missing $(M3_TOKENIZER_PATH) — run \`make export-bge-m3\` first"; exit 1; }
+	RAG_DATABASE_URL="$(RAG_DATABASE_URL)" \
+	RAG_TOKENIZER_PATH="$(M3_TOKENIZER_PATH)" \
+	cargo run --release --bin backfill_section_paths
 
 run-cuda:
 	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"

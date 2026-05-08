@@ -432,6 +432,14 @@ pub struct DocChunk {
     pub position: i32,
     pub content: String,
     pub embedding: Vec<f32>,
+    /// Header breadcrumb in effect at the chunk's start (e.g.
+    /// `["Architecture", "Embedding execution"]`). Empty for non-markdown
+    /// or pre-heading content. Maps to `chunks.section_path TEXT[]`.
+    pub section_path: Vec<String>,
+    /// bge-m3 sparse output as `(vocab_id, weight)` pairs after per-token
+    /// aggregation. `None` when the backend doesn't produce sparse (slice 1
+    /// keeps this `None` everywhere; slice 2 wires the sparse head).
+    pub sparse: Option<Vec<(u32, f32)>>,
 }
 
 pub trait VectorStore: Send + Sync {

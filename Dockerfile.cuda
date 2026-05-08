@@ -1,14 +1,13 @@
 ## CUDA-enabled image for rust-rag.
 ##
-## Builder uses the standard Rust toolchain; ort's `download-binaries` feature
-## fetches the ONNX Runtime shared library with the CUDA execution provider.
-## Runtime layer ships on top of `nvidia/cuda:*-cudnn-runtime` so that
-## libcuda*, libcudart, and cuDNN are present without relying on host-mounted
-## copies past what the NVIDIA container runtime injects.
+## Builder uses the standard Rust toolchain. The Rust binary is built with
+## `--features cuda` (= `ort/cuda` + `ort/load-dynamic`), so onnxruntime is
+## *dlopen'd* at runtime via $ORT_DYLIB_PATH instead of statically linked.
+## The runtime stage ships Microsoft's onnxruntime-gpu prebuilt (matching
+## the ONNX Runtime 1.24 ABI ort 2.0-rc.12 targets), which includes
+## `libonnxruntime_providers_cuda.so` — without that lib the CUDA EP
+## registration silently no-ops and embeddings fall back to CPU.
 
-# Builder runs on Ubuntu 24.04 (glibc 2.39) so that the prebuilt ORT runtime
-# downloaded by `ort` (which references __isoc23_strto* from glibc 2.38+) links
-# cleanly. Same family as the runtime image below.
 FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,7 +17,6 @@ RUN apt-get update \
 		ca-certificates curl build-essential pkg-config libssl-dev \
 	&& rm -rf /var/lib/apt/lists/*
 
-# Install rustup + stable toolchain.
 ENV RUSTUP_HOME=/usr/local/rustup \
 	CARGO_HOME=/usr/local/cargo \
 	PATH=/usr/local/cargo/bin:$PATH
@@ -31,20 +29,28 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 COPY mcp-stdio ./mcp-stdio
-# Model assets are NOT baked into the image. The cluster manifest mounts
-# them from a PVC populated by an init container that pulls from HuggingFace
-# on first boot (see deploy/kubernetes/rust-rag-cuda.yaml). For local dev
-# `assets/bge-m3/` is read directly off disk via `make export-bge-m3`.
-# Empty directories so the binary's default paths exist if the volume mount
-# is missing — it'll fail loudly at first embed rather than confusingly.
 RUN mkdir -p assets
 
-RUN CARGO_BUILD_JOBS=2 cargo build --release --features cuda --bin rust-rag
+# `--no-default-features` strips ort/download-binaries (mutually exclusive
+# with load-dynamic). `--features cuda` brings in ort/cuda + ort/load-dynamic.
+RUN CARGO_BUILD_JOBS=2 cargo build --release \
+	--no-default-features --features cuda --bin rust-rag
 
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
+ARG ORT_VERSION=1.24.4
+ENV ORT_VERSION=${ORT_VERSION} \
+	ORT_DIR=/opt/onnxruntime
+
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates libgomp1 sqlite3 \
+	&& apt-get install -y --no-install-recommends \
+		ca-certificates curl libgomp1 sqlite3 \
+	&& mkdir -p ${ORT_DIR} \
+	&& curl --fail --location --retry 5 --retry-delay 5 \
+		"https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" \
+		| tar -xz --strip-components=1 -C ${ORT_DIR} \
+	&& apt-get purge -y curl \
+	&& apt-get autoremove -y \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& groupadd --system rustrag \
 	&& useradd --system --gid rustrag --create-home --home-dir /app rustrag
@@ -53,18 +59,9 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/rust-rag /usr/local/bin/rust-rag
 
-# Model assets live on a mounted volume in-cluster (see manifest's
-# initContainer + `models` PVC). Pre-create the mount points so the runtime
-# user can write into them before the volume mounts during local
-# `docker run` testing.
 RUN mkdir -p /app/data /app/data/uploads /app/assets/bge-m3 \
 	&& chown -R rustrag:rustrag /app
 
-## Defaults target the bge-m3 + Postgres stack (phase 1 of the migration).
-## Override RAG_MODEL_PATH/RAG_TOKENIZER_PATH/RAG_EMBEDDING_DIMENSION via env
-## or ConfigMap to fall back to bge-small for rollback. RAG_DATABASE_URL must
-## be supplied from a Secret in-cluster — leaving it unset starts the server
-## in legacy SQLite-only mode.
 ENV RAG_HOST=0.0.0.0 \
 	RAG_PORT=4001 \
 	RAG_DB_PATH=/app/data/rag.db \
@@ -76,6 +73,8 @@ ENV RAG_HOST=0.0.0.0 \
 	RAG_CHUNK_MAX_TOKENS=500 \
 	RAG_CHUNK_OVERLAP_TOKENS=50 \
 	RAG_INTRA_THREADS=2 \
+	ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so \
+	LD_LIBRARY_PATH=/opt/onnxruntime/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
 	NVIDIA_VISIBLE_DEVICES=all \
 	NVIDIA_DRIVER_CAPABILITIES=compute,utility
 

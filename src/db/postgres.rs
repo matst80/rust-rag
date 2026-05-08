@@ -19,6 +19,28 @@ pub use deadpool_postgres::Pool as PgPool;
 
 const EMBEDDING_MODEL: &str = "bge-m3";
 const EMBEDDING_VERSION: i32 = 1;
+/// bge-m3 sparse output is one weight per vocab token. Vocab size is fixed.
+const SPARSE_DIM: i32 = 250_002;
+
+/// Convert our `(vocab_id, weight)` pairs into a `pgvector::SparseVector`.
+/// Returns `None` when the input is empty so the column is bound as NULL.
+fn build_sparsevec(pairs: &[(u32, f32)]) -> Option<pgvector::SparseVector> {
+    if pairs.is_empty() {
+        return None;
+    }
+    let mapped: Vec<(i32, f32)> = pairs
+        .iter()
+        .filter(|(_, w)| *w != 0.0)
+        .map(|(idx, w)| (*idx as i32, *w))
+        .collect();
+    if mapped.is_empty() {
+        return None;
+    }
+    Some(pgvector::SparseVector::from_map(
+        mapped.iter().map(|(i, v)| (i, v)),
+        SPARSE_DIM,
+    ))
+}
 
 /// Connect to Postgres, run pending migrations from the embedded SQL files,
 /// and return a deadpool pool.
@@ -65,6 +87,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0002_auxiliary_tables",
         include_str!("../../migrations/0002_auxiliary_tables.sql"),
+    ),
+    (
+        "0003_sparse_embeddings",
+        include_str!("../../migrations/0003_sparse_embeddings.sql"),
     ),
 ];
 
@@ -359,14 +385,25 @@ impl VectorStore for PostgresVectorStore {
                 .await?;
             for chunk in &chunks {
                 let vector = pgvector::Vector::from(chunk.embedding.clone());
+                let section_path: Option<&[String]> = if chunk.section_path.is_empty() {
+                    None
+                } else {
+                    Some(&chunk.section_path)
+                };
+                let sparse = chunk
+                    .sparse
+                    .as_deref()
+                    .and_then(build_sparsevec);
                 tx.execute(
-                    "INSERT INTO chunks (document_id, position, content, dense_embedding, embedding_model, embedding_version) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
+                    "INSERT INTO chunks (document_id, position, content, section_path, dense_embedding, sparse_embedding, embedding_model, embedding_version) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                     &[
                         &item.id,
                         &chunk.position,
                         &chunk.content,
+                        &section_path,
                         &vector,
+                        &sparse,
                         &EMBEDDING_MODEL,
                         &EMBEDDING_VERSION,
                     ],

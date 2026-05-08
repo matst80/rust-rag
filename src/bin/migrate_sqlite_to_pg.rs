@@ -200,13 +200,19 @@ async fn main() -> Result<()> {
             }
             let token_count = embedder.count_tokens(&chunk.content).ok().map(|n| n as i32);
             let vector = pgvector::Vector::from(embedding);
+            let section_path: Option<&[String]> = if chunk.section_path.is_empty() {
+                None
+            } else {
+                Some(&chunk.section_path)
+            };
             tx.execute(
-                "INSERT INTO chunks (document_id, position, content, token_count, dense_embedding, embedding_model, embedding_version) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO chunks (document_id, position, content, section_path, token_count, dense_embedding, embedding_model, embedding_version) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 &[
                     &row.id,
                     &chunk.position,
                     &chunk.content,
+                    &section_path,
                     &token_count,
                     &vector,
                     &embedding_model,

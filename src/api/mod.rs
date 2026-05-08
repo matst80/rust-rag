@@ -1097,11 +1097,14 @@ pub(crate) async fn store_entry_core(
             }
             let mut embedded = Vec::with_capacity(chunks.len());
             for c in chunks {
-                let embedding = embedder.embed(&c.content)?;
+                let (embedding, sparse) = embedder.embed_both(&c.content)?;
+                let sparse = if sparse.is_empty() { None } else { Some(sparse) };
                 embedded.push(crate::db::DocChunk {
                     position: c.position,
                     content: c.content,
                     embedding,
+                    section_path: c.section_path,
+                    sparse,
                 });
             }
             store.upsert_document(item, embedded)?;

@@ -42,13 +42,42 @@ impl std::str::FromStr for Pooling {
     }
 }
 
+/// Sparse embedding produced by the bge-m3 sparse head: a list of
+/// `(vocab_id, weight)` pairs after the per-token aggregation
+/// (max-pool by token id, special tokens dropped, sub-threshold
+/// weights filtered). Maps onto Postgres `sparsevec(250002)`.
+pub type SparseEmbedding = Vec<(u32, f32)>;
+
 pub trait EmbeddingService: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Compute dense + sparse embeddings in a single forward pass.
+    /// Default implementation returns the dense vector and an empty sparse
+    /// vector — adequate for backends that don't (yet) export the sparse
+    /// head. The Postgres write path treats an empty sparse as NULL.
+    fn embed_both(&self, text: &str) -> Result<(Vec<f32>, SparseEmbedding)> {
+        let dense = self.embed(text)?;
+        Ok((dense, Vec::new()))
+    }
 
     /// Count tokens for `text` without the truncation/padding the embedder
     /// applies during inference. Used by admin tools to display real token
     /// budgets per item.
     fn count_tokens(&self, text: &str) -> Result<usize>;
+}
+
+/// Result of one forward pass through the embedding model.
+///
+/// `dense` is `last_hidden_state` `(batch, seq, hidden)`.
+/// `sparse_logits` is the post-ReLU per-token sparse output
+/// `(batch, seq, 1)` from bge-m3's sparse head — `None` for models that
+/// don't expose it (bge-small, dense-only ONNX exports). Aggregation into
+/// `(vocab_id, weight)` pairs happens in `Embedder` so backends stay
+/// model-agnostic.
+#[derive(Debug)]
+pub struct RunOutput {
+    pub dense: Array3<f32>,
+    pub sparse_logits: Option<Array3<f32>>,
 }
 
 pub trait InferenceBackend: Send + Sync {
@@ -57,7 +86,13 @@ pub trait InferenceBackend: Send + Sync {
         input_ids: Array2<i64>,
         attention_mask: Array2<i64>,
         token_type_ids: Array2<i64>,
-    ) -> Result<Array3<f32>>;
+    ) -> Result<RunOutput>;
+
+    /// Whether the underlying model produces sparse logits. Cheap; called
+    /// at startup to log capability and let `embed_both` short-circuit.
+    fn has_sparse(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -196,12 +231,44 @@ where
             tokenized.token_type_ids,
         )?;
 
-        let hidden_state = output.index_axis(Axis(0), 0);
+        let hidden_state = output.dense.index_axis(Axis(0), 0);
 
         match self.pooling {
             Pooling::Mean => mean_pool_and_normalize(hidden_state, &attention_mask_values),
             Pooling::Cls => cls_pool_and_normalize(hidden_state),
         }
+    }
+
+    fn embed_both(&self, text: &str) -> Result<(Vec<f32>, SparseEmbedding)> {
+        let tokenized = self.tokenize(text)?;
+        let attention_mask_values = tokenized.attention_mask_values.clone();
+        // Keep input_ids around for the sparse aggregator before they move
+        // into `backend.run`.
+        let input_ids_for_sparse = tokenized.input_ids.row(0).to_vec();
+        let output = self.backend.run(
+            tokenized.input_ids,
+            tokenized.attention_mask,
+            tokenized.token_type_ids,
+        )?;
+
+        let dense = {
+            let hidden_state = output.dense.index_axis(Axis(0), 0);
+            match self.pooling {
+                Pooling::Mean => mean_pool_and_normalize(hidden_state, &attention_mask_values)?,
+                Pooling::Cls => cls_pool_and_normalize(hidden_state)?,
+            }
+        };
+
+        let sparse = match output.sparse_logits {
+            Some(logits) => aggregate_sparse(
+                logits.index_axis(Axis(0), 0),
+                &input_ids_for_sparse,
+                &attention_mask_values,
+            ),
+            None => Vec::new(),
+        };
+
+        Ok((dense, sparse))
     }
 
     fn count_tokens(&self, text: &str) -> Result<usize> {
@@ -219,6 +286,10 @@ pub struct OrtBackend {
     /// XLM-RoBERTa-family models (bge-m3) don't expose token_type_ids; BERT
     /// (bge-small) does. Detected from the session's declared inputs at load.
     accepts_token_type_ids: bool,
+    /// True when the model graph declares a `sparse_logits` output
+    /// (bge-m3 sparse-export). When false, only dense is produced and
+    /// `embed_both` returns empty sparse.
+    has_sparse_output: bool,
 }
 
 impl OrtBackend {
@@ -245,6 +316,20 @@ impl OrtBackend {
             .map_err(ort_error)?
             .with_intra_threads(intra_threads)
             .map_err(ort_error)?;
+        if let Ok(level_str) = std::env::var("RAG_ORT_LOG_LEVEL") {
+            let level = match level_str.to_ascii_lowercase().as_str() {
+                "verbose" | "v" | "0" => Some(ort::logging::LogLevel::Verbose),
+                "info" | "1" => Some(ort::logging::LogLevel::Info),
+                "warning" | "warn" | "2" => Some(ort::logging::LogLevel::Warning),
+                "error" | "3" => Some(ort::logging::LogLevel::Error),
+                "fatal" | "4" => Some(ort::logging::LogLevel::Fatal),
+                _ => None,
+            };
+            if let Some(level) = level {
+                println!("embedder: setting ORT log level to {level:?}");
+                builder = builder.with_log_level(level).map_err(ort_error)?;
+            }
+        }
         println!(
             "embedder: session builder configured in {:?}",
             builder_started.elapsed()
@@ -264,6 +349,10 @@ impl OrtBackend {
             .inputs()
             .iter()
             .any(|i| i.name() == "token_type_ids");
+        let has_sparse_output = session
+            .outputs()
+            .iter()
+            .any(|o| o.name() == "sparse_logits");
         println!(
             "embedder: model inputs = [{}] (token_type_ids={})",
             session
@@ -274,10 +363,21 @@ impl OrtBackend {
                 .join(", "),
             accepts_token_type_ids
         );
+        println!(
+            "embedder: model outputs = [{}] (sparse_logits={})",
+            session
+                .outputs()
+                .iter()
+                .map(|o| o.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            has_sparse_output
+        );
 
         Ok(Self {
             session: Mutex::new(session),
             accepts_token_type_ids,
+            has_sparse_output,
         })
     }
 }
@@ -288,7 +388,7 @@ impl InferenceBackend for OrtBackend {
         input_ids: Array2<i64>,
         attention_mask: Array2<i64>,
         token_type_ids: Array2<i64>,
-    ) -> Result<Array3<f32>> {
+    ) -> Result<RunOutput> {
         let mut session = self.session.lock().expect("ort session mutex poisoned");
         let input_ids_t = TensorRef::from_array_view(input_ids.view()).map_err(ort_error)?;
         let attn_t = TensorRef::from_array_view(attention_mask.view()).map_err(ort_error)?;
@@ -310,11 +410,35 @@ impl InferenceBackend for OrtBackend {
                 .map_err(ort_error)?
         };
 
-        Ok(outputs[0]
+        // Pull dense by name when present, fall back to first output for the
+        // legacy single-output dense-only export.
+        let dense_output = outputs
+            .get("last_hidden_state")
+            .unwrap_or(&outputs[0]);
+        let dense = dense_output
             .try_extract_array::<f32>()
             .map_err(ort_error)?
             .to_owned()
-            .into_dimensionality::<ndarray::Ix3>()?)
+            .into_dimensionality::<ndarray::Ix3>()?;
+
+        let sparse_logits = if self.has_sparse_output {
+            let s = outputs
+                .get("sparse_logits")
+                .ok_or_else(|| anyhow!("declared sparse_logits output missing at run time"))?
+                .try_extract_array::<f32>()
+                .map_err(ort_error)?
+                .to_owned()
+                .into_dimensionality::<ndarray::Ix3>()?;
+            Some(s)
+        } else {
+            None
+        };
+
+        Ok(RunOutput { dense, sparse_logits })
+    }
+
+    fn has_sparse(&self) -> bool {
+        self.has_sparse_output
     }
 }
 
@@ -331,6 +455,11 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
 
+    let strict = std::env::var("RAG_CUDA_STRICT")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+
     let cuda = CUDA::default()
         .with_device_id(device_id)
         .with_memory_limit(mem_limit_mb * 1024 * 1024)
@@ -339,8 +468,10 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
         .with_conv_max_workspace(false)
         .build();
 
+    let cuda = if strict { cuda.error_on_failure() } else { cuda };
+
     println!(
-        "embedder: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB) with CPU fallback"
+        "embedder: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB, strict={strict}) with CPU fallback"
     );
     vec![cuda, CPUExecutionProvider::default().build()]
 }
@@ -357,13 +488,25 @@ fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(path) = ort_dylib_path {
-        println!(
-            "embedder: ignoring explicit ort dylib {} because this build uses ort download-binaries",
-            path.display()
-        );
-    } else {
-        println!("embedder: using ort bundled binary discovery");
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(path) = ort_dylib_path {
+            // SAFETY: writing the env var before `ort::init()` reads it.
+            unsafe { std::env::set_var("ORT_DYLIB_PATH", path); }
+        }
+        let resolved = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
+        println!("embedder: load-dynamic ORT_DYLIB_PATH={resolved}");
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(path) = ort_dylib_path {
+            println!(
+                "embedder: ignoring explicit ort dylib {} (build uses ort download-binaries)",
+                path.display()
+            );
+        } else {
+            println!("embedder: using ort bundled binary discovery");
+        }
     }
     ort::init().with_name("rust-rag").commit();
 
@@ -442,6 +585,62 @@ where
     anyhow!(error.to_string())
 }
 
+/// XLM-RoBERTa (bge-m3 tokenizer) reserved ids that must not contribute to
+/// the sparse signal: `<s>`(0), `<pad>`(1), `</s>`(2), `<unk>`(3), and
+/// `<mask>`(250001 — last vocab slot). FlagEmbedding's
+/// `_process_token_weights` filters these via the tokenizer's special-tokens
+/// set; we hard-code them because the set is invariant across bge-m3
+/// checkpoints and the alternative is plumbing the tokenizer into the
+/// aggregator just to recompute the same five ids.
+const XLMR_SPECIAL_IDS: &[i64] = &[0, 1, 2, 3, 250001];
+const SPARSE_WEIGHT_THRESHOLD: f32 = 1e-6;
+
+/// Aggregate per-token sparse logits into `(vocab_id, weight)` pairs by
+/// max-pooling over positions sharing the same `input_id`. Mirrors
+/// `BGEM3FlagModel._process_token_weights`: drop padding (via attention
+/// mask), drop reserved tokens, take the per-token max of the relu'd
+/// logits, threshold tiny values, return one entry per unique vocab id.
+///
+/// `sparse_logits` shape: `(seq_len, 1)`.
+/// `input_ids`     shape: `(seq_len,)`.
+/// `attention_mask` shape: `(seq_len,)`.
+fn aggregate_sparse(
+    sparse_logits: ndarray::ArrayView2<'_, f32>,
+    input_ids: &[i64],
+    attention_mask: &[i64],
+) -> SparseEmbedding {
+    debug_assert_eq!(sparse_logits.nrows(), input_ids.len());
+    debug_assert_eq!(input_ids.len(), attention_mask.len());
+
+    use std::collections::HashMap;
+    let mut by_id: HashMap<u32, f32> = HashMap::new();
+
+    for (pos, &token_id) in input_ids.iter().enumerate() {
+        if attention_mask.get(pos).copied().unwrap_or(0) == 0 {
+            continue;
+        }
+        if XLMR_SPECIAL_IDS.contains(&token_id) {
+            continue;
+        }
+        if token_id < 0 {
+            continue;
+        }
+        let weight = sparse_logits[(pos, 0)];
+        if !weight.is_finite() || weight < SPARSE_WEIGHT_THRESHOLD {
+            continue;
+        }
+        let key = token_id as u32;
+        let entry = by_id.entry(key).or_insert(0.0);
+        if weight > *entry {
+            *entry = weight;
+        }
+    }
+
+    let mut out: Vec<(u32, f32)> = by_id.into_iter().collect();
+    out.sort_unstable_by_key(|(id, _)| *id);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,8 +659,11 @@ mod tests {
             _input_ids: Array2<i64>,
             _attention_mask: Array2<i64>,
             _token_type_ids: Array2<i64>,
-        ) -> Result<Array3<f32>> {
-            Ok(self.output.clone())
+        ) -> Result<RunOutput> {
+            Ok(RunOutput {
+                dense: self.output.clone(),
+                sparse_logits: None,
+            })
         }
     }
 
@@ -479,6 +681,35 @@ mod tests {
         let mut tokenizer = Tokenizer::new(model);
         tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
         tokenizer
+    }
+
+    #[test]
+    fn aggregate_sparse_drops_specials_and_max_pools() {
+        // 6 token positions: [<s>, hello, world, hello, <pad>, </s>]
+        // input ids               [   0,     5,    99,    5,      1,     2]
+        // attention_mask          [   1,     1,     1,    1,      0,     1]
+        // sparse_logits           [ 0.9,   0.5,   0.2,  0.7,    0.0,   0.6]
+        //
+        // Expected: 5 -> max(0.5, 0.7) = 0.7, 99 -> 0.2; specials (0,1,2)
+        // dropped, padding (pos 4) dropped via attention mask.
+        let logits = ndarray::arr2(&[
+            [0.9_f32], [0.5], [0.2], [0.7], [0.0], [0.6],
+        ]);
+        let input_ids = vec![0_i64, 5, 99, 5, 1, 2];
+        let mask = vec![1_i64, 1, 1, 1, 0, 1];
+
+        let out = aggregate_sparse(logits.view(), &input_ids, &mask);
+        assert_eq!(out, vec![(5, 0.7), (99, 0.2)]);
+    }
+
+    #[test]
+    fn aggregate_sparse_thresholds_tiny_weights() {
+        let logits = ndarray::arr2(&[[1e-9_f32], [0.4]]);
+        let input_ids = vec![10_i64, 11];
+        let mask = vec![1_i64, 1];
+
+        let out = aggregate_sparse(logits.view(), &input_ids, &mask);
+        assert_eq!(out, vec![(11, 0.4)]);
     }
 
     #[test]

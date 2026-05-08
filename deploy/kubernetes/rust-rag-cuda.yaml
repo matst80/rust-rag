@@ -40,6 +40,11 @@ data:
   RAG_CUDA_DEVICE_ID: "0"
   ## Larger model + larger vectors. Bumped from 2048.
   RAG_CUDA_MEM_LIMIT_MB: "4096"
+  ## Hard-fail at session creation if CUDA EP doesn't register (instead of
+  ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
+  RAG_CUDA_STRICT: "true"
+  ## Verbose ORT log during cutover — drop back to "warning" once stable.
+  RAG_ORT_LOG_LEVEL: "info"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
@@ -103,7 +108,7 @@ spec:
     spec:
       runtimeClassName: nvidia
       nodeSelector:
-        kubernetes.io/hostname: midi
+        kubernetes.io/hostname: sunk
       ## Init container fetches the bge-m3 ONNX export from HuggingFace into
       ## the models PVC on first boot. Subsequent restarts skip the download
       ## (idempotent: no-op if model.onnx_data is already present at full
@@ -149,7 +154,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: "1"
-              memory: 512Mi
+              memory: 3Gi
       containers:
         - name: rust-rag
           image: matst80/rust-rag:cuda
