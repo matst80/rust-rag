@@ -21,14 +21,25 @@ metadata:
 data:
   RAG_HOST: "0.0.0.0"
   RAG_PORT: "4001"
+  ## SQLite path is still set because the legacy `SqliteVectorStore` is
+  ## opened on boot for backward-compat — but with `RAG_DATABASE_URL` set
+  ## (see Secret below), every trait surface routes to Postgres and the
+  ## SQLite file at this path is unused. Safe to delete after the cutover
+  ## settles; the PVC stays mounted for the moment as a rollback option.
   RAG_DB_PATH: "/app/data/rag.db"
   RAG_UPLOAD_PATH: "/app/data/uploads"
-  RAG_MODEL_PATH: "/app/assets/bge-small-en-v1.5/model.onnx"
-  RAG_TOKENIZER_PATH: "/app/assets/bge-small-en-v1.5/tokenizer.json"
-  RAG_EMBEDDING_DIMENSION: "384"
+  ## bge-m3 (1024-d, CLS-pooled) — the image bakes the assets at this path.
+  RAG_MODEL_PATH: "/app/assets/bge-m3/model.onnx"
+  RAG_TOKENIZER_PATH: "/app/assets/bge-m3/tokenizer.json"
+  RAG_EMBEDDING_DIMENSION: "1024"
+  RAG_EMBEDDING_POOLING: "cls"
+  ## Header-aware chunking via `text-splitter`, sized in real bge-m3 tokens.
+  RAG_CHUNK_MAX_TOKENS: "500"
+  RAG_CHUNK_OVERLAP_TOKENS: "50"
   RAG_INTRA_THREADS: "2"
   RAG_CUDA_DEVICE_ID: "0"
-  RAG_CUDA_MEM_LIMIT_MB: "2048"
+  ## Larger model + larger vectors. Bumped from 2048.
+  RAG_CUDA_MEM_LIMIT_MB: "4096"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
@@ -51,6 +62,23 @@ spec:
   resources:
     requests:
       storage: 10Gi
+---
+## Persistent model cache. The bge-m3 export is ~2 GB (fp32). Keeping it on
+## a PVC means it's downloaded once per cluster, not per pod restart. Bump
+## the storage request when adding more models or switching to bge-m3 fp16.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rust-rag-cuda-models
+  labels:
+    app.kubernetes.io/name: rust-rag
+    app.kubernetes.io/variant: cuda
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -76,6 +104,52 @@ spec:
       runtimeClassName: nvidia
       nodeSelector:
         kubernetes.io/hostname: midi
+      ## Init container fetches the bge-m3 ONNX export from HuggingFace into
+      ## the models PVC on first boot. Subsequent restarts skip the download
+      ## (idempotent: no-op if model.onnx_data is already present at full
+      ## size). Verify URLs against the HF repo if upstream layout shifts.
+      ## ~2 GB transfer; pulls take a few minutes on first boot.
+      initContainers:
+        - name: fetch-bge-m3
+          image: curlimages/curl:8.10.1
+          env:
+            - name: HF_REPO
+              value: "https://huggingface.co/BAAI/bge-m3/resolve/main"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              cd /models
+              mkdir -p bge-m3 && cd bge-m3
+              fetch() {
+                local name=$1
+                local url=$2
+                local min_bytes=${3:-1}
+                if [ -s "$name" ] && [ "$(stat -c%s "$name")" -ge "$min_bytes" ]; then
+                  echo "skip: $name already present ($(stat -c%s "$name") bytes)"
+                  return
+                fi
+                echo "fetching $name from $url"
+                curl --fail --location --retry 5 --retry-delay 5 \
+                  --output "$name.tmp" "$url"
+                mv "$name.tmp" "$name"
+              }
+              fetch model.onnx        "$HF_REPO/onnx/model.onnx"        100000
+              fetch model.onnx_data   "$HF_REPO/onnx/model.onnx_data"   1500000000
+              fetch tokenizer.json    "$HF_REPO/tokenizer.json"         5000000
+              fetch sentencepiece.bpe.model "$HF_REPO/sentencepiece.bpe.model" 1000000
+              echo "model cache ready:"
+              ls -lh
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
       containers:
         - name: rust-rag
           image: matst80/rust-rag:cuda
@@ -88,9 +162,19 @@ spec:
                 name: rust-rag-cuda-config
             - secretRef:
                 name: rust-rag-frontend-auth
+            ## RAG_DATABASE_URL = postgres://user:pass@host:5432/db
+            ## Create out-of-band:
+            ##   kubectl -n home create secret generic rust-rag-postgres \
+            ##     --from-literal=RAG_DATABASE_URL=postgres://...
+            - secretRef:
+                name: rust-rag-postgres
           volumeMounts:
             - name: data
               mountPath: /app/data
+            - name: models
+              mountPath: /app/assets/bge-m3
+              subPath: bge-m3
+              readOnly: true
           startupProbe:
             httpGet:
               path: /healthz
@@ -111,16 +195,19 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 4Gi
               nvidia.com/gpu: 1
             limits:
               cpu: "4"
-              memory: 8Gi
+              memory: 12Gi
               nvidia.com/gpu: 1
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: rust-rag-cuda-data
+        - name: models
+          persistentVolumeClaim:
+            claimName: rust-rag-cuda-models
 ---
 apiVersion: v1
 kind: Service

@@ -1,4 +1,4 @@
-use crate::db::GraphConfig;
+use crate::{db::GraphConfig, embedding::Pooling};
 use anyhow::{Context, Result, anyhow};
 use std::{
     env,
@@ -215,11 +215,15 @@ pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
     pub db_path: String,
+    /// Optional Postgres URL. When set, the server connects (and runs
+    /// migrations) at startup. Active store remains SQLite during cutover.
+    pub database_url: Option<String>,
     pub upload_path: String,
     pub model_path: PathBuf,
     pub tokenizer_path: PathBuf,
     pub ort_dylib_path: Option<PathBuf>,
     pub embedding_dimension: usize,
+    pub embedding_pooling: Pooling,
     pub intra_threads: usize,
     pub graph_enabled: bool,
     pub graph_build_on_startup: bool,
@@ -275,11 +279,18 @@ impl AppConfig {
             host: parse_env("RAG_HOST", "0.0.0.0")?,
             port: parse_env("RAG_PORT", "4001")?,
             db_path: env::var("RAG_DB_PATH").unwrap_or_else(|_| "rag.db".to_owned()),
+            database_url: non_empty_var("RAG_DATABASE_URL"),
             upload_path: env::var("RAG_UPLOAD_PATH").unwrap_or_else(|_| "uploads".to_owned()),
             model_path: required_path("RAG_MODEL_PATH")?,
             tokenizer_path: required_path("RAG_TOKENIZER_PATH")?,
             ort_dylib_path: env::var_os("RAG_ORT_DYLIB_PATH").map(PathBuf::from),
             embedding_dimension: parse_env("RAG_EMBEDDING_DIMENSION", "384")?,
+            embedding_pooling: match non_empty_var("RAG_EMBEDDING_POOLING") {
+                Some(value) => value
+                    .parse()
+                    .map_err(|err| anyhow!("RAG_EMBEDDING_POOLING={value:?}: {err}"))?,
+                None => Pooling::Mean,
+            },
             intra_threads: parse_env("RAG_INTRA_THREADS", "2")?,
             graph_enabled: parse_env("RAG_GRAPH_ENABLED", "false")?,
             graph_build_on_startup: parse_env("RAG_GRAPH_BUILD_ON_STARTUP", "false")?,

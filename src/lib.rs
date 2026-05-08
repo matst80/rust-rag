@@ -1,6 +1,7 @@
 pub mod acp_discovery;
 pub mod acp_ws;
 pub mod api;
+pub mod chunking_md;
 pub mod config;
 pub mod db;
 pub mod embedding;

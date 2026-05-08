@@ -3,6 +3,24 @@ MODEL_DIR := $(CURDIR)/assets/bge-small-en-v1.5
 MODEL_URL := https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx
 TOKENIZER_URL := https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/tokenizer.json
 
+# bge-m3 (1024-d, CLS-pooled). Exported locally via scripts/export_bge_m3.sh
+# into $(M3_MODEL_DIR). External-data ONNX layout — keep the whole directory
+# together when moving.
+M3_MODEL_DIR := $(CURDIR)/assets/bge-m3
+M3_MODEL_PATH := $(M3_MODEL_DIR)/model.onnx
+M3_TOKENIZER_PATH := $(M3_MODEL_DIR)/tokenizer.json
+
+# Local-dev Postgres — points at the shared 10.10.10.207 instance with the
+# `rust_rag_dev` database. Override RAG_DATABASE_URL=... to use a different
+# host / DB. Leave unset to fall back to pure-SQLite mode.
+RAG_DATABASE_URL ?= postgres://mats:jagharpostgres@10.10.10.207/rust_rag_dev
+
+# Where the prod SQLite snapshot is fetched to / read from for migrations.
+PROD_SNAPSHOT_DIR ?= /tmp/rust-rag-prod-snapshot
+PROD_SNAPSHOT_DB ?= $(PROD_SNAPSHOT_DIR)/rag.db
+PROD_POD_SELECTOR ?= app.kubernetes.io/name=rust-rag,app.kubernetes.io/variant=cuda
+PROD_POD_NAMESPACE ?= home
+
 RAG_MODEL_PATH ?= $(MODEL_DIR)/model.onnx
 RAG_TOKENIZER_PATH ?= $(MODEL_DIR)/tokenizer.json
 RAG_DB_PATH ?= $(CURDIR)/data/rag.db
@@ -17,9 +35,9 @@ RAG_FRONTEND_API_KEY ?= replace-with-shared-frontend-backend-key
 RAG_MCP_AUTH_BEARER ?=
 RAG_MCP_ALLOWED_HOSTS ?= localhost,127.0.0.1,::1,rag.k6n.net
 AUTH_SESSION_SECRET ?= replace-with-a-long-random-secret
-RAG_OPENAI_API_BASE_URL ?= http://127.0.0.1:8081/v1
+RAG_OPENAI_API_BASE_URL ?= http://10.10.3.29/v1
 RAG_OPENAI_API_KEY ?=
-RAG_OPENAI_MODEL ?= current_model.gguf
+RAG_OPENAI_MODEL ?= Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf
 RAG_OPENAI_TIMEOUT_SECS ?= 60
 RAG_MULTIMODAL_BASE_URL ?= http://10.10.10.207:11434/v1
 RAG_MULTIMODAL_API_KEY ?=
@@ -94,7 +112,7 @@ K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets print-env fmt test verify check-env build build-cuda build-mcp run run-cuda run-mcp tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets export-bge-m3 fetch-prod-snapshot migrate-prod e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -111,8 +129,13 @@ help:
 		'  make build            Build the rust-rag binary in release mode' \
 		'  make build-cuda       Build the rust-rag binary with the cuda feature enabled' \
 		'  make build-mcp        Build the mcp-stdio binary in release mode' \
-		'  make run              Start the service locally' \
+		'  make run              Start the service locally (SQLite, bge-small)' \
+		'  make run-pg           Start the service locally against Postgres + bge-m3 (CLS-pooled, 1024-d)' \
 		'  make run-cuda         Start the service locally with the cuda feature enabled' \
+		'  make export-bge-m3    Export BAAI/bge-m3 to ONNX into $(M3_MODEL_DIR)' \
+		'  make fetch-prod-snapshot  kubectl-cp the prod SQLite DB into $(PROD_SNAPSHOT_DIR)' \
+		'  make migrate-prod     Re-embed $(PROD_SNAPSHOT_DB) with bge-m3 and write to Postgres' \
+		'  make e2e-local        Print the two-command recipe for backend + frontend e2e' \
 		'  make run-mcp          Start the stdio MCP bridge locally' \
 		'  make docker-build     Build the server container image' \
 		'  make docker-push      Push the server container image' \
@@ -258,6 +281,116 @@ run:
 	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
 	cargo run 2>&1 | tee "$(LOG_FILE)"
 
+# Local-dev: bge-m3 + remote Postgres. Mirrors `run` but points the embedder
+# at the bge-m3 export and sets RAG_DATABASE_URL so migrations apply on boot.
+# CLS pooling is required for bge-m3 — mean pooling produces valid 1024-d
+# vectors but with degraded retrieval quality.
+run-pg: export-bge-m3
+	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
+	@printf 'Logging to %s — run "make tail-logs" in another terminal to follow\n' "$(LOG_FILE)"
+	@printf 'Postgres: %s\n' "$(RAG_DATABASE_URL)"
+	RUST_LOG="$(RUST_LOG)" \
+	RAG_MODEL_PATH="$(M3_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(M3_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_DIMENSION="1024" \
+	RAG_EMBEDDING_POOLING="cls" \
+	RAG_DATABASE_URL="$(RAG_DATABASE_URL)" \
+	RAG_DB_PATH="$(CURDIR)/data/rag-m3.db" \
+	RAG_PORT="$(RAG_PORT)" \
+	RAG_GRAPH_ENABLED="$(RAG_GRAPH_ENABLED)" \
+	RAG_GRAPH_BUILD_ON_STARTUP="$(RAG_GRAPH_BUILD_ON_STARTUP)" \
+	RAG_GRAPH_K="$(RAG_GRAPH_K)" \
+	RAG_GRAPH_MAX_DISTANCE="$(RAG_GRAPH_MAX_DISTANCE)" \
+	RAG_GRAPH_CROSS_SOURCE="$(RAG_GRAPH_CROSS_SOURCE)" \
+	RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
+	RAG_FRONTEND_API_KEY="$(RAG_FRONTEND_API_KEY)" \
+	AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
+	ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
+	ZITADEL_CLIENT_ID="$(ZITADEL_CLIENT_ID)" \
+	ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
+	ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
+	ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
+	RAG_OPENAI_API_BASE_URL="$(RAG_OPENAI_API_BASE_URL)" \
+	RAG_OPENAI_API_KEY="$(RAG_OPENAI_API_KEY)" \
+	RAG_OPENAI_MODEL="$(RAG_OPENAI_MODEL)" \
+	RAG_OPENAI_TIMEOUT_SECS="$(RAG_OPENAI_TIMEOUT_SECS)" \
+	RAG_ONTOLOGY_ENABLED="false" \
+	RAG_MANAGER_ENABLED="false" \
+	RAG_CHUNK_MAX_CHARS="$(RAG_CHUNK_MAX_CHARS)" \
+	RAG_CHUNK_OVERLAP_CHARS="$(RAG_CHUNK_OVERLAP_CHARS)" \
+	RAG_LARGE_ITEM_THRESHOLD="$(RAG_LARGE_ITEM_THRESHOLD)" \
+	RAG_MULTIMODAL_BASE_URL="$(RAG_MULTIMODAL_BASE_URL)" \
+	RAG_MULTIMODAL_API_KEY="$(RAG_MULTIMODAL_API_KEY)" \
+	RAG_MULTIMODAL_MODEL="$(RAG_MULTIMODAL_MODEL)" \
+	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
+	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
+	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
+	cargo run 2>&1 | tee "$(LOG_FILE)"
+
+# Baseline server for eval comparisons: SQLite + bge-small + mean pooling
+# (the legacy stack), pointed at a read-only copy of the prod snapshot so it
+# has the same content as the Postgres/bge-m3 stack served by `run-pg`.
+# Disables ontology + manager workers and similarity-graph rebuild on
+# startup to keep the baseline deterministic and fast.
+run-baseline: fetch-assets
+	@test -f "$(PROD_SNAPSHOT_DB)" || { echo "missing $(PROD_SNAPSHOT_DB) — run \`make fetch-prod-snapshot\` first"; exit 1; }
+	@mkdir -p "$(CURDIR)/data" "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
+	@cp -f "$(PROD_SNAPSHOT_DB)" "$(CURDIR)/data/rag-baseline.db"
+	@rm -f "$(CURDIR)/data/rag-baseline.db-wal" "$(CURDIR)/data/rag-baseline.db-shm"
+	@printf 'Baseline (SQLite + bge-small) on %s\n' "$(CURDIR)/data/rag-baseline.db"
+	RUST_LOG="$(RUST_LOG)" \
+	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
+	RAG_DB_PATH="$(CURDIR)/data/rag-baseline.db" \
+	RAG_PORT="$(RAG_PORT)" \
+	RAG_GRAPH_ENABLED="false" \
+	RAG_GRAPH_BUILD_ON_STARTUP="false" \
+	RAG_AUTH_ENABLED="false" \
+	RAG_ONTOLOGY_ENABLED="false" \
+	RAG_MANAGER_ENABLED="false" \
+	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
+	cargo run 2>&1 | tee "$(LOG_FILE)"
+
+# Run the eval harness against whichever server is up on $(RAG_PORT). Pass
+# LABEL=... to tag the run; defaults derived from common values.
+EVAL_LABEL ?= run
+eval:
+	@command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
+	python3 eval/run_eval.py \
+		--base-url "http://localhost:$(RAG_PORT)" \
+		--label "$(EVAL_LABEL)" \
+		--hybrid false
+
+# Idempotent: skips if assets/bge-m3/model.onnx already exists.
+export-bge-m3:
+	@bash scripts/export_bge_m3.sh
+
+# Pull the live SQLite DB out of the rust-rag-cuda pod via kubectl-cp. WAL +
+# SHM are copied alongside `rag.db` so SQLite can recover any in-flight
+# transactions on first open. Requires `kubectl` access to the cluster.
+fetch-prod-snapshot:
+	@mkdir -p "$(PROD_SNAPSHOT_DIR)"
+	@pod=$$(kubectl -n "$(PROD_POD_NAMESPACE)" get pod -l "$(PROD_POD_SELECTOR)" -o name | head -1); \
+		test -n "$$pod" || { echo "no pod matching $(PROD_POD_SELECTOR) in namespace $(PROD_POD_NAMESPACE)"; exit 1; }; \
+		echo "fetching from $$pod"; \
+		kubectl -n "$(PROD_POD_NAMESPACE)" cp "$${pod#pod/}:/app/data/rag.db" "$(PROD_SNAPSHOT_DIR)/rag.db"; \
+		kubectl -n "$(PROD_POD_NAMESPACE)" cp "$${pod#pod/}:/app/data/rag.db-wal" "$(PROD_SNAPSHOT_DIR)/rag.db-wal" || true; \
+		kubectl -n "$(PROD_POD_NAMESPACE)" cp "$${pod#pod/}:/app/data/rag.db-shm" "$(PROD_SNAPSHOT_DIR)/rag.db-shm" || true
+	@ls -lh "$(PROD_SNAPSHOT_DIR)"
+
+# Re-embed the prod snapshot with bge-m3 (CLS pooling) and write documents +
+# chunks to Postgres. Idempotent: ON CONFLICT updates documents in place;
+# chunks are replaced per document. Requires `make export-bge-m3` and a
+# fetched snapshot.
+migrate-prod: export-bge-m3
+	@test -f "$(PROD_SNAPSHOT_DB)" || { echo "missing $(PROD_SNAPSHOT_DB) — run \`make fetch-prod-snapshot\` first"; exit 1; }
+	RAG_DATABASE_URL="$(RAG_DATABASE_URL)" \
+	RAG_MODEL_PATH="$(M3_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(M3_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_POOLING="cls" \
+	RAG_INTRA_THREADS="4" \
+	cargo run --release --bin migrate_sqlite_to_pg -- "$(PROD_SNAPSHOT_DB)"
+
 run-cuda:
 	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
 	@printf 'Logging to %s — run "make tail-logs" in another terminal to follow\n' "$(LOG_FILE)"
@@ -391,12 +524,16 @@ frontend-docker-run:
 frontend-install:
 	cd "$(FRONTEND_DIR)" && npm install
 
-# Run Next.js in dev mode bound to 0.0.0.0 so the in-cluster `rust-rag-frontend`
-# selector-less Service (Endpoints -> 10.10.11.135:3000) can reach it. Hot reload
-# replaces the Docker rebuild + image push loop for frontend changes.
+# Run Next.js in dev mode pointed at the local backend on $(RAG_PORT).
+# `RAG_AUTH_ENABLED` and `RAG_FRONTEND_API_KEY` are forwarded so the frontend
+# matches the backend's auth state — set RAG_AUTH_ENABLED=false (the Makefile
+# default) for local e2e runs against `make run-pg` without Zitadel; set it
+# to true if you want the full prod auth flow against a Zitadel-backed run.
 frontend-dev:
 	cd "$(FRONTEND_DIR)" && \
 		RAG_API_URL="http://127.0.0.1:$(RAG_PORT)" \
+		RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
+		RAG_FRONTEND_API_KEY="$(RAG_FRONTEND_API_KEY)" \
 		APP_BASE_URL="$(APP_BASE_URL)" \
 		AUTH_SESSION_SECRET="$(AUTH_SESSION_SECRET)" \
 		ZITADEL_ISSUER="$(ZITADEL_ISSUER)" \
@@ -405,6 +542,19 @@ frontend-dev:
 		ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
 		ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
 		npx next dev -H "$(FRONTEND_DEV_HOST)" -p "$(FRONTEND_DEV_PORT)"
+
+# E2E shortcut: prints the two commands to run for a full local stack
+# (backend + Postgres + bge-m3, frontend pointed at it, both with auth off).
+e2e-local:
+	@printf '%s\n' \
+		'Run the backend in one terminal:' \
+		'  make run-pg' \
+		'' \
+		'Run the frontend in another:' \
+		'  make frontend-dev' \
+		'' \
+		'Then open http://localhost:$(FRONTEND_DEV_PORT)' \
+		'(both default to RAG_AUTH_ENABLED=false; set =true if you want the Zitadel flow.)'
 
 # Production-mode `next start` on the host (built first via `npm run build`).
 frontend-prod:

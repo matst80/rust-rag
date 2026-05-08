@@ -32,7 +32,9 @@ Release `mcp-stdio`: `make tag-mcp-stdio VERSION=x.y.z && git push origin mcp-st
 
 ## Prod topology
 
-Backend runs manually on `10.10.11.135`. Only frontend lives in k8s. `rag-service` is a selector-less DNS shim pointing at the backend host. Do not assume the backend is in-cluster.
+Backend runs in-cluster as the CUDA Deployment (`deploy/kubernetes/rust-rag-cuda.yaml`), pinned to the GPU node `midi` via the NVIDIA device plugin. The Service `rag-service-cuda` fronts it; ingresses point there. SQLite lives on PVC `rust-rag-cuda-data` mounted at `/app/data` (file: `/app/data/rag.db`).
+
+The legacy bare-metal host (`10.10.11.135`) and the selector-less `rag-service` DNS shim are retired — assume in-cluster.
 
 ## Shared memory: use this rust-rag instance
 

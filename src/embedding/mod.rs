@@ -11,6 +11,37 @@ use std::{
 };
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
+/// Pooling strategy applied to the model's last hidden state.
+///
+/// - `Mean`: average over non-padding tokens, then L2-normalize. The previous
+///   default; works adequately for any encoder but isn't the reference
+///   strategy for most BAAI checkpoints.
+/// - `Cls`: take `last_hidden_state[:, 0]` (the CLS / `<s>` token), then
+///   L2-normalize. Reference for bge-m3, bge-small/base/large, and most
+///   `sentence-transformers` checkpoints derived from BERT/RoBERTa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pooling {
+    Mean,
+    Cls,
+}
+
+impl Default for Pooling {
+    fn default() -> Self {
+        Self::Mean
+    }
+}
+
+impl std::str::FromStr for Pooling {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mean" | "avg" | "average" => Ok(Self::Mean),
+            "cls" | "first" => Ok(Self::Cls),
+            other => anyhow::bail!("unknown pooling strategy: {other}"),
+        }
+    }
+}
+
 pub trait EmbeddingService: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
@@ -44,6 +75,7 @@ pub struct Embedder<B = OrtBackend> {
     /// 512) so this avoids re-encoding twice in the hot path.
     count_tokenizer: Tokenizer,
     backend: B,
+    pooling: Pooling,
 }
 
 impl Embedder<OrtBackend> {
@@ -83,6 +115,7 @@ impl Embedder<OrtBackend> {
             tokenizer,
             count_tokenizer,
             backend,
+            pooling: Pooling::default(),
         })
     }
 }
@@ -97,7 +130,13 @@ where
             tokenizer,
             count_tokenizer,
             backend,
+            pooling: Pooling::default(),
         }
+    }
+
+    pub fn with_pooling(mut self, pooling: Pooling) -> Self {
+        self.pooling = pooling;
+        self
     }
 
     pub fn tokenize(&self, text: &str) -> Result<TokenizedInput> {
@@ -159,7 +198,10 @@ where
 
         let hidden_state = output.index_axis(Axis(0), 0);
 
-        mean_pool_and_normalize(hidden_state, &attention_mask_values)
+        match self.pooling {
+            Pooling::Mean => mean_pool_and_normalize(hidden_state, &attention_mask_values),
+            Pooling::Cls => cls_pool_and_normalize(hidden_state),
+        }
     }
 
     fn count_tokens(&self, text: &str) -> Result<usize> {
@@ -174,6 +216,9 @@ where
 
 pub struct OrtBackend {
     session: Mutex<Session>,
+    /// XLM-RoBERTa-family models (bge-m3) don't expose token_type_ids; BERT
+    /// (bge-small) does. Detected from the session's declared inputs at load.
+    accepts_token_type_ids: bool,
 }
 
 impl OrtBackend {
@@ -215,8 +260,24 @@ impl OrtBackend {
             commit_started.elapsed()
         );
 
+        let accepts_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
+        println!(
+            "embedder: model inputs = [{}] (token_type_ids={})",
+            session
+                .inputs()
+                .iter()
+                .map(|i| i.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+            accepts_token_type_ids
+        );
+
         Ok(Self {
             session: Mutex::new(session),
+            accepts_token_type_ids,
         })
     }
 }
@@ -229,13 +290,25 @@ impl InferenceBackend for OrtBackend {
         token_type_ids: Array2<i64>,
     ) -> Result<Array3<f32>> {
         let mut session = self.session.lock().expect("ort session mutex poisoned");
-        let outputs = session
-            .run(inputs![
-                TensorRef::from_array_view(input_ids.view()).map_err(ort_error)?,
-                TensorRef::from_array_view(attention_mask.view()).map_err(ort_error)?,
-                TensorRef::from_array_view(token_type_ids.view()).map_err(ort_error)?
-            ])
-            .map_err(ort_error)?;
+        let input_ids_t = TensorRef::from_array_view(input_ids.view()).map_err(ort_error)?;
+        let attn_t = TensorRef::from_array_view(attention_mask.view()).map_err(ort_error)?;
+        let outputs = if self.accepts_token_type_ids {
+            let tti_t = TensorRef::from_array_view(token_type_ids.view()).map_err(ort_error)?;
+            session
+                .run(inputs![
+                    "input_ids" => input_ids_t,
+                    "attention_mask" => attn_t,
+                    "token_type_ids" => tti_t,
+                ])
+                .map_err(ort_error)?
+        } else {
+            session
+                .run(inputs![
+                    "input_ids" => input_ids_t,
+                    "attention_mask" => attn_t,
+                ])
+                .map_err(ort_error)?
+        };
 
         Ok(outputs[0]
             .try_extract_array::<f32>()
@@ -296,6 +369,24 @@ fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {
 
     let _ = ORT_INITIALIZED.set(());
     Ok(())
+}
+
+fn cls_pool_and_normalize(
+    hidden_state: ndarray::ArrayView2<'_, f32>,
+) -> Result<Vec<f32>> {
+    if hidden_state.nrows() == 0 {
+        anyhow::bail!("hidden state had zero rows; cannot read CLS token");
+    }
+    let cls = hidden_state.row(0);
+    let mut pooled: Vec<f32> = cls.iter().copied().collect();
+    let norm = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        anyhow::bail!("CLS embedding norm was zero before normalization");
+    }
+    for v in &mut pooled {
+        *v /= norm;
+    }
+    Ok(pooled)
 }
 
 fn mean_pool_and_normalize(
@@ -419,6 +510,22 @@ mod tests {
         let expected = std::f32::consts::FRAC_1_SQRT_2;
         assert!((embedding[0] - expected).abs() < 1e-6);
         assert!((embedding[1] - expected).abs() < 1e-6);
+        assert!(embedding[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedder_cls_pools_only_first_token() {
+        // First token vector [3,4,0] (norm 5); second token [9,9,9] is ignored
+        // by CLS pooling. After L2 normalize: [0.6, 0.8, 0].
+        let backend = MockBackend {
+            output: Array3::from_shape_vec((1, 2, 3), vec![3.0, 4.0, 0.0, 9.0, 9.0, 9.0]).unwrap(),
+        };
+        let embedder = Embedder::with_backend(tokenizer(), backend).with_pooling(Pooling::Cls);
+
+        let embedding = embedder.embed("hello world").unwrap();
+
+        assert!((embedding[0] - 0.6).abs() < 1e-6);
+        assert!((embedding[1] - 0.8).abs() < 1e-6);
         assert!(embedding[2].abs() < 1e-6);
     }
 }

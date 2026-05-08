@@ -1,0 +1,149 @@
+{
+  "_comment": "Hand-curated retrieval eval set built against the 2026-05 prod snapshot (55 items). Frozen — do not iterate against the system being tuned.",
+  "queries": [
+    {
+      "query": "how does the agent collaboration protocol work",
+      "expected_ids": ["agent_collaboration_guide"]
+    },
+    {
+      "query": "what is rust-rag",
+      "expected_ids": ["rust_rag_project_overview"]
+    },
+    {
+      "query": "how do I connect a project to rag via MCP from claude code",
+      "expected_ids": ["rag_mcp_http"]
+    },
+    {
+      "query": "claude.md template snippet for other projects",
+      "expected_ids": ["rust_rag_claude_md_snippet"]
+    },
+    {
+      "query": "rust-rag usage guide adoption namespace conventions",
+      "expected_ids": ["rust_rag_usage_guide_for_all_projects"]
+    },
+    {
+      "query": "telegram-acp websocket protocol endpoint and discovery",
+      "expected_ids": ["telegram_acp_ws_protocol_v1", "019defa7-873d-7271-b95a-0505fbdb494d", "019defa8-51f1-7f43-af4b-c72eb9be1cbc"]
+    },
+    {
+      "query": "how to verify mdns for telegram-acp",
+      "expected_ids": ["how_to_use_and_verify_mdns"]
+    },
+    {
+      "query": "agent client protocol implementation in telegram-acp",
+      "expected_ids": ["019def78-d3a2-7141-9658-9fa4dbf91657"]
+    },
+    {
+      "query": "core types and data structures in telegram-acp",
+      "expected_ids": ["019def78-fa79-75f2-aad9-6b70bbadf1e4"]
+    },
+    {
+      "query": "session events and relay module",
+      "expected_ids": ["019def78-d3a3-7613-8868-da5697d38cdc"]
+    },
+    {
+      "query": "telegram-acp websocket server default port 9001",
+      "expected_ids": ["019def78-d39d-7cd0-b4b3-f66dde54b490", "telegram_acp_ws_protocol_v1"]
+    },
+    {
+      "query": "telegram-acp migration plan integration with rust-rag",
+      "expected_ids": ["019def84-e4f7-7370-9e72-66d6433c01bd"]
+    },
+    {
+      "query": "telegram-acp daemon overview bridges telegram with agents",
+      "expected_ids": ["019def78-d39d-7cd0-b4b3-f679fb856271"]
+    },
+    {
+      "query": "reload the magic mirror via ssh",
+      "expected_ids": ["reload_magic_mirror_command"]
+    },
+    {
+      "query": "send message to magic mirror curl",
+      "expected_ids": ["mirror_data"]
+    },
+    {
+      "query": "ingress configuration for telegram-ai-bot bot.k6n.net",
+      "expected_ids": ["ingress-check-result-v2", "ingress-check-result"]
+    },
+    {
+      "query": "yamaha WR250F engine oil periodic change",
+      "expected_ids": ["enduro_service"]
+    },
+    {
+      "query": "when was the enduro last serviced",
+      "expected_ids": ["enduro_last_service"]
+    },
+    {
+      "query": "NFS storage class tiers in kubernetes cluster",
+      "expected_ids": ["019dc3e1-f707-75f1-abc5-6fc364626b6f", "019dc3de-793f-7962-b7eb-672bafbe8c36"]
+    },
+    {
+      "query": "klarna paynow type field configuration",
+      "expected_ids": ["019db946-6e4b-7832-90fb-799e342de16f"]
+    },
+    {
+      "query": "ollama default port binding",
+      "expected_ids": ["019dbf5e-6c76-73e1-be23-2058d99d842a"]
+    },
+    {
+      "query": "clean up evicted pods in kubernetes",
+      "expected_ids": ["019db6cf-b43a-7ac3-849a-0d76dbadf104", "019da5c2-6124-72a1-95e4-be925d3e3c4a"]
+    },
+    {
+      "query": "multi-tenant cookie consent siteId integration",
+      "expected_ids": ["019dbf90-641b-79a1-a2a2-146958226971"]
+    },
+    {
+      "query": "F5-TTS generate audio endpoint",
+      "expected_ids": ["019dca06-510a-71e1-ac57-6adbf904b267"]
+    },
+    {
+      "query": "rag maintenance process objective",
+      "expected_ids": ["process_rag_maintenance_v1:c:0"]
+    },
+    {
+      "query": "rag linking phase semantic search similar entries",
+      "expected_ids": ["process_rag_maintenance_v1:c:1"]
+    },
+    {
+      "query": "what is a kubernetes ingress",
+      "expected_ids": ["019db71b-a002-7c71-8852-92037607dacd"]
+    },
+    {
+      "query": "kubernetes service abstraction expose pods",
+      "expected_ids": ["019db8dd-f65d-7c10-9d37-c20f85e3437d"]
+    },
+    {
+      "query": "ZHD1 order discount distribution pricing",
+      "expected_ids": ["019db50e-954b-7f42-ae82-c19892c4e6b8"]
+    },
+    {
+      "query": "future architectural improvements file watchers automated ingestion",
+      "expected_ids": ["019db941-8425-7552-a4dc-a2e6bb066522"]
+    },
+    {
+      "query": "telegram ai bot api endpoint authentication",
+      "expected_ids": ["rag_test_001"]
+    },
+    {
+      "query": "go-api magic mirror dashboard backend",
+      "expected_ids": ["019da272-82e3-7300-be68-0a5a34a7935c"]
+    },
+    {
+      "query": "telegram-ai-bot project context and todo management vision",
+      "expected_ids": ["019da2ce-2a52-78d2-b1f7-6f372034d8c5"]
+    },
+    {
+      "query": "k0s node local upgrade procedure",
+      "expected_ids": ["019db6e3-4866-7531-9f2a-03a5fcc5e0fe"]
+    },
+    {
+      "query": "cert-manager configuration HTTPS k6n.net",
+      "expected_ids": ["kubernetes_ingress_config"]
+    },
+    {
+      "query": "permission_request approve flow websocket",
+      "expected_ids": ["telegram_acp_ws_protocol_v1", "019defa7-873d-7271-b95a-0505fbdb494d"]
+    }
+  ]
+}

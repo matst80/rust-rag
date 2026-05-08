@@ -12,3 +12,6 @@ data/
 .env.*
 common-secret.yaml
 test_ort_env/
+eval/runs/
+eval/candidates.json
+.venv-export/

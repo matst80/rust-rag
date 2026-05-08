@@ -1,5 +1,6 @@
 mod auth;
 mod graph;
+pub mod postgres;
 mod schema;
 
 use anyhow::{Context, Result, anyhow};
@@ -79,14 +80,14 @@ pub enum GraphEdgeType {
 }
 
 impl GraphEdgeType {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Similarity => "similarity",
             Self::Manual => "manual",
         }
     }
 
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "similarity" => Ok(Self::Similarity),
             "manual" => Ok(Self::Manual),
@@ -166,7 +167,7 @@ pub enum DeviceAuthStatus {
 }
 
 impl DeviceAuthStatus {
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "pending" => Ok(Self::Pending),
             "approved" => Ok(Self::Approved),
@@ -283,7 +284,7 @@ pub enum UserEventType {
 }
 
 impl UserEventType {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Search => "search",
             Self::Store => "store",
@@ -327,7 +328,7 @@ impl MessageSenderKind {
         }
     }
 
-    fn from_str(value: &str) -> Result<Self> {
+    pub(crate) fn from_str(value: &str) -> Result<Self> {
         match value {
             "human" => Ok(Self::Human),
             "agent" => Ok(Self::Agent),
@@ -424,8 +425,30 @@ pub trait UserMemoryStore: Send + Sync {
     fn count_events_since(&self, subject: &str, horizon: i64) -> Result<i64>;
 }
 
+/// One indexed chunk of a parent document. Used by `upsert_document` so the
+/// store can write a single document row with N chunk rows attached.
+#[derive(Debug, Clone)]
+pub struct DocChunk {
+    pub position: i32,
+    pub content: String,
+    pub embedding: Vec<f32>,
+}
+
 pub trait VectorStore: Send + Sync {
     fn upsert_item(&self, item: ItemRecord, embedding: &[f32]) -> Result<()>;
+
+    /// Write `item` plus N chunks. Default impl falls back to single-chunk
+    /// `upsert_item` using the first chunk's embedding — adequate for stores
+    /// that don't have a chunks table (e.g. SQLite). Postgres overrides to
+    /// write all chunks.
+    fn upsert_document(&self, item: ItemRecord, chunks: Vec<DocChunk>) -> Result<()> {
+        let first = chunks
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("upsert_document called with no chunks"))?;
+        self.upsert_item(item, &first.embedding)
+    }
+
     fn search(
         &self,
         query_embedding: &[f32],
@@ -461,6 +484,8 @@ pub trait VectorStore: Send + Sync {
     fn rebuild_similarity_graph(&self) -> Result<usize>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
+    fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
+    fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
 }
 
 pub struct SqliteVectorStore {
@@ -562,55 +587,6 @@ impl SqliteVectorStore {
         Ok(())
     }
 
-    pub fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at
-             FROM items
-             WHERE ontology_status = 'pending'
-             ORDER BY created_at ASC
-             LIMIT ?1",
-        )?;
-        let items = stmt
-            .query_map([limit as i64], |row| {
-                let metadata_str: String = row.get(2)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    metadata_str,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })?
-            .map(|r| {
-                let (id, text, metadata_str, source_id, created_at) = r?;
-                Ok(ItemRecord {
-                    id,
-                    text,
-                    metadata: serde_json::from_str(&metadata_str)
-                        .unwrap_or(serde_json::Value::Object(Default::default())),
-                    source_id,
-                    created_at,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(items)
-    }
-
-    pub fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-        connection.execute(
-            "UPDATE items SET ontology_status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-        Ok(())
-    }
 }
 
 impl VectorStore for SqliteVectorStore {
@@ -1206,6 +1182,56 @@ impl VectorStore for SqliteVectorStore {
                 Ok(deleted > 0)
             }
         }
+    }
+
+    fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT id, text, metadata, source_id, created_at
+             FROM items
+             WHERE ontology_status = 'pending'
+             ORDER BY created_at ASC
+             LIMIT ?1",
+        )?;
+        let items = stmt
+            .query_map([limit as i64], |row| {
+                let metadata_str: String = row.get(2)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    metadata_str,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .map(|r| {
+                let (id, text, metadata_str, source_id, created_at) = r?;
+                Ok(ItemRecord {
+                    id,
+                    text,
+                    metadata: serde_json::from_str(&metadata_str)
+                        .unwrap_or(serde_json::Value::Object(Default::default())),
+                    source_id,
+                    created_at,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(items)
+    }
+
+    fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "UPDATE items SET ontology_status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
+        Ok(())
     }
 }
 

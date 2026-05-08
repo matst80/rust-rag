@@ -87,6 +87,9 @@ pub struct AppState {
     pub multimodal: Arc<MultimodalConfig>,
     pub upload_path: Arc<String>,
     pub chunking: Arc<ChunkingConfig>,
+    /// Token + markdown-aware chunker. Set when bge-m3 is loaded; absent in
+    /// pure-SQLite mode where the legacy char-based chunker is still used.
+    pub md_chunker: Option<Arc<crate::chunking_md::MarkdownChunker>>,
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
@@ -124,6 +127,7 @@ impl AppState {
             multimodal: Arc::new(multimodal),
             upload_path: Arc::new(upload_path),
             chunking: Arc::new(chunking),
+            md_chunker: None,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs))
                 .build()
@@ -172,6 +176,7 @@ impl AppState {
             multimodal: Arc::new(MultimodalConfig::default()),
             upload_path: Arc::new("uploads".to_owned()),
             chunking: Arc::new(ChunkingConfig::default()),
+            md_chunker: None,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -1074,8 +1079,40 @@ pub(crate) async fn store_entry_core(
             }
             Some(ids)
         }
+    } else if let Some(md_chunker) = state.md_chunker.clone() {
+        // Parent/child path (Postgres + bge-m3): chunk markdown-aware on
+        // tokens, embed each chunk, write one document with N chunks.
+        let item = ItemRecord {
+            id: id.clone(),
+            text: request.text.clone(),
+            metadata: request.metadata,
+            source_id: source_id.clone(),
+            created_at,
+        };
+        let text = request.text.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let chunks = md_chunker.chunks(&text);
+            if chunks.is_empty() {
+                anyhow::bail!("chunker produced no chunks");
+            }
+            let mut embedded = Vec::with_capacity(chunks.len());
+            for c in chunks {
+                let embedding = embedder.embed(&c.content)?;
+                embedded.push(crate::db::DocChunk {
+                    position: c.position,
+                    content: c.content,
+                    embedding,
+                });
+            }
+            store.upsert_document(item, embedded)?;
+            Ok(())
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+        None
     } else {
-        // No chunking requested.
+        // Legacy single-chunk path (SQLite-only mode).
         let item = ItemRecord {
             id: id.clone(),
             text: request.text.clone(),
@@ -3284,6 +3321,14 @@ mod tests {
             let before = edges.len();
             edges.retain(|edge| edge.id != id);
             Ok(edges.len() != before)
+        }
+
+        fn get_items_pending_ontology(&self, _limit: usize) -> Result<Vec<ItemRecord>> {
+            Ok(Vec::new())
+        }
+
+        fn mark_ontology_status(&self, _id: &str, _status: &str) -> Result<()> {
+            Ok(())
         }
     }
 

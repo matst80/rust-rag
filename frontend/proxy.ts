@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server"
 import { NextResponse } from "next/server"
+import { getAuthConfig } from "@/lib/auth/config"
 import { readSessionFromRequest } from "@/lib/auth/session"
 import { acceptsMarkdown } from "@/lib/start-page"
 
@@ -31,7 +32,7 @@ export async function proxy(request: NextRequest) {
 		}
 	}
 
-	if (isProtectedAppRoute(pathname)) {
+	if (isProtectedAppRoute(pathname) && getAuthConfig().authEnabled) {
 		const session = await readSessionFromRequest(request)
 		if (!session) {
 			const url = request.nextUrl.clone()

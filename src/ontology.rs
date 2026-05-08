@@ -1,7 +1,7 @@
 use crate::{
     api::EmbedderHandle,
     config::{OntologyConfig, OpenAiChatConfig},
-    db::{ManualEdgeInput, SqliteVectorStore, VectorStore},
+    db::{ManualEdgeInput, VectorStore},
 };
 use anyhow::Result;
 use reqwest::Client;
@@ -121,7 +121,7 @@ struct ChatChoiceMessage {
 }
 
 pub async fn run_ontology_worker(
-    store: Arc<SqliteVectorStore>,
+    store: Arc<dyn VectorStore>,
     embedder: Arc<EmbedderHandle>,
     http_client: Client,
     openai: OpenAiChatConfig,
@@ -173,7 +173,7 @@ pub async fn run_ontology_worker(
 }
 
 async fn process_batch(
-    store: &Arc<SqliteVectorStore>,
+    store: &Arc<dyn VectorStore>,
     embedder: &Arc<EmbedderHandle>,
     http_client: &Client,
     openai: &OpenAiChatConfig,

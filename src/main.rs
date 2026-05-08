@@ -47,20 +47,56 @@ async fn main() -> Result<()> {
         config.graph_config(),
     )?);
 
-    if config.graph_enabled && config.graph_build_on_startup {
-        println!("rebuilding similarity graph");
-        let rebuilt = store.rebuild_similarity_graph()?;
-        println!("similarity graph rebuilt with {rebuilt} edges");
-    }
-
-    let store_service: Arc<dyn VectorStore> = store.clone();
-    let auth_store: Arc<dyn AuthStore> = store.clone();
-    let user_memory: Arc<dyn UserMemoryStore> = store.clone();
-    let message_store: Arc<dyn MessageStore> = store.clone();
+    // VectorStore + MessageStore: route to Postgres when RAG_DATABASE_URL is
+    // set. Auth + user_memory still on SQLite — those tables port in a
+    // follow-up slice. The Postgres + SQLite stores coexist during the
+    // cutover window.
+    let pg_store = if let Some(url) = &config.database_url {
+        let pg_pool = rust_rag::db::postgres::connect(url, 10).await?;
+        info!("postgres: connected, vector/message/auth/user-memory routed to {url}");
+        let pg = Arc::new(rust_rag::db::postgres::PostgresVectorStore::new(
+            pg_pool,
+            tokio::runtime::Handle::current(),
+            config.graph_config(),
+        ));
+        if config.graph_enabled && config.graph_build_on_startup {
+            println!("rebuilding similarity graph (postgres)");
+            let pg_clone = pg.clone();
+            let rebuilt = tokio::task::spawn_blocking(move || {
+                pg_clone.rebuild_similarity_graph()
+            })
+            .await??;
+            println!("similarity graph rebuilt with {rebuilt} edges");
+        }
+        Some(pg)
+    } else {
+        if config.graph_enabled && config.graph_build_on_startup {
+            println!("rebuilding similarity graph");
+            let rebuilt = store.rebuild_similarity_graph()?;
+            println!("similarity graph rebuilt with {rebuilt} edges");
+        }
+        None
+    };
+    let store_service: Arc<dyn VectorStore> = match &pg_store {
+        Some(pg) => pg.clone(),
+        None => store.clone(),
+    };
+    let message_store: Arc<dyn MessageStore> = match &pg_store {
+        Some(pg) => pg.clone(),
+        None => store.clone(),
+    };
+    let auth_store: Arc<dyn AuthStore> = match &pg_store {
+        Some(pg) => pg.clone(),
+        None => store.clone(),
+    };
+    let user_memory: Arc<dyn UserMemoryStore> = match &pg_store {
+        Some(pg) => pg.clone(),
+        None => store.clone(),
+    };
     let embedder_handle = Arc::new(EmbedderHandle::loading());
     let state = AppState::new(
         embedder_handle.clone(),
-        store_service,
+        store_service.clone(),
         auth_store,
         user_memory,
         message_store,
@@ -72,8 +108,38 @@ async fn main() -> Result<()> {
     )
     .with_manager(config.manager.clone());
 
+    // Build the markdown chunker from the embedder's tokenizer so chunk size
+    // is measured in real model tokens. Only enabled when running against
+    // Postgres — the SQLite store doesn't have a chunks table.
+    let md_chunker = if config.database_url.is_some() {
+        let max_tokens = std::env::var("RAG_CHUNK_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500_usize);
+        let overlap_tokens = std::env::var("RAG_CHUNK_OVERLAP_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_usize);
+        let tokenizer = tokenizers::Tokenizer::from_file(&config.tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("loading tokenizer for chunker: {e}"))?;
+        Some(Arc::new(rust_rag::chunking_md::MarkdownChunker::new(
+            tokenizer,
+            max_tokens,
+            overlap_tokens,
+        )?))
+    } else {
+        None
+    };
+
+    info!(
+        "md_chunker enabled = {} (max={} tokens, overlap={} tokens)",
+        md_chunker.is_some(),
+        std::env::var("RAG_CHUNK_MAX_TOKENS").unwrap_or_else(|_| "500".into()),
+        std::env::var("RAG_CHUNK_OVERLAP_TOKENS").unwrap_or_else(|_| "50".into()),
+    );
     let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
     let mut state = state;
+    state.md_chunker = md_chunker;
     state.acp_ws = acp_ws_handle.clone();
 
     // mDNS browser for `_acp-ws._tcp`. When an instance is selected (auto on
@@ -113,7 +179,7 @@ async fn main() -> Result<()> {
     let mut ontology_handle = None;
     if config.ontology.enabled {
         ontology_handle = Some(tokio::spawn(ontology::run_ontology_worker(
-            store.clone(),
+            store_service.clone(),
             embedder_handle.clone(),
             reqwest::Client::new(),
             config.openai_chat.clone(),
@@ -126,6 +192,7 @@ async fn main() -> Result<()> {
     let tokenizer_path = config.tokenizer_path.clone();
     let ort_dylib_path = config.ort_dylib_path.clone();
     let intra_threads = config.intra_threads;
+    let pooling = config.embedding_pooling;
     tokio::task::spawn_blocking(move || {
         println!("loading embedding model from {}", model_path.display());
         match Embedder::from_paths(
@@ -135,8 +202,9 @@ async fn main() -> Result<()> {
             ort_dylib_path.as_deref(),
         ) {
             Ok(embedder) => {
-                println!("embedding model loaded");
-                let embedder_service: Arc<dyn EmbeddingService> = Arc::new(embedder);
+                println!("embedding model loaded (pooling={pooling:?})");
+                let embedder_service: Arc<dyn EmbeddingService> =
+                    Arc::new(embedder.with_pooling(pooling));
                 embedder_handle.mark_ready(embedder_service);
             }
             Err(error) => {

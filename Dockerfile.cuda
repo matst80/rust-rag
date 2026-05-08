@@ -29,10 +29,17 @@ WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY assets ./assets
+COPY migrations ./migrations
 COPY mcp-stdio ./mcp-stdio
+# Model assets are NOT baked into the image. The cluster manifest mounts
+# them from a PVC populated by an init container that pulls from HuggingFace
+# on first boot (see deploy/kubernetes/rust-rag-cuda.yaml). For local dev
+# `assets/bge-m3/` is read directly off disk via `make export-bge-m3`.
+# Empty directories so the binary's default paths exist if the volume mount
+# is missing — it'll fail loudly at first embed rather than confusingly.
+RUN mkdir -p assets
 
-RUN cargo build --release --features cuda --bin rust-rag
+RUN CARGO_BUILD_JOBS=2 cargo build --release --features cuda --bin rust-rag
 
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
@@ -45,18 +52,29 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/rust-rag /usr/local/bin/rust-rag
-COPY --from=builder /app/assets /app/assets
 
-RUN mkdir -p /app/data /app/data/uploads \
+# Model assets live on a mounted volume in-cluster (see manifest's
+# initContainer + `models` PVC). Pre-create the mount points so the runtime
+# user can write into them before the volume mounts during local
+# `docker run` testing.
+RUN mkdir -p /app/data /app/data/uploads /app/assets/bge-m3 \
 	&& chown -R rustrag:rustrag /app
 
+## Defaults target the bge-m3 + Postgres stack (phase 1 of the migration).
+## Override RAG_MODEL_PATH/RAG_TOKENIZER_PATH/RAG_EMBEDDING_DIMENSION via env
+## or ConfigMap to fall back to bge-small for rollback. RAG_DATABASE_URL must
+## be supplied from a Secret in-cluster — leaving it unset starts the server
+## in legacy SQLite-only mode.
 ENV RAG_HOST=0.0.0.0 \
 	RAG_PORT=4001 \
 	RAG_DB_PATH=/app/data/rag.db \
 	RAG_UPLOAD_PATH=/app/data/uploads \
-	RAG_MODEL_PATH=/app/assets/bge-small-en-v1.5/model.onnx \
-	RAG_TOKENIZER_PATH=/app/assets/bge-small-en-v1.5/tokenizer.json \
-	RAG_EMBEDDING_DIMENSION=384 \
+	RAG_MODEL_PATH=/app/assets/bge-m3/model.onnx \
+	RAG_TOKENIZER_PATH=/app/assets/bge-m3/tokenizer.json \
+	RAG_EMBEDDING_DIMENSION=1024 \
+	RAG_EMBEDDING_POOLING=cls \
+	RAG_CHUNK_MAX_TOKENS=500 \
+	RAG_CHUNK_OVERLAP_TOKENS=50 \
 	RAG_INTRA_THREADS=2 \
 	NVIDIA_VISIBLE_DEVICES=all \
 	NVIDIA_DRIVER_CAPABILITIES=compute,utility
