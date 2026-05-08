@@ -341,16 +341,16 @@ ontology-edges:
 		 GROUP BY relation ORDER BY count DESC;"
 
 docker-build:
-	docker build -t "$(IMAGE_NAME)" .
+	docker buildx build --platform linux/amd64,linux/arm64 -t "$(IMAGE_NAME)" .
 
 docker-push:
-	docker push "$(IMAGE_NAME)"
+	docker buildx build --platform linux/amd64,linux/arm64 -t "$(IMAGE_NAME)" --push .
 
 docker-build-cuda:
-	docker build -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
+	docker buildx build --platform linux/amd64 -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
 
 docker-push-cuda:
-	docker push "$(CUDA_IMAGE_NAME)"
+	docker buildx build --platform linux/amd64 -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" --push .
 
 docker-run:
 	mkdir -p "$(CURDIR)/data"
@@ -368,10 +368,10 @@ docker-run:
 		"$(IMAGE_NAME)"
 
 frontend-docker-build:
-	docker build -t "$(FRONTEND_IMAGE_NAME)" "$(FRONTEND_DIR)"
+	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
 
 frontend-docker-push:
-	docker push "$(FRONTEND_IMAGE_NAME)"
+	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
 
 frontend-docker-run:
 	docker run --rm \

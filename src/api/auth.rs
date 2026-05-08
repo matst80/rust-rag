@@ -85,6 +85,19 @@ pub struct ListTokensResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateTokenRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CreateTokenResponse {
+    pub token: String,
+    pub id: String,
+    pub name: String,
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RevokeTokenResponse {
     pub id: String,
     pub deleted: bool,
@@ -101,7 +114,7 @@ pub(super) fn session_routes(state: AppState) -> Router<AppState> {
         .route("/auth/device", get(device_approval_page))
         .route("/auth/device/verify", get(verify_device))
         .route("/auth/device/approve", post(approve_device))
-        .route("/api/auth/tokens", get(list_tokens))
+        .route("/api/auth/tokens", get(list_tokens).post(create_token))
         .route("/api/auth/tokens/{id}", delete(revoke_token))
         .layer(middleware::from_fn_with_state(state, require_session))
 }
@@ -533,6 +546,43 @@ async fn approve_device(
     Ok(Json(ApproveDeviceResponse {
         token_id,
         user_code,
+    }))
+}
+
+async fn create_token(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Json(body): Json<CreateTokenRequest>,
+) -> Result<Json<CreateTokenResponse>, ApiError> {
+    let name = non_empty(body.name.trim().to_owned()).unwrap_or_else(|| "manual token".to_owned());
+    let now = current_timestamp_millis()?;
+    let plaintext = mint_token_plaintext()?;
+    let token_hash = hash_token(&plaintext);
+    let token_id = Uuid::now_v7().to_string();
+    let expires_at = state
+        .auth
+        .mcp_token_ttl_days
+        .map(|days| now + (days as i64) * 86_400_000);
+    let new_token = NewMcpToken {
+        id: token_id.clone(),
+        token_hash,
+        name: name.clone(),
+        subject: subject.0.clone(),
+        created_at: now,
+        expires_at,
+    };
+
+    let auth_store = state.auth_store.clone();
+    tokio::task::spawn_blocking(move || auth_store.create_mcp_token(new_token))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(CreateTokenResponse {
+        token: plaintext,
+        id: token_id,
+        name,
+        expires_at,
     }))
 }
 

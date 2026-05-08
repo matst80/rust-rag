@@ -32,6 +32,8 @@ data:
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
+  RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
+  RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
   ZITADEL_ISSUER: "https://auth.k6n.net"
   ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"
