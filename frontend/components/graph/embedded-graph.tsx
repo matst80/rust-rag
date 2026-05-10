@@ -1,11 +1,13 @@
 "use client"
 
 import { useMemo } from "react"
+import { useTheme } from "next-themes"
 import dynamic from "next/dynamic"
-import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphNode } from "reagraph"
+import { darkTheme, lightTheme } from "reagraph"
+import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphNode, Theme } from "reagraph"
 import { LoaderCircle } from "lucide-react"
 import { useGraphNeighborhood } from "@/lib/api"
-import { computeCommunities } from "./clusters"
+import { computeCommunities, getNodeTitle } from "./clusters"
 
 const GraphCanvas = dynamic(
   () => import("reagraph").then((m) => m.GraphCanvas),
@@ -19,8 +21,32 @@ interface EmbeddedGraphProps {
   onNodeClick?: (id: string) => void
 }
 
+function buildEmbeddedTheme(isDark: boolean): Theme {
+  const base = isDark ? darkTheme : lightTheme
+  return {
+    ...base,
+    canvas: {
+      background: "transparent",
+      fog: null,
+    },
+    cluster: {
+      ...(base.cluster ?? {}),
+      stroke: isDark ? "rgba(148,163,184,0.3)" : "rgba(71,85,105,0.3)",
+      fill: "rgba(99,102,241,0.04)",
+      label: {
+        ...(base.cluster?.label ?? { color: isDark ? "#cbd5e1" : "#334155" }),
+        color: isDark ? "#cbd5e1" : "#334155",
+        fontSize: 11,
+      },
+    },
+  }
+}
+
 export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
   const { data: neighborhood, isLoading } = useGraphNeighborhood(centerId, 1, 30)
+  const { resolvedTheme } = useTheme()
+  const isDark = resolvedTheme === "dark"
+  const theme = useMemo(() => buildEmbeddedTheme(isDark), [isDark])
 
   const entries = neighborhood?.nodes ?? []
   const edges = neighborhood?.edges ?? []
@@ -38,7 +64,8 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         const fill = clusters.colorByCluster.get(cid) ?? "#64748b"
         return {
           id: entry.id,
-          label: entry.id.length > 28 ? `${entry.id.slice(0, 25)}…` : entry.id,
+          label: getNodeTitle(entry),
+          subLabel: entry.source_id,
           fill,
           size: entry.id === centerId ? 14 : 8,
           cluster: cid,
@@ -89,10 +116,12 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
   return (
     <div className="h-full w-full">
       <GraphCanvas
+        theme={theme}
         nodes={nodes}
         edges={reagraphEdges}
         clusterAttribute="cluster"
         layoutType="forceDirected2d"
+        labelType="auto"
         actives={[centerId]}
         draggable
         onNodeClick={(node: InternalGraphNode) => onNodeClick?.(node.id)}

@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
+import { useTheme } from "next-themes"
 import dynamic from "next/dynamic"
-import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphEdge, InternalGraphNode } from "reagraph"
+import { darkTheme, lightTheme } from "reagraph"
+import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphEdge, InternalGraphNode, Theme } from "reagraph"
 import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, X, Search, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
@@ -33,7 +35,7 @@ import {
   useDeleteEdge,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { computeCommunities } from "./clusters"
+import { computeCommunities, getNodeTitle } from "./clusters"
 
 const GraphCanvas = dynamic(
   () => import("reagraph").then((m) => m.GraphCanvas),
@@ -57,10 +59,36 @@ export function GraphView() {
   return <GraphViewContent />
 }
 
+function buildReagraphTheme(isDark: boolean): Theme {
+  const base = isDark ? darkTheme : lightTheme
+  // Override canvas to inherit page background so the graph blends in.
+  return {
+    ...base,
+    canvas: {
+      background: isDark ? "#0a0a0a" : "#fafafa",
+      fog: isDark ? "#0a0a0a" : "#fafafa",
+    },
+    cluster: {
+      ...(base.cluster ?? {}),
+      stroke: isDark ? "rgba(148,163,184,0.35)" : "rgba(71,85,105,0.35)",
+      fill: isDark ? "rgba(99,102,241,0.04)" : "rgba(99,102,241,0.05)",
+      opacity: 0.9,
+      label: {
+        ...(base.cluster?.label ?? { color: isDark ? "#cbd5e1" : "#334155" }),
+        color: isDark ? "#e2e8f0" : "#1e293b",
+        fontSize: 14,
+      },
+    },
+  }
+}
+
 function GraphViewContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const focusId = searchParams.get("focus")
+  const { resolvedTheme } = useTheme()
+  const isDark = resolvedTheme === "dark"
+  const reagraphTheme = useMemo(() => buildReagraphTheme(isDark), [isDark])
 
   const {
     data: graphStatus,
@@ -133,7 +161,8 @@ function GraphViewContent() {
       const isCenter = entry.id === centerNode
       return {
         id: entry.id,
-        label: entry.id.length > 36 ? `${entry.id.slice(0, 33)}…` : entry.id,
+        label: getNodeTitle(entry),
+        subLabel: entry.source_id,
         fill,
         size: isCenter ? 18 : 10,
         cluster: cid,
@@ -141,6 +170,7 @@ function GraphViewContent() {
           sourceId: entry.source_id,
           text: entry.text,
           cluster: cid,
+          rawId: entry.id,
         },
       }
     })
@@ -324,10 +354,12 @@ function GraphViewContent() {
     <div className="flex h-[calc(100vh-3.5rem)]">
       <div className="relative flex-1">
         <GraphCanvas
+          theme={reagraphTheme}
           nodes={reagraphNodes}
           edges={reagraphEdges}
           clusterAttribute="cluster"
           layoutType="forceDirected2d"
+          labelType="all"
           selections={selectedNode ? [selectedNode] : []}
           actives={centerNode ? [centerNode] : []}
           draggable
