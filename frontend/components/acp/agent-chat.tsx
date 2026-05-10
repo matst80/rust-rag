@@ -120,7 +120,6 @@ export function AgentChat() {
 	const connect = useCallback(async () => {
 		setConn({ status: "connecting" })
 		let url: string
-		let token: string
 		try {
 			const res = await fetch("/bff/acp/config", { credentials: "include" })
 			if (res.status === 503) {
@@ -131,20 +130,26 @@ export function AgentChat() {
 				setConn({ status: "error", error: `config fetch ${res.status}` })
 				return
 			}
-			const data = (await res.json()) as { url?: string; token?: string }
-			if (!data.url || !data.token) {
-				setConn({ status: "disabled", error: "missing url/token" })
+			const data = (await res.json()) as { url?: string }
+			if (!data.url) {
+				setConn({ status: "disabled", error: "missing url" })
 				return
 			}
 			url = data.url
-			token = data.token
 		} catch (err) {
 			setConn({ status: "error", error: String(err) })
 			return
 		}
 
-		const sep = url.includes("?") ? "&" : "?"
-		const wsUrl = `${url}${sep}token=${encodeURIComponent(token)}`
+		// Same-origin relative paths get promoted to ws(s):// against the current
+		// host. Absolute URLs (legacy LAN daemon endpoints) pass through unchanged.
+		let wsUrl: string
+		if (url.startsWith("/")) {
+			const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+			wsUrl = `${proto}//${window.location.host}${url}`
+		} else {
+			wsUrl = url
+		}
 		const ws = new WebSocket(wsUrl)
 		wsRef.current = ws
 

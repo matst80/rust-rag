@@ -892,6 +892,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/acp/select", post(select_acp_instance))
         .route("/api/acp/register", post(register_acp_instance))
         .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
+        .route("/api/acp/ws", get(acp_ws_proxy))
         .route(
             "/api/acp/register/{name}",
             delete(unregister_acp_instance),
@@ -2807,6 +2808,93 @@ async fn unregister_acp_instance(
         id: name,
         deleted: removed,
     }))
+}
+
+/// Browser-facing WebSocket proxy. Bridges a same-origin `wss://…/api/acp/ws`
+/// upgrade onto the singleton AcpWsHandle so multiple browser tabs share one
+/// daemon connection. Auth is inherited from `require_api_key` (session cookie
+/// for browsers, x-api-key for service callers).
+async fn acp_ws_proxy(
+    ws: axum::extract::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, ApiError> {
+    let handle = state
+        .acp_ws
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("acp_ws not enabled".to_owned()))?;
+    Ok(ws.on_upgrade(move |socket| acp_ws_proxy_task(socket, handle)))
+}
+
+async fn acp_ws_proxy_task(
+    socket: axum::extract::ws::WebSocket,
+    handle: crate::acp_ws::AcpWsHandle,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let (mut sink, mut stream) = socket.split();
+    let mut rx = handle.subscribe();
+
+    if let Some(snap) = handle.latest_snapshot_text().await {
+        if sink.send(AxumMessage::Text(snap.into())).await.is_err() {
+            return;
+        }
+    }
+
+    let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(text) => {
+                    if sink.send(AxumMessage::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "acp_ws_proxy: subscriber lagged");
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            },
+            msg = stream.next() => match msg {
+                Some(Ok(AxumMessage::Text(text))) => {
+                    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            tracing::debug!(error = %err, "acp_ws_proxy: client sent non-JSON");
+                            continue;
+                        }
+                    };
+                    if let Err(err) = handle.send_raw(value) {
+                        tracing::warn!(error = %err, "acp_ws_proxy: forward failed");
+                        break;
+                    }
+                }
+                Some(Ok(AxumMessage::Binary(_))) => {
+                    tracing::debug!("acp_ws_proxy: dropping binary frame from client");
+                }
+                Some(Ok(AxumMessage::Ping(p))) => {
+                    if sink.send(AxumMessage::Pong(p)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(AxumMessage::Pong(_))) => {}
+                Some(Ok(AxumMessage::Close(_))) | None => break,
+                Some(Err(err)) => {
+                    tracing::debug!(error = %err, "acp_ws_proxy: client read error");
+                    break;
+                }
+            },
+            _ = ping_tick.tick() => {
+                if sink.send(AxumMessage::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 const MESSAGE_AUTH_METADATA_KEY: &str = "__auth";

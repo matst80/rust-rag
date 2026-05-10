@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::Message;
@@ -65,6 +65,9 @@ struct InnerState {
     buffers: HashMap<String, SessionBuffer>,
     /// Latest Snapshot payload, if any.
     latest_snapshot: Option<AcpEvent>,
+    /// Verbatim text of the most recent snapshot frame, replayed to new browser
+    /// subscribers so they don't have to wait for the daemon to emit one.
+    latest_snapshot_text: Option<String>,
     /// Outstanding PermissionRequest events keyed by request_id.
     pending_permissions: HashMap<String, AcpEvent>,
     /// Connection status for diagnostics.
@@ -83,6 +86,9 @@ pub struct AcpWsHandle {
     /// causes the run loop to drop its current connection and reconnect.
     target: Arc<Mutex<(String, Option<String>)>>,
     target_changed: Arc<Notify>,
+    /// Fan-out of every Text frame received from the daemon. Browser-side
+    /// proxies subscribe here so a single daemon connection feeds many tabs.
+    events_tx: broadcast::Sender<String>,
 }
 
 impl AcpWsHandle {
@@ -185,6 +191,20 @@ impl AcpWsHandle {
         let g = self.inner.lock().await;
         g.latest_snapshot.clone()
     }
+
+    /// Verbatim text of the last snapshot frame the daemon sent us, ready to
+    /// forward to a freshly-connected browser subscriber.
+    pub async fn latest_snapshot_text(&self) -> Option<String> {
+        let g = self.inner.lock().await;
+        g.latest_snapshot_text.clone()
+    }
+
+    /// Subscribe to the raw daemon-frame fanout. Each receiver gets every
+    /// Text frame in arrival order; lagging consumers see `RecvError::Lagged`
+    /// and should keep recv-ing.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.events_tx.subscribe()
+    }
 }
 
 /// Spawn the long-lived WS client task. Returns the handle even when no URL
@@ -202,6 +222,7 @@ pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
     let notify = Arc::new(Notify::new());
     let target = Arc::new(Mutex::new((url.unwrap_or_default(), token)));
     let target_changed = Arc::new(Notify::new());
+    let (events_tx, _) = broadcast::channel::<String>(256);
 
     let handle = AcpWsHandle {
         inner: inner.clone(),
@@ -210,6 +231,7 @@ pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
         event_notify: notify.clone(),
         target: target.clone(),
         target_changed: target_changed.clone(),
+        events_tx: events_tx.clone(),
     };
 
     tokio::spawn(run_loop(
@@ -221,6 +243,7 @@ pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
         inner,
         rx,
         notify,
+        events_tx,
     ));
     Some(handle)
 }
@@ -234,6 +257,7 @@ async fn run_loop(
     inner: Arc<Mutex<InnerState>>,
     mut outbound_rx: mpsc::UnboundedReceiver<Value>,
     notify: Arc<Notify>,
+    events_tx: broadcast::Sender<String>,
 ) {
     let mut backoff = initial_backoff;
 
@@ -281,6 +305,10 @@ async fn run_loop(
                         Some(msg) = stream.next() => {
                             match msg {
                                 Ok(Message::Text(text)) => {
+                                    // Fan out the raw frame to browser subscribers
+                                    // first; ring-buffer ingestion runs after and is
+                                    // independent.
+                                    let _ = events_tx.send(text.to_string());
                                     handle_incoming(&inner, cap_per_session, &text).await;
                                     notify.notify_waiters();
                                 }
@@ -389,6 +417,7 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
 
     if is_snapshot(&kind) {
         g.latest_snapshot = Some(event.clone());
+        g.latest_snapshot_text = Some(text.to_string());
     }
 
     if is_permission_request(&kind) {
