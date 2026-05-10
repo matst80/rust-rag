@@ -26,7 +26,7 @@ function buildEmbeddedTheme(isDark: boolean): Theme {
   const bg = isDark ? "#0a0a0a" : "#fafafa"
   return {
     ...base,
-    canvas: { background: "transparent", fog: null },
+    canvas: { background: bg, fog: null },
     node: {
       ...base.node,
       label: {
@@ -81,6 +81,7 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
           fill,
           size: entry.id === centerId ? 14 : 8,
           cluster: cid,
+          data: { cluster: cid, sourceId: entry.source_id },
         }
       }),
     [entries, clusters, centerId]
