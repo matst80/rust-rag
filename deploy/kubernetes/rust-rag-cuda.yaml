@@ -77,6 +77,19 @@ data:
   RAG_ADMIN_SUBJECTS: "369527412653951321"
   RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
   RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
+  ## Manager loop. Drives the cron + mention-triggered orchestrator that
+  ## reads `manager` channel + tool-calls into ACP / RAG / message tools.
+  ## Uses xAI Grok Fast Reasoning over the public API; api key lands via
+  ## RAG_MANAGER_API_KEY in the rust-rag-frontend-auth Secret.
+  RAG_MANAGER_ENABLED: "true"
+  RAG_MANAGER_API_BASE_URL: "https://api.x.ai/v1"
+  RAG_MANAGER_MODEL: "grok-4-1-fast-reasoning"
+  RAG_MANAGER_CHANNEL: "manager"
+  RAG_MANAGER_MENTION: "@manager"
+  RAG_MANAGER_INTERVAL_SECS: "300"
+  RAG_MANAGER_TIMEOUT_SECS: "120"
+  RAG_MANAGER_MAX_ITERATIONS: "8"
+  RAG_MANAGER_MEMORY_SOURCE_ID: "manager_memory"
   ## Pod runs in a k8s subnet that user LAN can't multicast into, so the
   ## mDNS browse for `_acp-ws._tcp` would never resolve anyone. Switch to
   ## HTTP-only mode: clients call POST /api/acp/register from the LAN side.
