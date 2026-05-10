@@ -322,6 +322,16 @@ pub struct AcpDelegateTaskParams {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpCommandAck {
+    pub ok: bool,
+    /// Wire variant the daemon will see (e.g. "spawn_session").
+    pub sent: String,
+    /// Optional context (e.g. echoed `request_id` for permission_response).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct AcpDelegateTaskResponse {
     pub ok: bool,
     pub session_id: Option<String>,
@@ -1023,18 +1033,18 @@ impl RustRagMcpServer {
     }
 
     #[tool(description = "Ask the active ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`.")]
-    async fn acp_list_sessions(&self) -> Result<Json<serde_json::Value>, String> {
+    async fn acp_list_sessions(&self) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         h.command("list_sessions", serde_json::json!({}))
             .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "list_sessions"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "list_sessions".into(), context: None }))
     }
 
     #[tool(description = "Spawn a headless ACP session on the active daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt.")]
     async fn acp_spawn_session(
         &self,
         Parameters(params): Parameters<AcpSpawnParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         let mut payload = serde_json::Map::new();
         payload.insert("project_path".into(), serde_json::Value::String(params.project_path));
@@ -1046,14 +1056,14 @@ impl RustRagMcpServer {
         }
         h.command("spawn_session", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "spawn_session"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "spawn_session".into(), context: None }))
     }
 
     #[tool(description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`.")]
     async fn acp_send_prompt(
         &self,
         Parameters(params): Parameters<AcpSendPromptParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         let mut payload = serde_json::Map::new();
         payload.insert("session_id".into(), serde_json::Value::String(params.session_id));
@@ -1066,25 +1076,25 @@ impl RustRagMcpServer {
         }
         h.command("send_prompt", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "send_prompt"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "send_prompt".into(), context: None }))
     }
 
     #[tool(description = "Cancel the currently running prompt on an ACP session.")]
     async fn acp_cancel(
         &self,
         Parameters(AcpSessionIdParams { session_id }): Parameters<AcpSessionIdParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         h.command("cancel", serde_json::json!({ "session_id": session_id }))
             .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "cancel"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "cancel".into(), context: None }))
     }
 
     #[tool(description = "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback.")]
     async fn acp_end_session(
         &self,
         Parameters(params): Parameters<AcpEndSessionParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         let mut payload = serde_json::Map::new();
         if let Some(s) = params.session_id {
@@ -1098,28 +1108,28 @@ impl RustRagMcpServer {
         }
         h.command("end_session", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "end_session"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "end_session".into(), context: None }))
     }
 
     #[tool(description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\").")]
     async fn acp_set_permission_mode(
         &self,
         Parameters(params): Parameters<AcpSetPermissionModeParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         h.command(
             "set_permission_mode",
             serde_json::json!({ "session_id": params.session_id, "mode": params.mode }),
         )
         .map_err(|e| e.to_string())?;
-        Ok(Json(serde_json::json!({"ok": true, "sent": "set_permission_mode"})))
+        Ok(Json(AcpCommandAck { ok: true, sent: "set_permission_mode".into(), context: None }))
     }
 
     #[tool(description = "Reply to an outstanding PermissionRequest. `decision` ∈ allow_once | allow_always | deny | deny_always.")]
     async fn acp_permission_respond(
         &self,
         Parameters(params): Parameters<AcpPermissionRespondParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state)?;
         h.command(
             "permission_response",
@@ -1127,7 +1137,11 @@ impl RustRagMcpServer {
         )
         .map_err(|e| e.to_string())?;
         crate::acp_ws::mark_permission_resolved(h, &params.request_id).await;
-        Ok(Json(serde_json::json!({"ok": true, "request_id": params.request_id})))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "permission_response".into(),
+            context: Some(serde_json::json!({ "request_id": params.request_id })),
+        }))
     }
 
     #[tool(description = "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Buffers up to ~200 events per session.")]
