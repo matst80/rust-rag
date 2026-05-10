@@ -1047,12 +1047,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_bind_telegram_thread",
-                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to use an existing topic, or null to let the daemon create a new topic named after the project.",
+                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to bind to an existing topic (name ignored), or thread_id=null to let the daemon create a new topic — in that case `name` is REQUIRED (1-128 chars, no control chars) and used verbatim as the topic label. Daemon emits a `telegram_thread_bound` ack with the resolved thread_id; observe via `acp_recent_events { kinds: [\"telegram_thread_bound\"] }`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
-                        "thread_id": {"type": ["integer", "null"]}
+                        "thread_id": {"type": ["integer", "null"]},
+                        "name": {"type": "string", "description": "Forum topic label. Required when thread_id is null."}
                     },
                     "required": ["session_id"],
                     "additionalProperties": false
