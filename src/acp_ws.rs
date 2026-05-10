@@ -36,7 +36,7 @@ fn is_session_ended(kind: &str) -> bool {
 }
 
 /// One event captured from the WS stream.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct AcpEvent {
     /// Local monotonic id assigned on receive (until telegram-acp ships
     /// server-side `event_id` per #7).

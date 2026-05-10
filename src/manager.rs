@@ -1338,7 +1338,7 @@ async fn tool_assign_task(
     let messages = state.messages.clone();
     let posted =
         tokio::task::spawn_blocking(move || messages.send_message(new_msg)).await??;
-    state.message_notify.notify_waiters();
+    state.publish_message(&posted);
     if posted.created_at > *last_seen {
         *last_seen = posted.created_at;
     }

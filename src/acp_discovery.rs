@@ -21,7 +21,7 @@ const DEFAULT_REGISTER_TTL: Duration = Duration::from_secs(120);
 /// How often the janitor wakes to prune expired registrations.
 const REGISTER_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AcpInstanceSource {
     /// Discovered via mDNS browse on the LAN.
@@ -31,7 +31,7 @@ pub enum AcpInstanceSource {
     Registered,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct AcpInstance {
     /// Friendly instance name (e.g. `acp-ws-9001`). Unique per source map.
     pub name: String,

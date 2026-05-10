@@ -83,6 +83,11 @@ pub struct AppState {
     pub presence: Arc<PresenceTracker>,
     pub tombstones: Arc<TombstoneTracker>,
     pub message_notify: Arc<tokio::sync::Notify>,
+    /// Fan-out of every successfully persisted message. `wait_for_message`
+    /// (MCP) and any future per-message subscribers can filter without
+    /// re-querying the DB. Capacity is generous; lagging consumers see
+    /// `RecvError::Lagged` and should keep recv-ing.
+    pub message_broadcast: Arc<tokio::sync::broadcast::Sender<MessageRecord>>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
     pub multimodal: Arc<MultimodalConfig>,
@@ -130,6 +135,7 @@ impl AppState {
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(multimodal),
@@ -165,6 +171,14 @@ impl AppState {
         self
     }
 
+    /// Publish a freshly-inserted message: wake long-poll listeners on
+    /// `message_notify` and broadcast the record on `message_broadcast` for
+    /// per-message subscribers. Call exactly once per persisted message.
+    pub fn publish_message(&self, record: &MessageRecord) {
+        let _ = self.message_broadcast.send(record.clone());
+        self.message_notify.notify_waiters();
+    }
+
     pub fn mcp_allowed_hosts(&self) -> Vec<String> {
         self.auth.mcp_allowed_hosts.clone()
     }
@@ -191,6 +205,7 @@ impl AppState {
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(MultimodalConfig::default()),
@@ -2415,7 +2430,7 @@ async fn send_message(
         }
     }
 
-    state.message_notify.notify_waiters();
+    state.publish_message(&record);
 
     Ok((StatusCode::CREATED, Json(record.into())))
 }
