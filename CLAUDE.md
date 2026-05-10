@@ -102,10 +102,16 @@ Public ingress at `https://otel.k6n.net`.
 
 History endpoints (port 8080 internally):
 
-- `GET /api/history` — every signal type
-- `GET /api/history/traces` — traces only
-- `GET /api/history/metrics` — metrics only
-- `GET /api/history/logs` — logs only
+| Endpoint | Use |
+|---|---|
+| `GET /api/history` | Every signal type |
+| `GET /api/history/traces` | Traces only |
+| `GET /api/history/metrics` | Metrics only |
+| `GET /api/history/logs` | Logs only |
+| `GET /api/history/search?q=<text>` | Full-text search across signals |
+| `GET /api/history/wait?q=<text>&timeout=<sec>` | Block until matching signal arrives, or `timeout waiting for signal` |
+
+All accept `?limit=N`. `wait` accepts `?timeout=<sec>` (default short).
 
 Filter rust-rag spans:
 
@@ -113,6 +119,13 @@ Filter rust-rag spans:
 curl -s 'https://otel.k6n.net/api/history/traces?limit=500' \
   | jq '[.[] | select(.data.resourceSpans[].resource.attributes[]
         | select(.key=="service.name" and .value.stringValue=="rust-rag"))]'
+```
+
+Wait for a specific span to appear (handy for live debugging):
+
+```bash
+curl -sS --max-time 30 \
+  'https://otel.k6n.net/api/history/wait?q=POST%20/api/store&timeout=25'
 ```
 
 UI at `https://otel.k6n.net/`. The viewer is a SPA; trace data lives behind
