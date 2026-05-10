@@ -322,6 +322,16 @@ pub struct AcpDelegateTaskParams {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpEventsResponse {
+    pub events: Vec<crate::acp_ws::AcpEvent>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpSnapshotResponse {
+    pub snapshot: Option<crate::acp_ws::AcpEvent>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct AcpCommandAck {
     pub ok: bool,
     /// Wire variant the daemon will see (e.g. "spawn_session").
@@ -1148,7 +1158,7 @@ impl RustRagMcpServer {
     async fn acp_recent_events(
         &self,
         Parameters(params): Parameters<AcpRecentEventsParams>,
-    ) -> Result<Json<Vec<crate::acp_ws::AcpEvent>>, String> {
+    ) -> Result<Json<AcpEventsResponse>, String> {
         let h = require_acp(&self.state)?;
         let events = h
             .recent_events(
@@ -1158,23 +1168,27 @@ impl RustRagMcpServer {
                 params.limit,
             )
             .await;
-        Ok(Json(events))
+        Ok(Json(AcpEventsResponse { events }))
     }
 
     #[tool(description = "List outstanding PermissionRequest events awaiting a decision.")]
     async fn acp_pending_permissions(
         &self,
-    ) -> Result<Json<Vec<crate::acp_ws::AcpEvent>>, String> {
+    ) -> Result<Json<AcpEventsResponse>, String> {
         let h = require_acp(&self.state)?;
-        Ok(Json(h.pending_permissions().await))
+        Ok(Json(AcpEventsResponse {
+            events: h.pending_permissions().await,
+        }))
     }
 
     #[tool(description = "Return the most recent Snapshot event (full session state) the WS client has seen, or null if none yet.")]
     async fn acp_get_snapshot(
         &self,
-    ) -> Result<Json<Option<crate::acp_ws::AcpEvent>>, String> {
+    ) -> Result<Json<AcpSnapshotResponse>, String> {
         let h = require_acp(&self.state)?;
-        Ok(Json(h.latest_snapshot().await))
+        Ok(Json(AcpSnapshotResponse {
+            snapshot: h.latest_snapshot().await,
+        }))
     }
 
     #[tool(description = "One-shot delegation: spawn a headless ACP session in `project_path`, wait for SessionStarted (default 15s), bind a fresh Telegram forum topic named `name`, then send `text` as a prompt. `name` becomes metadata.title/metadata.name on spawn so the daemon can label the auto-created topic. Returns the new session_id, or `ok=false` with a hint if SessionStarted didn't arrive in time.")]
