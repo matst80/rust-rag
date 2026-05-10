@@ -392,6 +392,7 @@ function GraphViewContent() {
             linkDistance: 110,
             nodeStrength: -400,
             clusterStrength: 0.6,
+            clusterType: "treemap",
           }}
           labelType="all"
           selections={selectedNode ? [selectedNode] : []}
