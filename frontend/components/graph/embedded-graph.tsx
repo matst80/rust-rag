@@ -6,7 +6,8 @@ import dynamic from "next/dynamic"
 import { darkTheme, lightTheme } from "reagraph"
 import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphNode, Theme } from "reagraph"
 import { LoaderCircle } from "lucide-react"
-import { useGraphNeighborhood } from "@/lib/api"
+import { useGraphNeighborhood, useItem, useSearch } from "@/lib/api"
+import type { Entry } from "@/lib/api"
 import { computeCommunities, getNodeTitle } from "./clusters"
 
 const GraphCanvas = dynamic(
@@ -54,19 +55,82 @@ function buildEmbeddedTheme(isDark: boolean): Theme {
   }
 }
 
+const SEMANTIC_TOP_K = 8
+
 export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
   const { data: neighborhood, isLoading } = useGraphNeighborhood(centerId, 1, 30)
+  const { data: centerItem } = useItem(centerId)
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === "dark"
   const theme = useMemo(() => buildEmbeddedTheme(isDark), [isDark])
 
-  const entries = neighborhood?.nodes ?? []
+  // Pull top semantic neighbors so the embedded view stays useful even when
+  // the entry has no manual or graph-DB-similarity edges yet.
+  const { data: semanticBundle } = useSearch(
+    centerItem?.text ?? "",
+    undefined,
+    true,
+    SEMANTIC_TOP_K
+  )
+
+  const baseEntries = neighborhood?.nodes ?? []
   const edges = neighborhood?.edges ?? []
   const pairwise = neighborhood?.pairwise_distances ?? []
 
+  const entries = useMemo<Entry[]>(() => {
+    const merged = [...baseEntries]
+    const seen = new Set(merged.map((e) => e.id))
+    for (const hit of semanticBundle?.results ?? []) {
+      if (seen.has(hit.id)) continue
+      seen.add(hit.id)
+      merged.push({
+        id: hit.id,
+        text: hit.text,
+        metadata: hit.metadata,
+        source_id: hit.source_id,
+        created_at: hit.created_at,
+      })
+    }
+    return merged
+  }, [baseEntries, semanticBundle])
+
+  const semanticEdges = useMemo(() => {
+    const present = new Set<string>()
+    for (const e of edges) {
+      present.add(`${e.source_id}::${e.target_id}`)
+      present.add(`${e.target_id}::${e.source_id}`)
+    }
+    for (const d of pairwise) {
+      present.add(`${d.from_item_id}::${d.to_item_id}`)
+      present.add(`${d.to_item_id}::${d.from_item_id}`)
+    }
+    const out: { from: string; to: string; distance: number }[] = []
+    for (const hit of semanticBundle?.results ?? []) {
+      if (hit.id === centerId) continue
+      const key = `${centerId}::${hit.id}`
+      if (present.has(key)) continue
+      // hit.score is roughly 0..1 similarity; convert to a distance proxy.
+      const dist = Math.max(0.05, Math.min(0.95, 1 - hit.score))
+      out.push({ from: centerId, to: hit.id, distance: dist })
+    }
+    return out
+  }, [semanticBundle, edges, pairwise, centerId])
+
+  const pairwiseForClustering = useMemo(
+    () => [
+      ...pairwise,
+      ...semanticEdges.map((s) => ({
+        from_item_id: s.from,
+        to_item_id: s.to,
+        distance: s.distance,
+      })),
+    ],
+    [pairwise, semanticEdges]
+  )
+
   const clusters = useMemo(
-    () => computeCommunities(entries, edges, pairwise),
-    [entries, edges, pairwise]
+    () => computeCommunities(entries, edges, pairwiseForClustering),
+    [entries, edges, pairwiseForClustering]
   )
 
   const nodes = useMemo<GraphNode[]>(
@@ -115,8 +179,20 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         size: 0.6,
       })
     }
+    for (const s of semanticEdges) {
+      const key = `${s.from}::${s.to}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      seen.add(`${s.to}::${s.from}`)
+      out.push({
+        id: `sem-${s.from}-${s.to}`,
+        source: s.from,
+        target: s.to,
+        size: 0.5,
+      })
+    }
     return out
-  }, [edges, pairwise])
+  }, [edges, pairwise, semanticEdges])
 
   if (isLoading) {
     return (
