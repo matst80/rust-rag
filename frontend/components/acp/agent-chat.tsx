@@ -25,6 +25,11 @@ interface SessionInfo {
 	history?: unknown[]
 }
 
+interface ProjectInfo {
+	name: string
+	path: string
+}
+
 interface AcpInstance {
 	name: string
 	host: string
@@ -82,6 +87,8 @@ export function AgentChat() {
 	const [draft, setDraft] = useState("")
 	const [instances, setInstances] = useState<AcpInstance[]>([])
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
+	const [projects, setProjects] = useState<ProjectInfo[]>([])
+	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
@@ -168,6 +175,16 @@ export function AgentChat() {
 				const list = Array.isArray((payload as { sessions?: unknown }).sessions)
 					? (payload as { sessions: SessionInfo[] }).sessions
 					: []
+				const projectList = Array.isArray((payload as { projects?: unknown }).projects)
+					? ((payload as { projects: unknown[] }).projects.filter(
+						(p): p is ProjectInfo =>
+							typeof p === "object" &&
+							p !== null &&
+							typeof (p as ProjectInfo).name === "string" &&
+							typeof (p as ProjectInfo).path === "string",
+					))
+					: []
+				setProjects(projectList)
 				const map: Record<string, SessionInfo> = {}
 				const ingestedBySession: Record<string, AcpEvent[]> = {}
 				for (const s of list) {
@@ -354,9 +371,19 @@ export function AgentChat() {
 	}
 
 	const spawn = () => {
-		const projectPath = window.prompt("project_path")
-		if (!projectPath) return
-		send({ type: "spawn_session", project_path: projectPath })
+		const initial = projects[0]?.path ?? ""
+		setSpawnDialog({ projectPath: initial, agentCommand: "" })
+	}
+
+	const submitSpawn = () => {
+		if (!spawnDialog) return
+		const path = spawnDialog.projectPath.trim()
+		if (!path) return
+		const envelope: AcpEnvelope = { type: "spawn_session", project_path: path }
+		const cmd = spawnDialog.agentCommand.trim()
+		if (cmd) envelope.agent_command = cmd
+		send(envelope)
+		setSpawnDialog(null)
 	}
 
 	const bindTelegramThread = () => {
@@ -637,6 +664,115 @@ export function AgentChat() {
 					</>
 				)}
 			</section>
+
+			{spawnDialog && (
+				<div
+					className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+					onClick={(e) => {
+						if (e.target === e.currentTarget) setSpawnDialog(null)
+					}}
+				>
+					<div className="w-full max-w-md border border-border bg-background p-5">
+						<div className="flex items-center justify-between mb-4">
+							<h3 className="font-mono text-xs font-bold uppercase tracking-[2px]">
+								Spawn session
+							</h3>
+							<button
+								type="button"
+								className="text-muted-foreground hover:text-foreground"
+								onClick={() => setSpawnDialog(null)}
+								aria-label="Close"
+							>
+								<X className="size-4" />
+							</button>
+						</div>
+
+						{projects.length > 0 ? (
+							<div className="mb-3">
+								<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
+									Project
+								</label>
+								<select
+									value={
+										projects.find((p) => p.path === spawnDialog.projectPath)
+											? spawnDialog.projectPath
+											: ""
+									}
+									onChange={(e) =>
+										setSpawnDialog((d) =>
+											d ? { ...d, projectPath: e.target.value } : d,
+										)
+									}
+									className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+								>
+									{projects.map((p) => (
+										<option key={p.path} value={p.path}>
+											{p.name} — {p.path}
+										</option>
+									))}
+									<option value="">(custom path…)</option>
+								</select>
+							</div>
+						) : (
+							<p className="font-mono text-[10px] text-muted-foreground mb-2">
+								No project templates from the daemon. Enter a project path manually.
+							</p>
+						)}
+
+						<div className="mb-3">
+							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
+								project_path
+							</label>
+							<input
+								type="text"
+								value={spawnDialog.projectPath}
+								onChange={(e) =>
+									setSpawnDialog((d) =>
+										d ? { ...d, projectPath: e.target.value } : d,
+									)
+								}
+								placeholder="/abs/path or name relative to TELEGRAM_ACP_PROJECT_ROOT"
+								className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+							/>
+						</div>
+
+						<div className="mb-4">
+							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
+								agent_command (optional)
+							</label>
+							<input
+								type="text"
+								value={spawnDialog.agentCommand}
+								onChange={(e) =>
+									setSpawnDialog((d) =>
+										d ? { ...d, agentCommand: e.target.value } : d,
+									)
+								}
+								placeholder="claude / gemini / amp / …"
+								className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+							/>
+						</div>
+
+						<div className="flex justify-end gap-2">
+							<button
+								type="button"
+								onClick={() => setSpawnDialog(null)}
+								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-border hover:bg-card"
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								onClick={submitSpawn}
+								disabled={!spawnDialog.projectPath.trim()}
+								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-primary bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-40"
+							>
+								Spawn
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	)
 }
