@@ -77,6 +77,11 @@ data:
   RAG_ADMIN_SUBJECTS: "369527412653951321"
   RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
   RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
+  ## Pod runs in a k8s subnet that user LAN can't multicast into, so the
+  ## mDNS browse for `_acp-ws._tcp` would never resolve anyone. Switch to
+  ## HTTP-only mode: clients call POST /api/acp/register from the LAN side.
+  RAG_ACP_DISCOVERY_MODE: "http"
+  RAG_ACP_REGISTER_TTL_SECS: "120"
   ZITADEL_ISSUER: "https://auth.k6n.net"
   ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"

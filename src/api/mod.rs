@@ -890,6 +890,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/messages/channels", get(list_message_channels))
         .route("/api/acp/instances", get(list_acp_instances))
         .route("/api/acp/select", post(select_acp_instance))
+        .route("/api/acp/register", post(register_acp_instance))
+        .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
+        .route(
+            "/api/acp/register/{name}",
+            delete(unregister_acp_instance),
+        )
         .route(
             "/api/messages/channels/{channel}",
             delete(clear_message_channel),
@@ -2722,6 +2728,83 @@ async fn select_acp_instance(
         .await
         .ok_or_else(|| ApiError::BadRequest(format!("unknown acp instance: {}", req.name)))?;
     Ok(Json(inst))
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterAcpInstanceRequest {
+    name: String,
+    host: String,
+    port: u16,
+    /// Optional fully-qualified URL. When omitted, server builds
+    /// `ws://host:port/`. Use this to register a `wss://...` endpoint or
+    /// any non-default path.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    txt: Option<HashMap<String, String>>,
+}
+
+async fn register_acp_instance(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterAcpInstanceRequest>,
+) -> Result<Json<crate::acp_discovery::AcpInstance>, ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name cannot be empty".to_owned()));
+    }
+    if req.host.trim().is_empty() {
+        return Err(ApiError::BadRequest("host cannot be empty".to_owned()));
+    }
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let instance = crate::acp_discovery::AcpInstance {
+        name: req.name,
+        host: req.host,
+        port: req.port,
+        url: req.url.unwrap_or_default(),
+        txt: req.txt.unwrap_or_default(),
+        source: crate::acp_discovery::AcpInstanceSource::Registered,
+    };
+    let stored = disc.register(instance).await;
+    Ok(Json(stored))
+}
+
+#[derive(Debug, Deserialize)]
+struct HeartbeatAcpInstanceRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct HeartbeatAcpResponse {
+    refreshed: bool,
+}
+
+async fn heartbeat_acp_instance(
+    State(state): State<AppState>,
+    Json(req): Json<HeartbeatAcpInstanceRequest>,
+) -> Result<Json<HeartbeatAcpResponse>, ApiError> {
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let refreshed = disc.heartbeat(&req.name).await;
+    Ok(Json(HeartbeatAcpResponse { refreshed }))
+}
+
+async fn unregister_acp_instance(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<DeleteResponse>, ApiError> {
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let removed = disc.unregister(&name).await;
+    Ok(Json(DeleteResponse {
+        id: name,
+        deleted: removed,
+    }))
 }
 
 const MESSAGE_AUTH_METADATA_KEY: &str = "__auth";

@@ -192,18 +192,29 @@ async fn main() -> Result<()> {
         state.reranker_top_n = reranker_top_n.max(1);
     }
 
-    // mDNS browser for `_acp-ws._tcp`. When an instance is selected (auto on
-    // first sight or via API), point the existing acp_ws client at it.
+    // ACP instance discovery. Default: mDNS browse `_acp-ws._tcp` on the LAN.
+    // When the service runs in k8s on a subnet that can't see the user's
+    // network (multicast doesn't traverse), set RAG_ACP_DISCOVERY_MODE=http
+    // so clients register over HTTP instead.
     let acp_token = config.acp_ws.token.clone();
     let ws_for_disc = acp_ws_handle.clone();
-    let discovery = rust_rag::acp_discovery::spawn(move |instance| {
+    let on_select = move |instance: &rust_rag::acp_discovery::AcpInstance| {
         let Some(handle) = ws_for_disc.clone() else { return };
         let url = instance.url.clone();
         let token = acp_token.clone();
         tokio::spawn(async move {
             handle.set_target(url, token).await;
         });
-    });
+    };
+    let discovery_mode = std::env::var("RAG_ACP_DISCOVERY_MODE")
+        .unwrap_or_else(|_| "mdns".to_owned())
+        .to_lowercase();
+    let discovery = match discovery_mode.as_str() {
+        "http" | "register" | "off" => {
+            Some(rust_rag::acp_discovery::spawn_http_only(on_select))
+        }
+        _ => rust_rag::acp_discovery::spawn(on_select),
+    };
     state.acp_discovery = discovery;
 
     let app = build_app(state.clone());
