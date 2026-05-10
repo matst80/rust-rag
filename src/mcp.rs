@@ -92,6 +92,10 @@ pub struct UpdateItemParams {
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: serde_json::Value,
     pub source_id: String,
+    /// Optional wiki path. Pass an empty string to clear, omit to keep
+    /// the existing value, or a slash-separated path to set/replace.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -204,7 +208,7 @@ impl RustRagMcpServer {
         Ok(Json(body.0))
     }
 
-    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability.")]
+    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability. Optional `path` (slash-separated, e.g. 'team/handbook') groups the entry in the wiki tree under its source_id.")]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
@@ -216,12 +220,13 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar)."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
-        Parameters(request): Parameters<SearchRequest>,
+        Parameters(mut request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
+        request.rerank = request.rerank.or(Some(true));
         let query = request.query.clone();
         let response = search_core(&self.state, request, None)
             .await
@@ -255,12 +260,16 @@ impl RustRagMcpServer {
         }))
     }
 
-    #[tool(description = "List items, optionally filtered by source_id.")]
+    #[tool(description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing.")]
     async fn list_items(
         &self,
         Parameters(query): Parameters<ListItemsQuery>,
     ) -> Result<Json<AdminItemsResponse>, String> {
         let store = self.state.store.clone();
+        let path_prefix = match query.path_prefix.as_deref() {
+            Some(p) => crate::db::normalize_path(p).map_err(|e| e.to_string())?,
+            None => None,
+        };
         let request = ListItemsRequest {
             source_id: query.source_id,
             limit: query.limit,
@@ -269,6 +278,7 @@ impl RustRagMcpServer {
             metadata_filter: query.metadata,
             min_created_at: query.min_created_at,
             max_created_at: query.max_created_at,
+            path_prefix,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -280,16 +290,21 @@ impl RustRagMcpServer {
         }))
     }
 
-    #[tool(description = "Update an existing item by id.")]
+    #[tool(description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched.")]
     async fn update_item(
         &self,
         Parameters(params): Parameters<UpdateItemParams>,
     ) -> Result<Json<AdminItemPayload>, String> {
         let id = params.id.clone();
+        let path_override: Option<Option<String>> = match params.path.as_deref() {
+            Some(p) => Some(crate::db::normalize_path(p).map_err(|e| e.to_string())?),
+            None => None,
+        };
         let request = UpdateItemRequest {
             text: params.text,
             metadata: params.metadata,
             source_id: params.source_id,
+            path: params.path,
         };
         let embedder = self
             .state
@@ -302,12 +317,17 @@ impl RustRagMcpServer {
             let existing = store
                 .get_item(&id)?
                 .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
+            let new_path = match path_override {
+                Some(p) => p,
+                None => existing.path.clone(),
+            };
             let item = ItemRecord {
                 id: existing.id,
                 text: request.text,
                 metadata: request.metadata,
                 source_id: request.source_id,
                 created_at: existing.created_at,
+                path: new_path,
             };
             let embedding = embedder.embed(&item.text)?;
             store.upsert_item(item.clone(), &embedding)?;
@@ -692,6 +712,56 @@ impl RustRagMcpServer {
         }
         Ok(Json(DeleteResponse { id, deleted }))
     }
+
+    #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
+    async fn attach_url(
+        &self,
+        Parameters(request): Parameters<crate::api::attachments::AttachUrlRequest>,
+    ) -> Result<Json<crate::api::attachments::AttachmentSummary>, String> {
+        crate::api::attachments::attach_from_url_core(&self.state, request)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
+    #[tool(description = "List every file attached to an entry, newest first.")]
+    async fn list_attachments(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<crate::api::attachments::AttachmentsResponse>, String> {
+        let store = self.state.store.clone();
+        let target = id.clone();
+        let records =
+            tokio::task::spawn_blocking(move || store.list_attachments_for_item(&target))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+        Ok(Json(crate::api::attachments::AttachmentsResponse {
+            attachments: records.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(description = "Delete an attachment by id. Removes both the database row and the on-disk file.")]
+    async fn delete_attachment(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<DeleteResponse>, String> {
+        crate::api::attachments::delete_attachment_core(&self.state, &id)
+            .await
+            .map_err(stringify_api_error)?;
+        Ok(Json(DeleteResponse { id, deleted: true }))
+    }
+
+    #[tool(description = "Browse entries hierarchically by wiki path. Returns direct child path segments under `prefix` (or top-level when omitted) plus any leaf entries whose path equals `prefix`. Always scoped by `source_id`.")]
+    async fn list_entry_tree(
+        &self,
+        Parameters(query): Parameters<crate::api::attachments::EntriesTreeQuery>,
+    ) -> Result<Json<crate::api::attachments::EntriesTreeResponse>, String> {
+        crate::api::attachments::entries_tree_core(&self.state, query)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
 }
 
 fn stringify_api_error(error: crate::api::ApiError) -> String {
@@ -750,6 +820,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 chunk_context: None,
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
+                path: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -788,7 +859,9 @@ pub fn streamable_http_service(
     let factory_state = state;
     let config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
-        .with_sse_keep_alive(Some(Duration::from_secs(15)));
+        .with_sse_keep_alive(Some(Duration::from_secs(15)))
+        .with_stateful_mode(false)
+        .with_json_response(true);
     StreamableHttpService::new(
         move || Ok(RustRagMcpServer::new(factory_state.clone())),
         Arc::new(LocalSessionManager::default()),

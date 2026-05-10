@@ -30,6 +30,9 @@ import type {
   AssistedQueryResultEvent,
   AssistedQueryMergedEvent,
   ImageIngestResponse,
+  Attachment,
+  AttachmentsResponse,
+  EntriesTreeResponse,
   Message,
   MessageChannel,
   SendMessageRequest,
@@ -385,6 +388,7 @@ export async function getItems(
   if (options.offset !== undefined)
     params.append("offset", options.offset.toString())
   if (options.sort_order) params.append("sort_order", options.sort_order)
+  if (options.path_prefix) params.append("path_prefix", options.path_prefix)
 
   const queryString = params.toString() ? `?${params.toString()}` : ""
   const response = await request<ItemsResponse>(`/admin/items${queryString}`)
@@ -467,6 +471,57 @@ export async function uploadImage(
   }
 
   return response.json()
+}
+
+// Attachments
+export async function uploadAttachment(
+  itemId: string,
+  file: File
+): Promise<Attachment> {
+  const form = new FormData()
+  form.append("item_id", itemId)
+  form.append("file", file)
+  const response = await fetch(`${API_BASE_URL}/api/attachments`, {
+    method: "POST",
+    body: form,
+  })
+  if (!response.ok) {
+    throw new APIError(response.status, `Upload failed: ${response.statusText}`)
+  }
+  return response.json()
+}
+
+export async function attachUrl(
+  itemId: string,
+  url: string,
+  filename?: string
+): Promise<Attachment> {
+  return request<Attachment>("/api/attachments/from-url", {
+    method: "POST",
+    body: JSON.stringify({ item_id: itemId, url, filename }),
+  })
+}
+
+export async function listAttachments(itemId: string): Promise<Attachment[]> {
+  const response = await request<AttachmentsResponse>(
+    `/api/items/${encodeURIComponent(itemId)}/attachments`
+  )
+  return response.attachments
+}
+
+export async function deleteAttachment(id: string): Promise<void> {
+  await request<void>(`/api/attachments/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function getEntriesTree(
+  sourceId: string,
+  prefix?: string
+): Promise<EntriesTreeResponse> {
+  const params = new URLSearchParams({ source_id: sourceId })
+  if (prefix) params.set("prefix", prefix)
+  return request<EntriesTreeResponse>(`/api/entries/tree?${params.toString()}`)
 }
 
 export async function updateItem(
@@ -709,6 +764,15 @@ export const api = {
     rechunk: rechunkItem,
     llmRechunk: llmRechunkItem,
     uploadImage,
+  },
+  attachments: {
+    upload: uploadAttachment,
+    fromUrl: attachUrl,
+    list: listAttachments,
+    delete: deleteAttachment,
+  },
+  tree: {
+    get: getEntriesTree,
   },
   search,
   messages: {

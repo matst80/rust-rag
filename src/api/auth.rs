@@ -5,7 +5,7 @@ use axum::{
     extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{delete, get, post},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -107,9 +107,10 @@ pub(super) fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/device/code", post(device_code))
         .route("/auth/device/token", post(device_token))
-        // OAuth-MCP discovery + RFC 6749 token endpoint. Lets MCP HTTP
-        // clients (Claude Code, Cursor) auto-discover and run the device
-        // flow without hand-pasted tokens. See `oauth_*` handlers below.
+        // OAuth-MCP discovery + RFC 6749 token endpoint. Two flows ride on
+        // these endpoints: device_code (Claude Code, polls /auth/device/*)
+        // and authorization_code + PKCE (VSCode, Cursor — runs through
+        // /oauth/authorize). Both mint into mcp_tokens.
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth_protected_resource_metadata),
@@ -120,6 +121,7 @@ pub(super) fn public_routes() -> Router<AppState> {
         )
         .route("/oauth/register", post(oauth_register))
         .route("/oauth/token", post(oauth_token))
+        .route("/oauth/authorize", get(oauth_authorize))
 }
 
 pub(super) fn session_routes(state: AppState) -> Router<AppState> {
@@ -127,6 +129,7 @@ pub(super) fn session_routes(state: AppState) -> Router<AppState> {
         .route("/auth/device", get(device_approval_page))
         .route("/auth/device/verify", get(verify_device))
         .route("/auth/device/approve", post(approve_device))
+        .route("/oauth/authorize/consent", post(oauth_authorize_consent))
         .route("/api/auth/tokens", get(list_tokens).post(create_token))
         .route("/api/auth/tokens/{id}", delete(revoke_token))
         .layer(middleware::from_fn_with_state(state, require_session))
@@ -562,6 +565,233 @@ async fn approve_device(
     }))
 }
 
+/// `GET /oauth/authorize` — RFC 6749 + RFC 7636 (PKCE). Public endpoint:
+/// the request is browser-driven, so we handle the no-session case by
+/// redirecting through the frontend login flow rather than returning 401.
+/// On valid session we render an approval form that POSTs to
+/// `/oauth/authorize/consent`.
+async fn oauth_authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<OAuthAuthorizeQuery>,
+) -> Response {
+    if let Err(message) = validate_authorize_params(&params) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
+
+    let subject = extract_session_subject(&state, &headers);
+
+    if state.auth.is_enabled() && subject.is_none() {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        q.append_pair("response_type", &params.response_type);
+        q.append_pair("client_id", &params.client_id);
+        q.append_pair("redirect_uri", &params.redirect_uri);
+        q.append_pair("code_challenge", &params.code_challenge);
+        q.append_pair("code_challenge_method", &params.code_challenge_method);
+        if let Some(s) = params.state.as_deref() {
+            q.append_pair("state", s);
+        }
+        if let Some(s) = params.scope.as_deref() {
+            q.append_pair("scope", s);
+        }
+        let return_to = format!("/oauth/authorize?{}", q.finish());
+        let mut login = url::form_urlencoded::Serializer::new(String::new());
+        login.append_pair("returnTo", &return_to);
+        let location = format!("/auth/login?{}", login.finish());
+        return Redirect::to(&location).into_response();
+    }
+
+    let subject_html = html_escape(subject.as_deref().unwrap_or("(no session)"));
+    let client_id_html = html_escape(&params.client_id);
+    let redirect_uri_html = html_escape(&params.redirect_uri);
+    let scope_html = html_escape(params.scope.as_deref().unwrap_or("mcp"));
+    let state_value = params.state.clone().unwrap_or_default();
+
+    let html = format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Authorize MCP client</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 520px; margin: 40px auto; padding: 0 16px; }}
+button {{ font-size: 16px; padding: 8px 16px; }}
+dl {{ background: #f5f5f5; padding: 12px 16px; border-radius: 6px; }}
+dt {{ font-weight: bold; margin-top: 8px; }}
+dd {{ margin: 4px 0 0 0; word-break: break-all; font-family: monospace; font-size: 13px; }}
+</style>
+</head>
+<body>
+<h1>Authorize MCP client</h1>
+<p>Signed in as <code>{subject_html}</code>.</p>
+<p>The following client wants to mint a bearer token for this server:</p>
+<dl>
+  <dt>Client</dt><dd>{client_id_html}</dd>
+  <dt>Redirect</dt><dd>{redirect_uri_html}</dd>
+  <dt>Scope</dt><dd>{scope_html}</dd>
+</dl>
+<form method="POST" action="/oauth/authorize/consent">
+  <input type="hidden" name="client_id" value="{client_id_html}">
+  <input type="hidden" name="redirect_uri" value="{redirect_uri_html}">
+  <input type="hidden" name="code_challenge" value="{cc}">
+  <input type="hidden" name="code_challenge_method" value="{ccm}">
+  <input type="hidden" name="state" value="{state_html}">
+  <input type="hidden" name="scope" value="{scope_html}">
+  <button type="submit">Approve</button>
+</form>
+</body>
+</html>
+"#,
+        cc = html_escape(&params.code_challenge),
+        ccm = html_escape(&params.code_challenge_method),
+        state_html = html_escape(&state_value),
+    );
+    Html(html).into_response()
+}
+
+/// `POST /oauth/authorize/consent` — session-required. User approved the
+/// authorization request; mint a single-use auth code, persist it with the
+/// PKCE challenge + subject, redirect back to the client's redirect_uri.
+async fn oauth_authorize_consent(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    axum::extract::Form(form): axum::extract::Form<OAuthAuthorizeForm>,
+) -> Result<Response, ApiError> {
+    let params = OAuthAuthorizeQuery {
+        response_type: "code".to_owned(),
+        client_id: form.client_id,
+        redirect_uri: form.redirect_uri,
+        code_challenge: form.code_challenge,
+        code_challenge_method: form.code_challenge_method,
+        state: form.state.filter(|s| !s.is_empty()),
+        scope: form.scope.filter(|s| !s.is_empty()),
+    };
+    if let Err(message) = validate_authorize_params(&params) {
+        return Err(ApiError::BadRequest(message));
+    }
+
+    let now = current_timestamp_millis()?;
+    let code = random_base64url(32)?;
+    let ttl_ms: i64 = 5 * 60 * 1000;
+    let new_code = crate::db::NewOAuthAuthCode {
+        code: code.clone(),
+        client_id: params.client_id.clone(),
+        redirect_uri: params.redirect_uri.clone(),
+        code_challenge: params.code_challenge.clone(),
+        challenge_method: params.code_challenge_method.clone(),
+        scope: params.scope.clone(),
+        subject: subject.0.clone(),
+        created_at: now,
+        expires_at: now + ttl_ms,
+    };
+
+    let auth_store = state.auth_store.clone();
+    tokio::task::spawn_blocking(move || auth_store.create_auth_code(new_code))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    let mut q = url::form_urlencoded::Serializer::new(String::new());
+    q.append_pair("code", &code);
+    if let Some(state_val) = params.state.as_deref() {
+        q.append_pair("state", state_val);
+    }
+    let separator = if params.redirect_uri.contains('?') { '&' } else { '?' };
+    let location = format!("{}{}{}", params.redirect_uri, separator, q.finish());
+    tracing::info!(
+        client_id = %params.client_id,
+        subject = ?subject.0,
+        "issued oauth authorization code"
+    );
+    Ok(Redirect::to(&location).into_response())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct OAuthAuthorizeQuery {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct OAuthAuthorizeForm {
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    pub state: Option<String>,
+    pub scope: Option<String>,
+}
+
+fn validate_authorize_params(params: &OAuthAuthorizeQuery) -> Result<(), String> {
+    if params.response_type != "code" {
+        return Err("unsupported response_type; only 'code' is supported".to_owned());
+    }
+    if params.code_challenge.is_empty() {
+        return Err("code_challenge is required (PKCE mandatory)".to_owned());
+    }
+    if params.code_challenge_method != "S256" {
+        return Err("only S256 code_challenge_method is supported".to_owned());
+    }
+    validate_redirect_uri(&params.redirect_uri)?;
+    Ok(())
+}
+
+/// Per RFC 8252: native MCP clients use loopback URIs (`http://127.0.0.1:*`,
+/// `http://localhost:*`, or `http://[::1]:*`) or custom-scheme URIs (e.g.
+/// `vscode://`, `cursor://`). Reject anything else to avoid open redirects.
+fn validate_redirect_uri(uri: &str) -> Result<(), String> {
+    if uri.is_empty() {
+        return Err("redirect_uri is required".to_owned());
+    }
+    let lower = uri.to_ascii_lowercase();
+    let allowed_loopback = lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("http://localhost")
+        || lower.starts_with("http://[::1]");
+    let custom_scheme = lower
+        .find("://")
+        .is_some_and(|idx| !lower[..idx].eq_ignore_ascii_case("http") && !lower[..idx].eq_ignore_ascii_case("https"));
+    if !(allowed_loopback || custom_scheme) {
+        return Err("redirect_uri must be a loopback (http://127.0.0.1, http://localhost) or a custom scheme".to_owned());
+    }
+    Ok(())
+}
+
+/// Decode the `rag_session` cookie if present and valid. Used by handlers
+/// that need to know the subject without enforcing 401 (the OAuth authorize
+/// page redirects through the login flow instead).
+fn extract_session_subject(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    if !state.auth.is_enabled() {
+        return None;
+    }
+    let secret = state.auth.session_secret.as_deref()?;
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let token = cookie_header
+        .split(';')
+        .filter_map(|entry| {
+            let mut parts = entry.trim().splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some("rag_session"), Some(value)) => Some(value.to_owned()),
+                _ => None,
+            }
+        })
+        .next()?;
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_aud = false;
+    decode::<SessionClaims>(&token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
+        .ok()
+        .map(|data| data.claims.sub)
+}
+
 async fn create_token(
     State(state): State<AppState>,
     Extension(subject): Extension<SessionSubject>,
@@ -680,16 +910,22 @@ async fn oauth_authorization_server_metadata(
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
     let base = verification_base_url(&state, &headers);
+    // Note: per microsoft/vscode#273655, VSCode rejects this metadata if
+    // `device_code` appears in `grant_types_supported`. The device flow is
+    // still operational — Claude Code hits `device_authorization_endpoint`
+    // directly without grant-type advertising. We keep that endpoint
+    // advertised for client discovery, but list only spec-compliant grants.
     Json(serde_json::json!({
         "issuer": base.clone(),
-        "device_authorization_endpoint": format!("{base}/auth/device/code"),
+        "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
+        "device_authorization_endpoint": format!("{base}/auth/device/code"),
         "registration_endpoint": format!("{base}/oauth/register"),
-        "grant_types_supported": [
-            "urn:ietf:params:oauth:grant-type:device_code"
-        ],
-        "response_types_supported": [],
+        "grant_types_supported": ["authorization_code"],
+        "response_types_supported": ["code"],
+        "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
     }))
 }
 
@@ -707,34 +943,46 @@ async fn oauth_register(
         .and_then(|v| v.as_str())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| "mcp-client".to_owned());
+    // RFC 7591 §3.2.1: registration response must echo client metadata
+    // including `redirect_uris`. Claude Code's DCR validator hard-fails
+    // when this field is missing. Echo what the client sent (or `[]`).
+    let redirect_uris = body
+        .as_ref()
+        .and_then(|Json(v)| v.get("redirect_uris"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     Ok(Json(serde_json::json!({
         "client_id": "rust-rag-mcp",
         "client_name": client_name,
+        "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": "none",
-        "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
     })))
 }
 
-/// `POST /oauth/token` — RFC 6749 token endpoint, accepts
-/// `application/x-www-form-urlencoded` with
-/// `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=...`.
-/// Translates to the existing `device_token_inner` so the underlying
-/// state machine stays in one place.
+/// `POST /oauth/token` — RFC 6749 token endpoint. Dispatches on
+/// `grant_type`: `authorization_code` (PKCE — VSCode/Cursor) or the device
+/// flow URN (Claude Code). Both branches mint into `mcp_tokens`.
 async fn oauth_token(
     State(state): State<AppState>,
     axum::extract::Form(form): axum::extract::Form<OAuthTokenForm>,
 ) -> Response {
-    let want_grant = "urn:ietf:params:oauth:grant-type:device_code";
-    if form.grant_type != want_grant {
-        return (
+    match form.grant_type.as_str() {
+        "urn:ietf:params:oauth:grant-type:device_code" => oauth_token_device(state, form).await,
+        "authorization_code" => oauth_token_auth_code(state, form).await,
+        other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": "unsupported_grant_type",
-                "error_description": format!("only {want_grant} is supported"),
+                "error_description": format!("grant_type {other} is not supported"),
             })),
         )
-            .into_response();
+            .into_response(),
     }
+}
+
+async fn oauth_token_device(state: AppState, form: OAuthTokenForm) -> Response {
     let device_code = match form.device_code {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -747,27 +995,7 @@ async fn oauth_token(
     };
     let req = DeviceTokenRequest { device_code };
     match device_token_inner(state, req).await {
-        Ok(resp) => {
-            let now = match current_timestamp_millis() {
-                Ok(n) => n,
-                Err(_) => 0,
-            };
-            // RFC 6749 prefers `expires_in` (seconds) over an absolute
-            // `expires_at`. Compute it when available.
-            let expires_in = resp
-                .expires_at
-                .filter(|&exp| exp > now)
-                .map(|exp| ((exp - now) / 1000) as u64);
-            let mut body = serde_json::json!({
-                "access_token": resp.access_token,
-                "token_type": "Bearer",
-                "scope": "mcp",
-            });
-            if let Some(exp) = expires_in {
-                body["expires_in"] = serde_json::Value::from(exp);
-            }
-            (StatusCode::OK, Json(body)).into_response()
-        }
+        Ok(resp) => token_success_body(resp.access_token, resp.expires_at),
         Err(err) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": err.as_str()})),
@@ -776,10 +1004,156 @@ async fn oauth_token(
     }
 }
 
+async fn oauth_token_auth_code(state: AppState, form: OAuthTokenForm) -> Response {
+    let code = match form.code.as_deref() {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => return token_error("invalid_request", "code is required"),
+    };
+    let verifier = match form.code_verifier.as_deref() {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => return token_error("invalid_request", "code_verifier is required"),
+    };
+    let redirect_uri = match form.redirect_uri.as_deref() {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => return token_error("invalid_request", "redirect_uri is required"),
+    };
+
+    let now = match current_timestamp_millis() {
+        Ok(n) => n,
+        Err(_) => return token_error("server_error", "clock unavailable"),
+    };
+
+    let auth_store = state.auth_store.clone();
+    let lookup_code = code.clone();
+    let record = match tokio::task::spawn_blocking(move || auth_store.find_auth_code(&lookup_code))
+        .await
+    {
+        Ok(Ok(Some(r))) => r,
+        Ok(Ok(None)) => return token_error("invalid_grant", "code not found"),
+        _ => return token_error("server_error", "store lookup failed"),
+    };
+
+    if record.consumed_at.is_some() {
+        return token_error("invalid_grant", "code already used");
+    }
+    if record.expires_at <= now {
+        return token_error("invalid_grant", "code expired");
+    }
+    if record.redirect_uri != redirect_uri {
+        return token_error("invalid_grant", "redirect_uri mismatch");
+    }
+    if record.challenge_method != "S256" {
+        return token_error("invalid_grant", "unsupported challenge method");
+    }
+    if !verify_pkce_s256(&verifier, &record.code_challenge) {
+        return token_error("invalid_grant", "code_verifier mismatch");
+    }
+
+    // Mint bearer token; reuse the same scheme as the device flow so
+    // `find_mcp_token_by_hash` works unchanged.
+    let plaintext = match mint_token_plaintext() {
+        Ok(p) => p,
+        Err(_) => return token_error("server_error", "token mint failed"),
+    };
+    let token_hash = hash_token(&plaintext);
+    let token_id = Uuid::now_v7().to_string();
+    let expires_at = state
+        .auth
+        .mcp_token_ttl_days
+        .map(|days| now + (days as i64) * 86_400_000);
+    let new_token = NewMcpToken {
+        id: token_id.clone(),
+        token_hash,
+        name: format!("oauth: {}", record.client_id),
+        subject: record.subject.clone(),
+        created_at: now,
+        expires_at,
+    };
+
+    let auth_store = state.auth_store.clone();
+    if tokio::task::spawn_blocking(move || auth_store.create_mcp_token(new_token))
+        .await
+        .map_or(true, |r| r.is_err())
+    {
+        return token_error("server_error", "token persist failed");
+    }
+
+    let auth_store = state.auth_store.clone();
+    let consume_code = code.clone();
+    let consume_token = token_id.clone();
+    let consumed = match tokio::task::spawn_blocking(move || {
+        auth_store.consume_auth_code(&consume_code, &consume_token, now)
+    })
+    .await
+    {
+        Ok(Ok(b)) => b,
+        _ => return token_error("server_error", "code consume failed"),
+    };
+    if !consumed {
+        return token_error("invalid_grant", "code already used (race)");
+    }
+
+    tracing::info!(
+        client_id = %record.client_id,
+        subject = ?record.subject,
+        "minted oauth token via authorization_code"
+    );
+    token_success_body(plaintext, expires_at)
+}
+
+fn token_success_body(access_token: String, expires_at_ms: Option<i64>) -> Response {
+    let now = current_timestamp_millis().unwrap_or(0);
+    let expires_in = expires_at_ms
+        .filter(|&exp| exp > now)
+        .map(|exp| ((exp - now) / 1000) as u64);
+    let mut body = serde_json::json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "scope": "mcp",
+    });
+    if let Some(exp) = expires_in {
+        body["expires_in"] = serde_json::Value::from(exp);
+    }
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+fn token_error(error: &str, description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": error,
+            "error_description": description,
+        })),
+    )
+        .into_response()
+}
+
+/// PKCE S256: `BASE64URL(SHA256(verifier)) == challenge`.
+fn verify_pkce_s256(verifier: &str, challenge: &str) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let computed = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    constant_time_eq(computed.as_bytes(), challenge.as_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct OAuthTokenForm {
     pub grant_type: String,
     pub device_code: Option<String>,
+    pub code: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub code_verifier: Option<String>,
     #[allow(dead_code)]
     pub client_id: Option<String>,
 }

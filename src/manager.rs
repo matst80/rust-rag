@@ -1268,6 +1268,7 @@ async fn tool_assign_task(
         metadata,
         source_id: cfg.memory_source_id.clone(),
         created_at: current_millis(),
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1350,6 +1351,7 @@ async fn tool_list_tasks(state: &AppState, cfg: &ManagerConfig, args: &str) -> R
         metadata_filter,
         min_created_at: None,
         max_created_at: None,
+        path_prefix: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     let tasks: Vec<Value> = items
@@ -1404,6 +1406,7 @@ async fn tool_update_task(state: &AppState, args: &str) -> Result<String> {
         metadata,
         source_id: existing.source_id.clone(),
         created_at: existing.created_at,
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1533,6 +1536,7 @@ async fn tool_remember(state: &AppState, cfg: &ManagerConfig, args: &str) -> Res
         metadata,
         source_id: source_id.clone(),
         created_at: current_millis(),
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1595,6 +1599,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
         metadata: existing.metadata.clone(),
         source_id: args.source_id.clone(),
         created_at: existing.created_at,
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1751,6 +1756,7 @@ async fn recall_items(
         metadata_filter,
         min_created_at: None,
         max_created_at: None,
+        path_prefix: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     Ok(items)

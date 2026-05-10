@@ -9,6 +9,7 @@ import {
   BookOpen,
   Brain,
   FolderOpen,
+  FolderTree,
   GitBranch,
   Github,
   Hash,
@@ -33,6 +34,7 @@ const navigation = [
   { name: "Swarm", href: "/messages", icon: Hash },
   { name: "Agents", href: "/acp", icon: Terminal },
   { name: "Entries", href: "/entries", icon: FolderOpen },
+  { name: "Wiki", href: "/wiki", icon: FolderTree },
   { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
@@ -90,6 +92,7 @@ export function AppHeader() {
                 <Link
                   key={item.name}
                   href={item.href}
+                  prefetch={false}
                   className={cn(
                     "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
                     isActive
@@ -113,6 +116,7 @@ export function AppHeader() {
               <Link
                 key={item.name}
                 href={item.href}
+                prefetch={false}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
                   isActive
@@ -129,6 +133,7 @@ export function AppHeader() {
             <>
               <Link
                 href="/auth/tokens"
+                prefetch={false}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors",
                   pathname.startsWith("/auth/tokens") || pathname.startsWith("/auth/device")

@@ -12,6 +12,38 @@ export interface Entry {
   created_at: number
   /** Optional: present on /admin/items/oversized when embedder is ready. */
   token_count?: number
+  /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
+  path?: string | null
+}
+
+export interface Attachment {
+  id: string
+  item_id: string
+  filename?: string | null
+  stored_name: string
+  url: string
+  mime?: string | null
+  size?: number | null
+  sha256?: string | null
+  created_at: number
+}
+
+export interface AttachmentsResponse {
+  attachments: Attachment[]
+}
+
+export interface TreeChild {
+  segment: string
+  path: string
+  count: number
+  has_children: boolean
+}
+
+export interface EntriesTreeResponse {
+  source_id: string
+  prefix: string | null
+  children: TreeChild[]
+  entries: Entry[]
 }
 
 export interface Category {
@@ -90,6 +122,7 @@ export interface StoreRequest {
   text: string
   metadata: EntryMetadata
   source_id: string
+  path?: string | null
 }
 
 export interface SearchRequest {
@@ -107,6 +140,7 @@ export interface UpdateItemRequest {
   text: string
   metadata: EntryMetadata
   source_id: string
+  path?: string | null
 }
 
 export type SortOrder = "asc" | "desc"
@@ -116,6 +150,7 @@ export interface ListItemsRequest {
   limit?: number
   offset?: number
   sort_order?: SortOrder
+  path_prefix?: string
 }
 
 export interface LargeItemsRequest {

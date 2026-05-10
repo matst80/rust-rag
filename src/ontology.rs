@@ -431,6 +431,10 @@ mod tests {
             source_id: "test".to_owned(),
             created_at: 0,
             distance: 0.1,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: None,
         }
     }
 

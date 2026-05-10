@@ -33,6 +33,64 @@ pub struct ItemRecord {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    /// Wiki-style hierarchical path (slash-separated, e.g. `team/handbook`).
+    /// User-asserted, optional. Distinct from chunk-level `section_path`
+    /// which is derived from markdown headers by the chunker.
+    /// Normalized via `normalize_path` before persistence.
+    pub path: Option<String>,
+}
+
+/// One direct child segment under a wiki path prefix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathChild {
+    /// Segment text (the part of the path immediately after `prefix`).
+    pub segment: String,
+    /// Number of entries whose path equals `prefix/segment` or sits under it.
+    pub count: i64,
+    /// Whether any descendants exist beyond this segment (i.e. there are
+    /// entries deeper than `prefix/segment`). Lets the UI know a folder has
+    /// further sub-folders without a second round-trip.
+    pub has_children: bool,
+}
+
+/// File bound to an entry. Disk lives under `RAG_UPLOAD_PATH/<stored_name>`.
+/// Cascade-deleted with the parent item; on-disk file removal is the API
+/// layer's responsibility (see `delete_item` return + `delete_attachment`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttachmentRecord {
+    pub id: String,
+    pub item_id: String,
+    pub filename: Option<String>,
+    pub stored_name: String,
+    pub mime: Option<String>,
+    pub size: Option<i64>,
+    pub sha256: Option<String>,
+    pub created_at: i64,
+}
+
+/// Normalize a wiki-style path. Trims surrounding slashes, collapses `//`,
+/// rejects `..` traversal and absolute paths. Empty -> `None`.
+pub fn normalize_path(input: &str) -> Result<Option<String>> {
+    let trimmed = input.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut segments = Vec::new();
+    for seg in trimmed.split('/') {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if seg == ".." || seg == "." {
+            anyhow::bail!("path segment '{seg}' not allowed");
+        }
+        segments.push(seg);
+    }
+    if segments.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(segments.join("/")))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -53,6 +111,15 @@ pub struct SearchHit {
     /// fusion saw the hit on both sides, `["sparse"]` when only sparse
     /// matched. Helps the UI show *why* something ranked.
     pub retrievers: Vec<String>,
+    /// Text of the single best-matching chunk for this document, set by
+    /// stores that track chunks (postgres). Used by the reranker so it
+    /// scores the actual matched passage instead of the whole document.
+    /// `None` on stores that don't chunk or paths that don't surface it
+    /// (e.g. `distances_for_ids`); reranker falls back to `text`.
+    pub chunk_text: Option<String>,
+    /// User-asserted wiki path inherited from the parent entry. `None` if
+    /// unset. Distinct from `section_path` (chunker-derived from headers).
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,6 +279,34 @@ pub struct NewDeviceAuth {
     pub interval_secs: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewOAuthAuthCode {
+    pub code: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub challenge_method: String,
+    pub scope: Option<String>,
+    pub subject: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeRecord {
+    pub code: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub challenge_method: String,
+    pub scope: Option<String>,
+    pub subject: Option<String>,
+    pub token_id: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+}
+
 pub trait AuthStore: Send + Sync {
     fn create_mcp_token(&self, token: NewMcpToken) -> Result<McpTokenRecord>;
     fn find_mcp_token_by_hash(&self, hash: &str) -> Result<Option<McpTokenRecord>>;
@@ -234,6 +329,14 @@ pub trait AuthStore: Send + Sync {
     ) -> Result<bool>;
     fn touch_device_poll(&self, device_code: &str, now: i64) -> Result<()>;
     fn expire_device_auths(&self, now: i64) -> Result<usize>;
+
+    fn create_auth_code(&self, code: NewOAuthAuthCode) -> Result<OAuthAuthCodeRecord>;
+    fn find_auth_code(&self, code: &str) -> Result<Option<OAuthAuthCodeRecord>>;
+    /// Atomically mark an authorization code consumed and bind a minted
+    /// `token_id` to it. Returns `true` if the row was updated (still
+    /// pending), `false` if already consumed (replay attempt).
+    fn consume_auth_code(&self, code: &str, token_id: &str, now: i64) -> Result<bool>;
+    fn expire_auth_codes(&self, now: i64) -> Result<usize>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -258,6 +361,10 @@ pub struct ListItemsRequest {
     pub metadata_filter: HashMap<String, String>,
     pub min_created_at: Option<i64>,
     pub max_created_at: Option<i64>,
+    /// Restrict to entries whose `path` equals this prefix or sits under it
+    /// (`prefix` itself or `prefix/...`). Already-normalized when set; empty
+    /// is treated as `None`. Comparison is case-insensitive.
+    pub path_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -486,6 +593,36 @@ pub trait VectorStore: Send + Sync {
     fn list_large_items(&self, min_chars: usize, limit: usize, offset: usize) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
     fn delete_item(&self, id: &str) -> Result<bool>;
+
+    /// Insert an attachment row. Caller persists the file to disk first.
+    fn insert_attachment(&self, _record: AttachmentRecord) -> Result<()> {
+        anyhow::bail!("attachments not supported by this store")
+    }
+    /// Fetch every attachment bound to `item_id`, newest first.
+    fn list_attachments_for_item(&self, _item_id: &str) -> Result<Vec<AttachmentRecord>> {
+        anyhow::bail!("attachments not supported by this store")
+    }
+    /// Look up a single attachment by id.
+    fn get_attachment(&self, _id: &str) -> Result<Option<AttachmentRecord>> {
+        anyhow::bail!("attachments not supported by this store")
+    }
+    /// Remove an attachment row. Returns the stored on-disk filename so the
+    /// API layer can `fs::remove_file` after the row is gone. `Ok(None)` when
+    /// the id was not found.
+    fn delete_attachment(&self, _id: &str) -> Result<Option<String>> {
+        anyhow::bail!("attachments not supported by this store")
+    }
+    /// Direct child path segments for tree navigation. Each row is the next
+    /// path segment after `prefix` plus a count of entries that share the
+    /// prefix (recursive). When `prefix` is `None`, top-level segments are
+    /// returned. Always scoped by `source_id`. Comparison is case-insensitive.
+    fn list_path_children(
+        &self,
+        _source_id: &str,
+        _prefix: Option<&str>,
+    ) -> Result<Vec<PathChild>> {
+        anyhow::bail!("path tree not supported by this store")
+    }
     fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>>;
     fn graph_status(&self) -> Result<GraphStatus>;
     fn graph_neighborhood(
@@ -628,13 +765,14 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.execute(
             "
-            INSERT INTO items (id, text, metadata, source_id, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO items (id, text, metadata, source_id, created_at, path)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(id) DO UPDATE
             SET text = excluded.text,
                 metadata = excluded.metadata,
                 source_id = excluded.source_id,
                 created_at = excluded.created_at,
+                path = excluded.path,
                 ontology_status = CASE WHEN excluded.text != text THEN 'pending' ELSE ontology_status END
             ",
             params![
@@ -642,7 +780,8 @@ impl VectorStore for SqliteVectorStore {
                 item.text,
                 metadata_json,
                 item.source_id,
-                item.created_at
+                item.created_at,
+                item.path
             ],
         )?;
 
@@ -975,6 +1114,175 @@ impl VectorStore for SqliteVectorStore {
         Ok(deleted > 0)
     }
 
+    fn insert_attachment(&self, record: AttachmentRecord) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "INSERT INTO attachments (id, item_id, filename, stored_name, mime, size, sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                record.id,
+                record.item_id,
+                record.filename,
+                record.stored_name,
+                record.mime,
+                record.size,
+                record.sha256,
+                record.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_attachments_for_item(&self, item_id: &str) -> Result<Vec<AttachmentRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT id, item_id, filename, stored_name, mime, size, sha256, created_at
+             FROM attachments WHERE item_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![item_id], |row| {
+                Ok(AttachmentRecord {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    filename: row.get(2)?,
+                    stored_name: row.get(3)?,
+                    mime: row.get(4)?,
+                    size: row.get(5)?,
+                    sha256: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn get_attachment(&self, id: &str) -> Result<Option<AttachmentRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT id, item_id, filename, stored_name, mime, size, sha256, created_at
+             FROM attachments WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(AttachmentRecord {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                filename: row.get(2)?,
+                stored_name: row.get(3)?,
+                mime: row.get(4)?,
+                size: row.get(5)?,
+                sha256: row.get(6)?,
+                created_at: row.get(7)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn delete_attachment(&self, id: &str) -> Result<Option<String>> {
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        let tx = connection.transaction()?;
+        let stored_name: Option<String> = tx
+            .query_row(
+                "SELECT stored_name FROM attachments WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stored_name.is_some() {
+            tx.execute("DELETE FROM attachments WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
+        Ok(stored_name)
+    }
+
+    fn list_path_children(
+        &self,
+        source_id: &str,
+        prefix: Option<&str>,
+    ) -> Result<Vec<PathChild>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let prefix_norm = prefix
+            .map(|p| p.trim_matches('/').to_owned())
+            .filter(|p| !p.is_empty());
+
+        // rel = the suffix of path past `prefix/`. For top-level (prefix
+        // empty/None), rel = path itself. We then take the first segment.
+        let sql = if prefix_norm.is_some() {
+            "WITH rels AS (
+                SELECT substr(path, length(?2) + 2) AS rel
+                FROM items
+                WHERE source_id = ?1
+                  AND path IS NOT NULL
+                  AND LOWER(path) LIKE LOWER(?2) || '/%'
+            ),
+            heads AS (
+                SELECT
+                    CASE WHEN instr(rel, '/') > 0
+                         THEN substr(rel, 1, instr(rel, '/') - 1)
+                         ELSE rel END AS segment,
+                    CASE WHEN instr(rel, '/') > 0 THEN 1 ELSE 0 END AS deeper
+                FROM rels
+                WHERE rel IS NOT NULL AND rel != ''
+            )
+            SELECT segment, COUNT(*) AS cnt, MAX(deeper) AS has_children
+            FROM heads
+            GROUP BY segment
+            ORDER BY segment ASC"
+        } else {
+            "WITH rels AS (
+                SELECT path AS rel
+                FROM items
+                WHERE source_id = ?1
+                  AND path IS NOT NULL
+                  AND path != ''
+            ),
+            heads AS (
+                SELECT
+                    CASE WHEN instr(rel, '/') > 0
+                         THEN substr(rel, 1, instr(rel, '/') - 1)
+                         ELSE rel END AS segment,
+                    CASE WHEN instr(rel, '/') > 0 THEN 1 ELSE 0 END AS deeper
+                FROM rels
+            )
+            SELECT segment, COUNT(*) AS cnt, MAX(deeper) AS has_children
+            FROM heads
+            GROUP BY segment
+            ORDER BY segment ASC"
+        };
+        let mut stmt = connection.prepare(sql)?;
+        let map = |row: &rusqlite::Row<'_>| {
+            Ok(PathChild {
+                segment: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)?,
+                has_children: row.get::<_, i64>(2)? > 0,
+            })
+        };
+        let rows: Vec<PathChild> = if let Some(p) = &prefix_norm {
+            stmt.query_map(params![source_id, p], map)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(params![source_id], map)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
     fn graph_status(&self) -> Result<GraphStatus> {
         self.ensure_graph_fresh()?;
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
@@ -1212,7 +1520,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at
+            "SELECT id, text, metadata, source_id, created_at, path
              FROM items
              WHERE ontology_status = 'pending'
              ORDER BY created_at ASC
@@ -1227,10 +1535,11 @@ impl VectorStore for SqliteVectorStore {
                     metadata_str,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at) = r?;
+                let (id, text, metadata_str, source_id, created_at, path) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -1238,6 +1547,7 @@ impl VectorStore for SqliteVectorStore {
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                     source_id,
                     created_at,
+                    path,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1934,6 +2244,14 @@ fn list_items_internal(
         sql_params.push(Box::new(value.clone()));
     }
 
+    if let Some(prefix) = request.path_prefix.as_ref().filter(|p| !p.is_empty()) {
+        where_clauses.push(
+            "(LOWER(path) = LOWER(?) OR LOWER(path) LIKE LOWER(?) || '/%')".to_string(),
+        );
+        sql_params.push(Box::new(prefix.clone()));
+        sql_params.push(Box::new(prefix.clone()));
+    }
+
     let where_sql = if where_clauses.is_empty() {
         "".to_string()
     } else {
@@ -1949,7 +2267,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at
+        SELECT id, text, metadata, source_id, created_at, path
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -1977,7 +2295,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at
+        SELECT id, text, metadata, source_id, created_at, path
         FROM items
         WHERE id = ?1
         ",
@@ -1999,6 +2317,8 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         distance: row.get(5)?,
         section_path: Vec::new(),
         retrievers: vec!["dense".to_owned()],
+        chunk_text: None,
+        path: None,
     })
 }
 
@@ -2009,6 +2329,7 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
         metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
+        path: row.get(5)?,
     })
 }
 
@@ -2081,6 +2402,7 @@ mod tests {
                     metadata: json!({"kind": "alpha"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2093,6 +2415,7 @@ mod tests {
                     metadata: json!({"kind": "beta"}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    path: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2120,6 +2443,7 @@ mod tests {
                     metadata: json!({"version": 1}),
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2132,6 +2456,7 @@ mod tests {
                     metadata: json!({"version": 2}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    path: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2156,6 +2481,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2168,6 +2494,7 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
+                    path: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -2192,6 +2519,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2204,6 +2532,7 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
+                    path: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2254,6 +2583,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2277,6 +2607,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2303,6 +2634,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2315,6 +2647,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    path: None,
                 },
                 &[0.95, 0.05, 0.0],
             )
@@ -2327,6 +2660,7 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 3000,
+                    path: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2379,6 +2713,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1,
+                    path: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2391,6 +2726,7 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 2,
+                    path: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -2403,6 +2739,7 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 3,
+                    path: None,
                 },
                 &[0.0, 1.0, 0.0],
             )

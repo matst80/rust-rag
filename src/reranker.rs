@@ -276,10 +276,23 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
         .build();
     let cuda = if strict { cuda.error_on_failure() } else { cuda };
 
-    println!(
-        "reranker: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB, strict={strict}) with CPU fallback"
-    );
-    vec![cuda, CPUExecutionProvider::default().build()]
+    // `strict` mode also drops the CPU EP from the inference list. ORT's
+    // `error_on_failure` only governs EP *registration*; per-op CPU
+    // fallback during inference still happens silently if CPU is in the
+    // list, which can turn a 100ms rerank into multi-second latency the
+    // moment CUDA arena pressure pushes one op off the GPU. Remove CPU
+    // so failures surface immediately instead of degrading silently.
+    if strict {
+        println!(
+            "reranker: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB, strict=true) — no CPU fallback"
+        );
+        vec![cuda]
+    } else {
+        println!(
+            "reranker: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB, strict=false) with CPU fallback"
+        );
+        vec![cuda, CPUExecutionProvider::default().build()]
+    }
 }
 
 #[cfg(not(feature = "cuda"))]

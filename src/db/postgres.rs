@@ -8,11 +8,12 @@ use tokio_postgres::{Config as PgConfig, NoTls};
 use tracing::info;
 
 use super::{
-    AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord, DeviceAuthStatus, DocChunk,
-    GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphStatus, ItemRecord,
-    ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery, MessageRecord,
-    MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken, NewMessage,
-    NewUserEvent, SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
+    AttachmentRecord, AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord,
+    DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
+    GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
+    MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
+    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, SearchHit,
+    SortOrder, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -91,6 +92,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0003_sparse_embeddings",
         include_str!("../../migrations/0003_sparse_embeddings.sql"),
+    ),
+    (
+        "0004_oauth_authorization_codes",
+        include_str!("../../migrations/0004_oauth_authorization_codes.sql"),
+    ),
+    (
+        "0005_entry_path",
+        include_str!("../../migrations/0005_entry_path.sql"),
+    ),
+    (
+        "0006_attachments",
+        include_str!("../../migrations/0006_attachments.sql"),
     ),
 ];
 
@@ -234,6 +247,20 @@ fn pairwise_doc_distances(
     })
 }
 
+fn pg_row_to_attachment(row: &tokio_postgres::Row) -> AttachmentRecord {
+    let created_at: DateTime<Utc> = row.get("created_at");
+    AttachmentRecord {
+        id: row.get("id"),
+        item_id: row.get("document_id"),
+        filename: row.get("filename"),
+        stored_name: row.get("stored_name"),
+        mime: row.get("mime"),
+        size: row.get("size"),
+        sha256: row.get("sha256"),
+        created_at: ts_to_ms(created_at),
+    }
+}
+
 fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     Ok(ItemRecord {
@@ -242,6 +269,7 @@ fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
         metadata: row.try_get::<_, Value>("metadata")?,
         source_id: row.try_get("source_id")?,
         created_at: ts_to_ms(created_at),
+        path: row.try_get("path").ok(),
     })
 }
 
@@ -282,8 +310,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now()) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -291,6 +319,7 @@ impl VectorStore for PostgresVectorStore {
                      metadata = EXCLUDED.metadata, \
                      tags = EXCLUDED.tags, \
                      status = EXCLUDED.status, \
+                     path = EXCLUDED.path, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -301,6 +330,7 @@ impl VectorStore for PostgresVectorStore {
                     &tags,
                     &status,
                     &created_at,
+                    &item.path,
                 ],
             )
             .await?;
@@ -359,8 +389,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now()) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -368,6 +398,7 @@ impl VectorStore for PostgresVectorStore {
                      metadata = EXCLUDED.metadata, \
                      tags = EXCLUDED.tags, \
                      status = EXCLUDED.status, \
+                     path = EXCLUDED.path, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -378,6 +409,7 @@ impl VectorStore for PostgresVectorStore {
                     &tags,
                     &status,
                     &created_at,
+                    &item.path,
                 ],
             )
             .await?;
@@ -437,12 +469,13 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
-                            ranked.distance, ranked.section_path \
+                            ranked.distance, ranked.section_path, ranked.chunk_content \
                      FROM ( \
                          SELECT DISTINCT ON (c.document_id) \
                                 c.document_id, \
                                 (c.dense_embedding <=> $1::vector) AS distance, \
-                                c.section_path \
+                                c.section_path, \
+                                c.content AS chunk_content \
                          FROM chunks c \
                          JOIN documents d ON d.id = c.document_id \
                          WHERE c.dense_embedding IS NOT NULL \
@@ -461,6 +494,7 @@ impl VectorStore for PostgresVectorStore {
                     let item = row_to_item(row)?;
                     let distance: f64 = row.try_get("distance")?;
                     let section_path: Option<Vec<String>> = row.try_get("section_path")?;
+                    let chunk_text: Option<String> = row.try_get("chunk_content")?;
                     Ok(SearchHit {
                         id: item.id.clone(),
                         text: item.text.clone(),
@@ -470,6 +504,8 @@ impl VectorStore for PostgresVectorStore {
                         distance: distance as f32,
                         section_path: section_path.unwrap_or_default(),
                         retrievers: vec!["dense".to_owned()],
+                        chunk_text,
+                        path: item.path.clone(),
                     })
                 })
                 .collect()
@@ -539,6 +575,7 @@ impl VectorStore for PostgresVectorStore {
                 WITH dense AS (
                     SELECT c.document_id,
                            c.section_path,
+                           c.content AS chunk_content,
                            ROW_NUMBER() OVER (ORDER BY c.dense_embedding <=> $1::vector) AS rank
                     FROM chunks c
                     JOIN documents d ON d.id = c.document_id
@@ -550,6 +587,7 @@ impl VectorStore for PostgresVectorStore {
                 sparse AS (
                     SELECT c.document_id,
                            c.section_path,
+                           c.content AS chunk_content,
                            ROW_NUMBER() OVER (ORDER BY c.sparse_embedding <=> $2::sparsevec) AS rank
                     FROM chunks c
                     JOIN documents d ON d.id = c.document_id
@@ -567,11 +605,11 @@ impl VectorStore for PostgresVectorStore {
                     FROM sparse GROUP BY document_id
                 ),
                 dense_best AS (
-                    SELECT DISTINCT ON (document_id) document_id, section_path
+                    SELECT DISTINCT ON (document_id) document_id, section_path, chunk_content
                     FROM dense ORDER BY document_id, rank ASC
                 ),
                 sparse_best AS (
-                    SELECT DISTINCT ON (document_id) document_id, section_path
+                    SELECT DISTINCT ON (document_id) document_id, section_path, chunk_content
                     FROM sparse ORDER BY document_id, rank ASC
                 ),
                 fused AS (
@@ -588,7 +626,8 @@ impl VectorStore for PostgresVectorStore {
                        )::FLOAT8 AS final_score,
                        f.matched_dense,
                        f.matched_sparse,
-                       COALESCE(db.section_path, sb.section_path) AS section_path
+                       COALESCE(db.section_path, sb.section_path) AS section_path,
+                       COALESCE(db.chunk_content, sb.chunk_content) AS chunk_content
                 FROM fused f
                 JOIN documents d ON d.id = f.document_id
                 LEFT JOIN dense_best  db ON db.document_id = f.document_id
@@ -618,6 +657,7 @@ impl VectorStore for PostgresVectorStore {
                     let matched_dense: bool = row.try_get("matched_dense")?;
                     let matched_sparse: bool = row.try_get("matched_sparse")?;
                     let section_path: Option<Vec<String>> = row.try_get("section_path")?;
+                    let chunk_text: Option<String> = row.try_get("chunk_content")?;
                     // SearchHit.distance is "lower is better" on the dense
                     // path (cosine distance, 0..2). RRF scores are
                     // unbounded positive, so map them onto the same shape
@@ -640,6 +680,8 @@ impl VectorStore for PostgresVectorStore {
                         distance: pseudo as f32,
                         section_path: section_path.unwrap_or_default(),
                         retrievers,
+                        chunk_text,
+                        path: item.path.clone(),
                     })
                 })
                 .collect()
@@ -678,6 +720,7 @@ impl VectorStore for PostgresVectorStore {
         };
         let min_created = request.min_created_at.map(ms_to_ts);
         let max_created = request.max_created_at.map(ms_to_ts);
+        let path_prefix = request.path_prefix.clone().filter(|p| !p.is_empty());
 
         self.block(async move {
             let client = pool.get().await?;
@@ -685,24 +728,26 @@ impl VectorStore for PostgresVectorStore {
             let count_sql = "SELECT count(*)::bigint FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
-                   AND ($3::timestamptz IS NULL OR created_at <= $3)";
+                   AND ($3::timestamptz IS NULL OR created_at <= $3) \
+                   AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%')";
             let total: i64 = client
-                .query_one(count_sql, &[&source, &min_created, &max_created])
+                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix])
                 .await?
                 .get(0);
 
             let sql = format!(
-                "SELECT id, content, metadata, source_id, created_at FROM documents \
+                "SELECT id, content, metadata, source_id, created_at, path FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
+                   AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
                  ORDER BY created_at {order} \
-                 LIMIT $4 OFFSET $5"
+                 LIMIT $5 OFFSET $6"
             );
             let rows = client
                 .query(
                     &sql,
-                    &[&source, &min_created, &max_created, &limit, &offset],
+                    &[&source, &min_created, &max_created, &path_prefix, &limit, &offset],
                 )
                 .await?;
             let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
@@ -732,7 +777,7 @@ impl VectorStore for PostgresVectorStore {
                 .get(0);
             let rows = client
                 .query(
-                    "SELECT id, content, metadata, source_id, created_at FROM documents \
+                    "SELECT id, content, metadata, source_id, created_at, path FROM documents \
                      WHERE char_length(content) >= $1 \
                      ORDER BY char_length(content) DESC \
                      LIMIT $2 OFFSET $3",
@@ -751,7 +796,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let row = client
                 .query_opt(
-                    "SELECT id, content, metadata, source_id, created_at FROM documents WHERE id = $1",
+                    "SELECT id, content, metadata, source_id, created_at, path FROM documents WHERE id = $1",
                     &[&id],
                 )
                 .await?;
@@ -768,6 +813,136 @@ impl VectorStore for PostgresVectorStore {
                 .execute("DELETE FROM documents WHERE id = $1", &[&id])
                 .await?;
             Ok(n > 0)
+        })
+    }
+
+    fn insert_attachment(&self, record: AttachmentRecord) -> Result<()> {
+        let pool = self.pool.clone();
+        let created_at = ms_to_ts(record.created_at);
+        self.block(async move {
+            let client = pool.get().await?;
+            client
+                .execute(
+                    "INSERT INTO attachments (id, document_id, filename, stored_name, mime, size, sha256, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    &[
+                        &record.id,
+                        &record.item_id,
+                        &record.filename,
+                        &record.stored_name,
+                        &record.mime,
+                        &record.size,
+                        &record.sha256,
+                        &created_at,
+                    ],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn list_attachments_for_item(&self, item_id: &str) -> Result<Vec<AttachmentRecord>> {
+        let pool = self.pool.clone();
+        let id = item_id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT id, document_id, filename, stored_name, mime, size, sha256, created_at \
+                     FROM attachments WHERE document_id = $1 ORDER BY created_at DESC",
+                    &[&id],
+                )
+                .await?;
+            Ok(rows.iter().map(pg_row_to_attachment).collect())
+        })
+    }
+
+    fn get_attachment(&self, id: &str) -> Result<Option<AttachmentRecord>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT id, document_id, filename, stored_name, mime, size, sha256, created_at \
+                     FROM attachments WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            Ok(row.as_ref().map(pg_row_to_attachment))
+        })
+    }
+
+    fn delete_attachment(&self, id: &str) -> Result<Option<String>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            let row = tx
+                .query_opt(
+                    "SELECT stored_name FROM attachments WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            let stored_name: Option<String> = row.map(|r| r.get(0));
+            if stored_name.is_some() {
+                tx.execute("DELETE FROM attachments WHERE id = $1", &[&id])
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok(stored_name)
+        })
+    }
+
+    fn list_path_children(
+        &self,
+        source_id: &str,
+        prefix: Option<&str>,
+    ) -> Result<Vec<PathChild>> {
+        let pool = self.pool.clone();
+        let source = source_id.to_owned();
+        let prefix_norm = prefix
+            .map(|p| p.trim_matches('/').to_owned())
+            .filter(|p| !p.is_empty());
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = if let Some(p) = &prefix_norm {
+                let sql = "WITH rels AS ( \
+                    SELECT substring(path FROM length($2) + 2) AS rel \
+                    FROM documents \
+                    WHERE source_id = $1 \
+                      AND path IS NOT NULL \
+                      AND LOWER(path) LIKE LOWER($2) || '/%' \
+                ), heads AS ( \
+                    SELECT split_part(rel, '/', 1) AS segment, \
+                           (position('/' IN rel) > 0) AS deeper \
+                    FROM rels WHERE rel IS NOT NULL AND rel <> '' \
+                ) \
+                SELECT segment, COUNT(*)::bigint AS cnt, BOOL_OR(deeper) AS has_children \
+                FROM heads GROUP BY segment ORDER BY segment ASC";
+                client.query(sql, &[&source, &p]).await?
+            } else {
+                let sql = "WITH rels AS ( \
+                    SELECT path AS rel FROM documents \
+                    WHERE source_id = $1 AND path IS NOT NULL AND path <> '' \
+                ), heads AS ( \
+                    SELECT split_part(rel, '/', 1) AS segment, \
+                           (position('/' IN rel) > 0) AS deeper \
+                    FROM rels \
+                ) \
+                SELECT segment, COUNT(*)::bigint AS cnt, BOOL_OR(deeper) AS has_children \
+                FROM heads GROUP BY segment ORDER BY segment ASC";
+                client.query(sql, &[&source]).await?
+            };
+            Ok(rows
+                .iter()
+                .map(|r| PathChild {
+                    segment: r.get::<_, String>("segment"),
+                    count: r.get::<_, i64>("cnt"),
+                    has_children: r.get::<_, bool>("has_children"),
+                })
+                .collect())
         })
     }
 
@@ -808,6 +983,8 @@ impl VectorStore for PostgresVectorStore {
                         distance: distance as f32,
                         section_path: Vec::new(),
                         retrievers: vec!["dense".to_owned()],
+                        chunk_text: None,
+                path: None,
                     })
                 })
                 .collect()
@@ -1540,10 +1717,29 @@ fn row_to_device_auth(row: &tokio_postgres::Row) -> Result<DeviceAuthRecord> {
     })
 }
 
+fn row_to_auth_code(row: &tokio_postgres::Row) -> Result<OAuthAuthCodeRecord> {
+    Ok(OAuthAuthCodeRecord {
+        code: row.try_get("code")?,
+        client_id: row.try_get("client_id")?,
+        redirect_uri: row.try_get("redirect_uri")?,
+        code_challenge: row.try_get("code_challenge")?,
+        challenge_method: row.try_get("challenge_method")?,
+        scope: row.try_get("scope")?,
+        subject: row.try_get("subject")?,
+        token_id: row.try_get("token_id")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+    })
+}
+
 const MCP_TOKEN_COLUMNS: &str = "id, name, subject, created_at, last_used_at, expires_at";
 const DEVICE_AUTH_COLUMNS: &str = "device_code, user_code, status, token_id, subject, \
                                    client_name, created_at, expires_at, interval_secs, \
                                    last_polled_at";
+const AUTH_CODE_COLUMNS: &str = "code, client_id, redirect_uri, code_challenge, \
+                                 challenge_method, scope, subject, token_id, \
+                                 created_at, expires_at, consumed_at";
 
 impl AuthStore for PostgresVectorStore {
     fn create_mcp_token(&self, token: NewMcpToken) -> Result<McpTokenRecord> {
@@ -1767,6 +1963,95 @@ impl AuthStore for PostgresVectorStore {
                 .execute(
                     "UPDATE device_auth_requests SET status = 'expired' \
                      WHERE status = 'pending' AND expires_at <= $1",
+                    &[&now],
+                )
+                .await?;
+            Ok(n as usize)
+        })
+    }
+
+    fn create_auth_code(&self, code: NewOAuthAuthCode) -> Result<OAuthAuthCodeRecord> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            client
+                .execute(
+                    "INSERT INTO oauth_authorization_codes \
+                         (code, client_id, redirect_uri, code_challenge, challenge_method, \
+                          scope, subject, created_at, expires_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    &[
+                        &code.code,
+                        &code.client_id,
+                        &code.redirect_uri,
+                        &code.code_challenge,
+                        &code.challenge_method,
+                        &code.scope,
+                        &code.subject,
+                        &code.created_at,
+                        &code.expires_at,
+                    ],
+                )
+                .await?;
+            Ok(OAuthAuthCodeRecord {
+                code: code.code,
+                client_id: code.client_id,
+                redirect_uri: code.redirect_uri,
+                code_challenge: code.code_challenge,
+                challenge_method: code.challenge_method,
+                scope: code.scope,
+                subject: code.subject,
+                token_id: None,
+                created_at: code.created_at,
+                expires_at: code.expires_at,
+                consumed_at: None,
+            })
+        })
+    }
+
+    fn find_auth_code(&self, code: &str) -> Result<Option<OAuthAuthCodeRecord>> {
+        let pool = self.pool.clone();
+        let code = code.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_opt(
+                    &format!(
+                        "SELECT {AUTH_CODE_COLUMNS} \
+                         FROM oauth_authorization_codes WHERE code = $1"
+                    ),
+                    &[&code],
+                )
+                .await?;
+            row.as_ref().map(row_to_auth_code).transpose()
+        })
+    }
+
+    fn consume_auth_code(&self, code: &str, token_id: &str, now: i64) -> Result<bool> {
+        let pool = self.pool.clone();
+        let code = code.to_owned();
+        let token_id = token_id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "UPDATE oauth_authorization_codes \
+                     SET consumed_at = $1, token_id = $2 \
+                     WHERE code = $3 AND consumed_at IS NULL AND expires_at > $1",
+                    &[&now, &token_id, &code],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn expire_auth_codes(&self, now: i64) -> Result<usize> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM oauth_authorization_codes WHERE expires_at <= $1",
                     &[&now],
                 )
                 .await?;

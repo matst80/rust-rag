@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/resizable"
 import { MarkdownView } from "./markdown-view"
 import { EmbeddedGraph } from "../graph/embedded-graph"
+import { AttachmentsPanel } from "./attachments-panel"
 import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -55,6 +56,7 @@ export function EntryDetail({ id }: EntryDetailProps) {
         text: editedText,
         source_id: entry?.source_id ?? "knowledge",
         metadata: entry?.metadata ?? {},
+        path: entry?.path ?? undefined,
       })
       mutate(["items", id])
       setIsEditing(false)
@@ -106,6 +108,14 @@ export function EntryDetail({ id }: EntryDetailProps) {
             <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">
               {entry.source_id}
             </span>
+            {entry.path && (
+              <Link
+                href={`/wiki?source_id=${encodeURIComponent(entry.source_id)}&path=${encodeURIComponent(entry.path)}`}
+                className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border border-border text-primary hover:bg-primary/10 transition-colors"
+              >
+                {entry.path}
+              </Link>
+            )}
           </div>
         </div>
       </div>
@@ -186,6 +196,9 @@ export function EntryDetail({ id }: EntryDetailProps) {
                 <MarkdownView content={entry.text} />
               </div>
             </div>
+
+            {/* Attachments */}
+            <AttachmentsPanel itemId={id} />
 
             {/* Metadata */}
             {Object.keys(entry.metadata).length > 0 && (

@@ -90,6 +90,10 @@ pub struct UpdateItemParams {
     #[schemars(schema_with = "rust_rag::api::metadata_schema")]
     pub metadata: serde_json::Value,
     pub source_id: String,
+    /// Optional wiki path. Pass an empty string to clear, omit to keep the
+    /// existing value, or a slash-separated path to set/replace.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -111,6 +115,7 @@ impl From<UpdateItemParams> for UpdateItemRequest {
             text: value.text,
             metadata: value.metadata,
             source_id: value.source_id,
+            path: value.path,
         }
     }
 }
@@ -155,12 +160,13 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar)."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
-        Parameters(request): Parameters<SearchRequest>,
+        Parameters(mut request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
+        request.rerank = request.rerank.or(Some(true));
         let response = self
             .client
             .search(&request)
@@ -232,6 +238,54 @@ impl RustRagMcpServer {
     ) -> Result<Json<DeleteResponse>, String> {
         self.client
             .delete_item(&id)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
+    async fn attach_url(
+        &self,
+        Parameters(request): Parameters<rust_rag::api::attachments::AttachUrlRequest>,
+    ) -> Result<Json<rust_rag::api::attachments::AttachmentSummary>, String> {
+        self.client
+            .attach_url(&request)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "List every file attached to an entry, newest first.")]
+    async fn list_attachments(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<rust_rag::api::attachments::AttachmentsResponse>, String> {
+        self.client
+            .list_attachments(&id)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Delete an attachment by id. Removes both the database row and the on-disk file.")]
+    async fn delete_attachment(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<DeleteResponse>, String> {
+        self.client
+            .delete_attachment(&id)
+            .await
+            .map(|_| Json(DeleteResponse { id, deleted: true }))
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Browse entries hierarchically by wiki path. Returns direct child path segments under `prefix` (or top-level when omitted) plus any leaf entries whose path equals `prefix`. Always scoped by `source_id`.")]
+    async fn list_entry_tree(
+        &self,
+        Parameters(query): Parameters<rust_rag::api::attachments::EntriesTreeQuery>,
+    ) -> Result<Json<rust_rag::api::attachments::EntriesTreeResponse>, String> {
+        self.client
+            .list_entry_tree(&query)
             .await
             .map(Json)
             .map_err(stringify_error)
@@ -422,6 +476,9 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 created_at: related.created_at,
                 distance: related.distance,
                 chunk_context: None,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                path: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -467,6 +524,10 @@ mod tests {
             source_id: "memory".to_owned(),
             created_at: 1,
             distance,
+            chunk_context: None,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            path: None,
         }
     }
 

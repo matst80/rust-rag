@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{
     AuthStore, DeviceAuthRecord, DeviceAuthStatus, McpTokenRecord, NewDeviceAuth, NewMcpToken,
-    SqliteVectorStore,
+    NewOAuthAuthCode, OAuthAuthCodeRecord, SqliteVectorStore,
 };
 
 impl AuthStore for SqliteVectorStore {
@@ -229,6 +229,92 @@ impl AuthStore for SqliteVectorStore {
         )?;
         Ok(affected)
     }
+
+    fn create_auth_code(&self, code: NewOAuthAuthCode) -> Result<OAuthAuthCodeRecord> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "
+            INSERT INTO oauth_authorization_codes
+                (code, client_id, redirect_uri, code_challenge, challenge_method,
+                 scope, subject, created_at, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ",
+            params![
+                code.code,
+                code.client_id,
+                code.redirect_uri,
+                code.code_challenge,
+                code.challenge_method,
+                code.scope,
+                code.subject,
+                code.created_at,
+                code.expires_at,
+            ],
+        )?;
+        Ok(OAuthAuthCodeRecord {
+            code: code.code,
+            client_id: code.client_id,
+            redirect_uri: code.redirect_uri,
+            code_challenge: code.code_challenge,
+            challenge_method: code.challenge_method,
+            scope: code.scope,
+            subject: code.subject,
+            token_id: None,
+            created_at: code.created_at,
+            expires_at: code.expires_at,
+            consumed_at: None,
+        })
+    }
+
+    fn find_auth_code(&self, code: &str) -> Result<Option<OAuthAuthCodeRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "
+            SELECT code, client_id, redirect_uri, code_challenge, challenge_method,
+                   scope, subject, token_id, created_at, expires_at, consumed_at
+            FROM oauth_authorization_codes
+            WHERE code = ?1
+            ",
+        )?;
+        let record = statement
+            .query_row(params![code], map_auth_code_row)
+            .optional()?;
+        Ok(record)
+    }
+
+    fn consume_auth_code(&self, code: &str, token_id: &str, now: i64) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let affected = connection.execute(
+            "
+            UPDATE oauth_authorization_codes
+            SET consumed_at = ?1, token_id = ?2
+            WHERE code = ?3 AND consumed_at IS NULL AND expires_at > ?1
+            ",
+            params![now, token_id, code],
+        )?;
+        Ok(affected > 0)
+    }
+
+    fn expire_auth_codes(&self, now: i64) -> Result<usize> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let affected = connection.execute(
+            "DELETE FROM oauth_authorization_codes WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(affected)
+    }
 }
 
 fn map_mcp_token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpTokenRecord> {
@@ -239,6 +325,22 @@ fn map_mcp_token_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpTokenRecord
         created_at: row.get(3)?,
         last_used_at: row.get(4)?,
         expires_at: row.get(5)?,
+    })
+}
+
+fn map_auth_code_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OAuthAuthCodeRecord> {
+    Ok(OAuthAuthCodeRecord {
+        code: row.get(0)?,
+        client_id: row.get(1)?,
+        redirect_uri: row.get(2)?,
+        code_challenge: row.get(3)?,
+        challenge_method: row.get(4)?,
+        scope: row.get(5)?,
+        subject: row.get(6)?,
+        token_id: row.get(7)?,
+        created_at: row.get(8)?,
+        expires_at: row.get(9)?,
+        consumed_at: row.get(10)?,
     })
 }
 

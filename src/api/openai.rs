@@ -930,6 +930,7 @@ async fn store_entry_tool(
         metadata: arguments.metadata,
         source_id: arguments.source_id.clone(),
         created_at,
+        path: None,
     };
 
     tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
@@ -984,6 +985,7 @@ async fn list_items_tool(
         metadata_filter: arguments.metadata,
         min_created_at: arguments.min_created_at,
         max_created_at: arguments.max_created_at,
+        path_prefix: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1040,6 +1042,7 @@ async fn update_item_tool(
             metadata: arguments.metadata,
             source_id: arguments.source_id,
             created_at: existing.created_at,
+            path: None,
         };
         let embedding = embedder.embed(&item.text)?;
         store.upsert_item(item.clone(), &embedding)?;
@@ -1386,6 +1389,7 @@ async fn ingest_web_content_tool(
         metadata,
         source_id: arguments.source_id.clone(),
         created_at,
+        path: None,
     };
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -1692,6 +1696,7 @@ mod tests {
             metadata: json!({"kind": "note"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            path: None,
         };
         store
             .upsert_item(item, &[0.1, 0.2, 0.3, 0.4])

@@ -38,27 +38,38 @@ data:
   RAG_CHUNK_OVERLAP_TOKENS: "50"
   RAG_INTRA_THREADS: "2"
   RAG_CUDA_DEVICE_ID: "0"
-  ## GPU is shared with the reranker arena; total budget on a 6 GB card
-  ## (1660 SUPER on sunk) is ~5500 MB usable. Embedder gets the bulk.
-  RAG_CUDA_MEM_LIMIT_MB: "3000"
+  ## RTX 2080 (serber) — 8 GB total, ~7500 MB usable. Tensor cores
+  ## present, so fp16 actually accelerates here unlike on the 1660 SUPER.
+  ## Embedder bge-m3 + reranker bge-reranker-base both fit comfortably.
+  RAG_CUDA_MEM_LIMIT_MB: "4000"
   ## Hard-fail at session creation if CUDA EP doesn't register (instead of
   ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
   RAG_CUDA_STRICT: "true"
   ## Verbose ORT log during cutover — drop back to "warning" once stable.
   RAG_ORT_LOG_LEVEL: "info"
-  ## Phase 3 cross-encoder reranker. Toggle "true" once the bge-reranker-v2-m3
-  ## ONNX export has been fetched (initContainer below) and the image carries
-  ## the matching binary. ~1.1 GB additional VRAM, ~50–150 ms / batch.
+  ## Phase 3 cross-encoder reranker. Switched from bge-reranker-v2-m3
+  ## (568M params, XLM-RoBERTa-large) to bge-reranker-base (~135M, ~4×
+  ## smaller) — v2-m3 hit ~4s / batch on the 1660 SUPER (Turing, no
+  ## fp16 tensor cores). Tradeoff: base is English-leaning, v2-m3 was
+  ## multilingual. Revert by flipping paths back.
   RAG_RERANKER_ENABLED: "true"
-  RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-v2-m3/model_fp16.onnx"
-  RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-v2-m3/tokenizer.json"
+  RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-base/model_fp16.onnx"
+  RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-base/tokenizer.json"
   RAG_RERANKER_TOP_N: "15"
-  RAG_RERANKER_MAX_TOKENS: "512"
+  ## Lowered from 512 → 256: cross-encoder attention is O(seq_len²), so
+  ## halving the cap is a 4× speedup. Chunks are 500 bge-m3 tokens; the
+  ## reranker tokenizer is XLM-R, similar count. With chunk_text fed to
+  ## the reranker (instead of full doc text), most pairs fit comfortably.
+  RAG_RERANKER_MAX_TOKENS: "256"
   RAG_RERANKER_INTRA_THREADS: "2"
-  RAG_RERANKER_CUDA_MEM_LIMIT_MB: "1500"
+  RAG_RERANKER_CUDA_MEM_LIMIT_MB: "2000"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
+  ## DNS rebinding guard for /mcp. Default allowlist is localhost only;
+  ## must include the public hostname so VSCode/Cursor over the ingress
+  ## are not rejected with 403 "Host header is not allowed".
+  RAG_MCP_ALLOWED_HOSTS: "rag.k6n.net,localhost,127.0.0.1,::1"
   ## Comma-separated list of Zitadel subject IDs (the JWT `sub` claim)
   ## that bypass per-message ownership checks for channel clear and
   ## individual message delete/update. ApiKey + Disabled auth paths are
@@ -124,7 +135,7 @@ spec:
     spec:
       runtimeClassName: nvidia
       nodeSelector:
-        kubernetes.io/hostname: sunk
+        kubernetes.io/hostname: serber
       ## Init container fetches the bge-m3 ONNX export from HuggingFace into
       ## the models PVC on first boot. Subsequent restarts skip the download
       ## (idempotent: no-op if model.onnx_data is already present at full
@@ -177,17 +188,18 @@ spec:
         - name: fetch-bge-reranker
           image: curlimages/curl:8.10.1
           env:
-            ## BAAI's own bge-reranker-v2-m3 repo ships only safetensors —
-            ## use onnx-community's pre-converted mirror, which carries fp16
-            ## (~1.1 GB) under onnx/.
+            ## bge-reranker-base ONNX (XLM-RoBERTa-base ~135M, fp16 ~270 MB).
+            ## onnx-community mirrors BAAI/bge-reranker-base with fp16 +
+            ## tokenizer.json. Smaller than v2-m3 — sub-second batches on
+            ## consumer Turing without tensor cores.
             - name: HF_REPO
-              value: "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main"
+              value: "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main"
           command:
             - /bin/sh
             - -ec
             - |
               cd /models
-              mkdir -p bge-reranker-v2-m3 && cd bge-reranker-v2-m3
+              mkdir -p bge-reranker-base && cd bge-reranker-base
               fetch() {
                 local name=$1
                 local url=$2
@@ -201,12 +213,12 @@ spec:
                   --output "$name.tmp" "$url"
                 mv "$name.tmp" "$name"
               }
-              # fp16 single-file (~1.1 GB resident). int8 was tried but ORT's
-              # CUDA EP lacks accelerated int8 kernels for QDQ ops — falls
-              # back to CPU partial and runs ~5× slower than fp16. Stick to
-              # fp16 unless we move to TensorRT EP.
-              fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 800000000
-              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        5000000
+              # ~270 MB fp16. Smaller variants (int8/q4) were skipped — ORT
+              # CUDA EP lacks accelerated int8 kernels for QDQ ops, so they
+              # actually run slower than fp16 here. TensorRT EP would change
+              # that calculus.
+              fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 100000000
+              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        1000000
               echo "reranker cache ready:"
               ls -lh
           volumeMounts:
@@ -245,8 +257,8 @@ spec:
               subPath: bge-m3
               readOnly: true
             - name: models
-              mountPath: /app/assets/bge-reranker-v2-m3
-              subPath: bge-reranker-v2-m3
+              mountPath: /app/assets/bge-reranker-base
+              subPath: bge-reranker-base
               readOnly: true
           startupProbe:
             httpGet:

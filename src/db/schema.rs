@@ -120,6 +120,21 @@ pub(super) fn initialize_schema(
         CREATE INDEX IF NOT EXISTS idx_device_auth_status ON device_auth_requests(status);
         CREATE INDEX IF NOT EXISTS idx_device_auth_expires_at ON device_auth_requests(expires_at);
 
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+            code TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            challenge_method TEXT NOT NULL CHECK (challenge_method IN ('S256')),
+            scope TEXT,
+            subject TEXT,
+            token_id TEXT REFERENCES mcp_tokens(id) ON DELETE SET NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            consumed_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires ON oauth_authorization_codes(expires_at);
+
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
             channel TEXT NOT NULL,
@@ -134,6 +149,20 @@ pub(super) fn initialize_schema(
         CREATE INDEX IF NOT EXISTS idx_messages_channel_created ON messages(channel, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(sender, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS attachments (
+            id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            filename TEXT,
+            stored_name TEXT NOT NULL,
+            mime TEXT,
+            size INTEGER,
+            sha256 TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_attachments_item_id ON attachments(item_id);
+        CREATE INDEX IF NOT EXISTS idx_attachments_created_at ON attachments(created_at DESC);
 
         ",
     )?;
@@ -185,6 +214,10 @@ pub(super) fn initialize_schema(
         "items",
         "ontology_status",
         "TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    ensure_column_exists(connection, "items", "path", "TEXT")?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_items_path ON items(path);",
     )?;
 
     connection.execute_batch(&format!(
