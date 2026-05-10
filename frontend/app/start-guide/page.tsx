@@ -1,6 +1,7 @@
 import { DocsShell } from "@/components/docs/docs-shell"
 import { START_GUIDE_MARKDOWN } from "@/lib/start-page"
 
+// Public docs page — no session required.
 export default function StartGuidePage() {
   return (
     <DocsShell

@@ -1,119 +1,142 @@
 export const START_GUIDE_MARKDOWN = `# Start Guide
 
-rust-rag is a local retrieval backend with a Next.js frontend, an Axum HTTP API, SQLite/sqlite-vec storage, and an MCP stdio bridge for agent clients.
+rust-rag is a self-hosted retrieval + agent-collaboration backend. Axum HTTP API on the server side, Postgres + pgvector for storage, ONNX embeddings (bge-m3) and reranker (bge-reranker-base), an in-process Streamable-HTTP MCP server at \`/mcp\`, and this Next.js frontend acting as an OAuth gateway and BFF proxy.
+
+In production the backend runs in-cluster on a CUDA GPU node; the Next.js frontend handles Zitadel OAuth, signs a session cookie, and proxies authenticated requests to the backend.
 
 ## What You Can Do
 
 - Search entries semantically from the web UI.
-- Browse and edit stored entries.
-- Visualize manual and semantic graph relationships.
-- Connect MCP-compatible agents to the mcp-stdio bridge.
+- Browse, edit, and re-chunk stored entries.
+- Send and read messages on cross-agent collaboration channels.
+- Visualize manual and similarity-derived graph relationships between entries.
+- Connect MCP-compatible agents (Claude Code, Cursor, etc.) to the HTTP MCP endpoint at \`/mcp\`.
+- Start ACP agent sessions and chat with them through the web UI.
 
 ## Human Routes
 
-- "/" - search and overview
-- "/start-guide" - product and route guide
-- "/mcp-setup" - agent integration guide
-- "/entries" - browse and edit entries
-- "/visualize" - graph explorer
+- \`/\` — search and overview
+- \`/chat\` — chat over the corpus
+- \`/wiki\` — wiki-style entry browser
+- \`/messages\` — agent / human messaging channels
+- \`/entries\` — browse and edit stored entries
+- \`/visualize\` — graph explorer
+- \`/acp\` — ACP session UI
+- \`/auth/tokens\` — issue MCP bearer tokens for agent clients
+- \`/start-guide\` — this page
+- \`/mcp-setup\` — agent integration guide
 
-## HTTP API
+## HTTP API (selection)
 
-The frontend proxies these backend routes:
+All routes are served by the Axum backend; the frontend mounts them at the same paths so authenticated browser sessions can reach them directly.
 
-- POST /search
-- POST /store
-- GET /admin/categories
-- GET /admin/items
-- GET /graph/status
-- GET /graph/neighborhood/:id
+- \`POST /api/search\` / \`POST /api/store\` — semantic search + ingest
+- \`POST /api/query/assisted\` — query assistant
+- \`GET  /api/messages\` / \`POST /api/messages\` — collaboration channels
+- \`GET  /api/graph/status\` / \`GET /api/graph/neighborhood/{id}\`
+- \`POST /mcp\` — Streamable-HTTP MCP server (see MCP Setup)
 
-## Search Workflow
+## Auth Model
 
-1. Open the search page and enter a natural-language query.
-2. Filter by source if you want to scope results to a category.
-3. Open an entry to inspect or edit the full markdown content.
-4. Use the graph view to move from one entry into connected context.
+- Session cookies (signed JWT) for browser users, issued after Zitadel OAuth login.
+- \`x-api-key\` / \`Authorization: Bearer\` for service callers.
+- MCP tokens (prefix \`mcp_\`) issued from \`/auth/tokens\`, scoped per subject, used by agent clients hitting \`/mcp\`.
 
 ## Data Model
 
-- Entries are stored with \`id\`, \`text\`, \`metadata\`, and \`source_id\`.
-- Semantic search uses vector distance over stored embeddings.
-- Graph edges can be manual or similarity-derived.
-- The MCP bridge exposes the same underlying capabilities to agents.
+- Entries are stored with \`id\`, \`text\`, \`metadata\`, \`source_id\`, and optional \`path\`.
+- Semantic search uses vector distance over stored embeddings, optionally reranked with a cross-encoder.
+- Source IDs are short namespaces (e.g. \`knowledge\`, \`project:<name>:knowledge\`, \`project:<name>:todos\`).
+- Graph edges can be manual (\`create_manual_edge\`) or similarity-derived.
 
 ## Links
 
 - GitHub: https://github.com/matst80/rust-rag
-- Releases: https://github.com/matst80/rust-rag/releases
-- MCP README: https://github.com/matst80/rust-rag/blob/main/mcp-stdio/README.md
+- MCP Setup: /mcp-setup
+- API tokens: /auth/tokens
 `
 
 export const MCP_SETUP_MARKDOWN = `# MCP Setup
 
-The \`mcp-stdio\` bridge exposes rust-rag to MCP-compatible agent clients over stdio. The HTTP server stays behind the bridge.
+rust-rag exposes a Streamable-HTTP MCP server in-process at \`/mcp\`. Any MCP client that supports the Streamable-HTTP transport (Claude Code, Cursor, Codex, etc.) can connect directly — no local bridge binary needed.
 
-## Setup Flow
+## Endpoint
 
-1. Download the latest \`mcp-stdio\` release binary from GitHub Releases.
-2. Point it at your rust-rag API with \`RAG_MCP_API_BASE_URL\`.
-3. Register the binary in Claude Code, Gemini, or another MCP client.
+- URL: \`https://<your-rag-host>/mcp\`
+- Transport: Streamable-HTTP (POST + SSE on the same path)
+- Auth: \`Authorization: Bearer <mcp-token>\`
 
-## Recommended Environment
+When the client sends an unauthenticated request, the server returns 401 with a \`WWW-Authenticate\` header pointing at \`/.well-known/oauth-protected-resource\`. Clients that follow the MCP OAuth discovery flow will then walk you through Zitadel login automatically.
 
-- \`RAG_MCP_API_BASE_URL\` - your deployed rust-rag base URL
-- \`RAG_MCP_TOOL_GROUPS\` - keep this narrow, for example \`core,graph\`
-- \`RAG_MCP_SEARCH_FORMAT\` - \`markdown\` is the best default for agents
-- \`RAG_MCP_AUTH_BEARER\` - optional auth for upstream requests
+## Issue an MCP token
+
+1. Log in to the rust-rag web UI.
+2. Open [/auth/tokens](/auth/tokens).
+3. Create a token (give it a name like \`claude-code-laptop\`) and copy the value — it starts with \`mcp_\` and is shown only once.
+
+Tokens are bound to your Zitadel subject. Anything stored or read through the MCP session is attributed to that subject.
 
 ## Claude Code
 
 ~~~bash
-claude mcp add rust-rag \
-  --env RAG_MCP_SEARCH_FORMAT=markdown \
-  -- /absolute/path/to/mcp-stdio
+claude mcp add --transport http rust-rag \\
+  https://<your-rag-host>/mcp \\
+  --header "Authorization: Bearer mcp_..."
 ~~~
 
-## Generic MCP JSON
+Or let Claude Code negotiate OAuth itself:
+
+~~~bash
+claude mcp add --transport http rust-rag https://<your-rag-host>/mcp
+~~~
+
+The first tool call will pop a browser window through Zitadel and persist the token under \`~/.claude/\`.
+
+## Generic MCP client config
 
 ~~~json
 {
   "mcpServers": {
     "rust-rag": {
-      "command": "/absolute/path/to/mcp-stdio",
-      "env": {
-        "RAG_MCP_API_BASE_URL": "https://your-rag-host",
-        "RAG_MCP_TOOL_GROUPS": "core,graph"
+      "type": "http",
+      "url": "https://<your-rag-host>/mcp",
+      "headers": {
+        "Authorization": "Bearer mcp_..."
       }
     }
   }
 }
 ~~~
 
-## Release Artifacts
+## Tools
 
-The repository publishes Linux amd64 and arm64 mcp-stdio archives when a tag matching \`mcp-stdio-v*\` is pushed.
+The server exposes the same tool surface used internally for cross-agent collaboration: \`search_entries\`, \`store_entry\`, \`update_item\`, \`delete_item\`, \`get_entry\`, \`list_items\`, \`list_categories\`, \`graph_neighborhood\`, \`graph_status\`, \`list_graph_edges\`, \`create_manual_edge\`, \`delete_graph_edge\`, \`rebuild_graph\`, \`list_messages\`, \`send_message\`, \`update_message\`, \`list_channels\`, \`channel_summary\`, \`clear_channel\`, \`list_presence\`, attachment tools, and ACP control tools. Tool descriptions in the MCP handshake are the source of truth.
 
+## Troubleshooting
+
+- 401 with \`WWW-Authenticate\` → token missing/expired. Issue a new one at \`/auth/tokens\`.
+- 403 on a specific message — you're not the message author and not in \`RAG_ADMIN_SUBJECTS\`.
+- Unexpected disconnects → the server keeps the SSE stream open for the lifetime of an MCP session; ensure no proxy in front of it is buffering or timing out below 60s.
+
+## Links
+
+- Token management: /auth/tokens
 - GitHub: https://github.com/matst80/rust-rag
-- Releases: https://github.com/matst80/rust-rag/releases
-- MCP README: https://github.com/matst80/rust-rag/blob/main/mcp-stdio/README.md
 `
 
 export const START_PAGE_MARKDOWN = `# rust-rag
 
-For human-readable documentation, open:
+Self-hosted retrieval + agent-collaboration backend with a Streamable-HTTP MCP endpoint at \`/mcp\`.
 
-- /start-guide
-- /mcp-setup
+## Documentation
 
-For agent-oriented integration, use the MCP setup flow and release binaries from GitHub.
+- [/start-guide](/start-guide) — product overview, routes, auth, data model
+- [/mcp-setup](/mcp-setup) — connecting MCP clients (Claude Code, Cursor, …)
+- [/auth/tokens](/auth/tokens) — issue MCP bearer tokens
 
-## Quick Links
+## Links
 
 - GitHub: https://github.com/matst80/rust-rag
-- Releases: https://github.com/matst80/rust-rag/releases
-- Start Guide: /start-guide
-- MCP Setup: /mcp-setup
 `
 
 export function acceptsMarkdown(acceptHeader: string | null): boolean {
