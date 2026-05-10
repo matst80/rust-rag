@@ -283,6 +283,20 @@ async fn run_loop(
 
                 let (mut sink, mut stream) = ws.split();
 
+                // After a fresh connect (server restart, target switch, or
+                // first connect) the ring buffer is empty. Ask the daemon to
+                // emit ListSessions + Snapshot so the in-process state is
+                // repopulated without waiting for the daemon's own periodic
+                // snapshot tick.
+                for variant in ["list_sessions"] {
+                    let frame = serde_json::json!({ "type": variant }).to_string();
+                    if let Err(err) = sink.send(Message::Text(frame.into())).await {
+                        warn!("acp_ws: failed to request {variant} after connect: {err}");
+                        break;
+                    }
+                    debug!("acp_ws: requested {variant} on connect");
+                }
+
                 loop {
                     tokio::select! {
                         _ = target_changed.notified() => {
