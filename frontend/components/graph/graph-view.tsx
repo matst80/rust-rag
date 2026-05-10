@@ -393,6 +393,8 @@ function GraphViewContent() {
             nodeStrength: -400,
             clusterStrength: 0.6,
             clusterType: "treemap",
+            linkStrengthIntraCluster: 0.85,
+            linkStrengthInterCluster: 0.02,
           }}
           labelType="all"
           selections={selectedNode ? [selectedNode] : []}

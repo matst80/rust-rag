@@ -210,7 +210,11 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         edges={reagraphEdges}
         clusterAttribute="cluster"
         layoutType="forceDirected2d"
-        layoutOverrides={{ clusterType: "treemap" }}
+        layoutOverrides={{
+          clusterType: "treemap",
+          linkStrengthIntraCluster: 0.85,
+          linkStrengthInterCluster: 0.02,
+        }}
         labelType="auto"
         actives={[centerId]}
         draggable
