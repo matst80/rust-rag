@@ -10,7 +10,7 @@ export interface Entry {
   metadata: EntryMetadata
   source_id: string
   created_at: number
-  /** Optional: present on /admin/items/oversized when embedder is ready. */
+  /** Optional: populated by endpoints that opt in to token counting. */
   token_count?: number
   /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
   path?: string | null
@@ -161,12 +161,6 @@ export interface ListItemsRequest {
   offset?: number
   sort_order?: SortOrder
   path_prefix?: string
-}
-
-export interface LargeItemsRequest {
-  min_chars?: number
-  limit?: number
-  offset?: number
 }
 
 export interface RechunkRequest {

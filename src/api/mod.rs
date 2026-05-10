@@ -515,8 +515,8 @@ pub struct AdminItemPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
-    /// Token count under the embedding tokenizer, untruncated. Populated by
-    /// endpoints that opt in (currently `/admin/items/oversized`).
+    /// Token count under the embedding tokenizer, untruncated. Populated only
+    /// by endpoints that opt in.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub token_count: Option<usize>,
     /// User-asserted wiki path (e.g. `team/handbook`). `None` when unset.
@@ -856,7 +856,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
-        .route("/admin/items/oversized", get(list_large_items))
         .route("/admin/tokens/count", post(count_tokens))
         .route(
             "/admin/items/{id}",
@@ -1859,63 +1858,6 @@ async fn delete_item(
     }
 
     Ok(Json(DeleteResponse { id, deleted }))
-}
-
-#[derive(Debug, Deserialize)]
-struct LargeItemsQuery {
-    min_chars: Option<usize>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-async fn list_large_items(
-    State(state): State<AppState>,
-    Query(query): Query<LargeItemsQuery>,
-) -> Result<Json<AdminItemsResponse>, ApiError> {
-    let min_chars = query.min_chars.unwrap_or(state.chunking.large_item_threshold);
-    let limit = query.limit.unwrap_or(50);
-    let offset = query.offset.unwrap_or(0);
-    let store = state.store.clone();
-    let (items, total_count) =
-        tokio::task::spawn_blocking(move || store.list_large_items(min_chars, limit, offset))
-            .await
-            .map_err(ApiError::TaskJoin)?
-            .map_err(ApiError::Internal)?;
-
-    // Annotate with real token counts. Skip silently if embedder isn't ready
-    // (e.g. boot) — char-only response is still useful.
-    let token_counts: Option<Vec<Option<usize>>> = if let Ok(embedder) = state.embedder.get_ready()
-    {
-        let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
-        let counts = tokio::task::spawn_blocking(move || {
-            texts
-                .into_iter()
-                .map(|t| embedder.count_tokens(&t).ok())
-                .collect::<Vec<_>>()
-        })
-        .await
-        .map_err(ApiError::TaskJoin)?;
-        Some(counts)
-    } else {
-        None
-    };
-
-    let payloads = items
-        .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let mut p: AdminItemPayload = item.into();
-            if let Some(ref counts) = token_counts {
-                p.token_count = counts.get(i).copied().flatten();
-            }
-            p
-        })
-        .collect();
-
-    Ok(Json(AdminItemsResponse {
-        items: payloads,
-        total_count,
-    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3505,20 +3447,6 @@ mod tests {
                     item_count,
                 })
                 .collect())
-        }
-
-        fn list_large_items(&self, min_chars: usize, _limit: usize, _offset: usize) -> Result<(Vec<ItemRecord>, i64)> {
-            let stored = self.stored.lock().expect("store mutex poisoned");
-            let items: Vec<_> = stored
-                .iter()
-                .filter(|(item, _)| {
-                    item.text.len() > min_chars
-                        && item.metadata.get("_chunk").is_none()
-                })
-                .map(|(item, _)| item.clone())
-                .collect();
-            let total = items.len() as i64;
-            Ok((items, total))
         }
 
         fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {

@@ -35,6 +35,7 @@ const CREATE_GRAPH_EDGE_TOOL: &str = "create_graph_edge";
 const DELETE_GRAPH_EDGE_TOOL: &str = "delete_graph_edge";
 const INGEST_WEB_CONTENT_TOOL: &str = "ingest_web_content";
 const READ_FILE_RANGE_TOOL: &str = "read_file_range";
+const SPLIT_ENTRY_TOOL: &str = "split_entry_to_wiki";
 
 #[derive(Debug, Deserialize)]
 struct ReadFileRangeArguments {
@@ -178,6 +179,9 @@ struct StoreEntryArguments {
     text: String,
     metadata: Value,
     source_id: String,
+    /// Optional wiki path (slash-separated) for the entry; surfaces the entry
+    /// in the wiki tree at this location.
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +207,37 @@ struct UpdateItemArguments {
     text: String,
     metadata: Value,
     source_id: String,
+    /// Wiki path. Omit to keep the existing path unchanged. Pass an empty
+    /// string to clear it.
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SplitEntryArguments {
+    /// Source entry to split. Read its full text + path before deciding parts.
+    parent_id: String,
+    /// Optional override; defaults to the parent's source_id.
+    source_id: Option<String>,
+    /// When true, leaves the parent in place (e.g. as an index). When false
+    /// (default), deletes the parent after the children are written.
+    #[serde(default)]
+    keep_parent: bool,
+    /// Each part becomes its own entry. `path` may be absolute (starts with
+    /// `/`) or relative — relative slugs are joined under the parent's path.
+    parts: Vec<SplitPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SplitPart {
+    /// Stable id for the new entry. If omitted, a UUIDv7 is generated.
+    id: Option<String>,
+    text: String,
+    /// Optional path. If missing and parent has one, the slug is appended.
+    path: Option<String>,
+    /// Used to derive a path under the parent when `path` itself is omitted.
+    slug: Option<String>,
+    /// Per-part metadata; merges over a `{ split_from: parent_id }` default.
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,14 +590,18 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
             kind: "function".to_owned(),
             function: ChatFunctionDefinition {
                 name: STORE_ENTRY_TOOL.to_owned(),
-                description: Some("Store a new RAG entry with text, metadata, and source_id.".to_owned()),
+                description: Some(
+                    "Store a new RAG entry. Long markdown is automatically chunked at the configured token budget; pass a `path` (slash-separated, e.g. `architecture/auth/oauth`) to surface the entry in the wiki tree."
+                        .to_owned(),
+                ),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "id": { "type": "string", "description": "Optional stable identifier." },
                         "text": { "type": "string", "description": "The content to store." },
                         "metadata": { "type": "object", "description": "JSON metadata object." },
-                        "source_id": { "type": "string", "description": "Namespace/category (e.g., 'notes', 'knowledge')." }
+                        "source_id": { "type": "string", "description": "Namespace/category (e.g., 'notes', 'knowledge')." },
+                        "path": { "type": "string", "description": "Wiki path (slash-separated). Omit for entries without a wiki location." }
                     },
                     "required": ["text", "metadata", "source_id"],
                     "additionalProperties": false
@@ -605,7 +644,10 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
             kind: "function".to_owned(),
             function: ChatFunctionDefinition {
                 name: GET_ITEM_TOOL.to_owned(),
-                description: Some("Get a single item by its ID.".to_owned()),
+                description: Some(
+                    "Get a single item by its ID, returning the full text, metadata, source_id, and wiki path. Use this before splitting a long entry into wiki pages."
+                        .to_owned(),
+                ),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
@@ -620,14 +662,18 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
             kind: "function".to_owned(),
             function: ChatFunctionDefinition {
                 name: UPDATE_ITEM_TOOL.to_owned(),
-                description: Some("Update an existing item's text, metadata, and source_id.".to_owned()),
+                description: Some(
+                    "Replace an existing item's text/metadata/source_id (and optionally its wiki path). Re-chunks and re-embeds the new content."
+                        .to_owned(),
+                ),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "id": { "type": "string" },
                         "text": { "type": "string" },
                         "metadata": { "type": "object" },
-                        "source_id": { "type": "string" }
+                        "source_id": { "type": "string" },
+                        "path": { "type": "string", "description": "Wiki path. Omit to keep the existing path; pass an empty string to clear it." }
                     },
                     "required": ["id", "text", "metadata", "source_id"],
                     "additionalProperties": false
@@ -746,6 +792,42 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
         ChatToolDefinition {
             kind: "function".to_owned(),
             function: ChatFunctionDefinition {
+                name: SPLIT_ENTRY_TOOL.to_owned(),
+                description: Some(
+                    "Split a long entry into multiple wiki entries. Each part becomes its own entry with its own path; relative slugs are joined under the parent's path. Set keep_parent=true to leave the parent in place as an index page (default: delete it)."
+                        .to_owned(),
+                ),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "parent_id": { "type": "string", "description": "ID of the entry to split. Fetch it with get_item first." },
+                        "source_id": { "type": "string", "description": "Override source_id for the new parts. Defaults to the parent's source_id." },
+                        "keep_parent": { "type": "boolean", "default": false, "description": "Keep the parent entry as an index page when true." },
+                        "parts": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "text": { "type": "string" },
+                                    "path": { "type": "string", "description": "Absolute path (with leading /) or a relative path. Optional if `slug` is given." },
+                                    "slug": { "type": "string", "description": "Path segment to append under the parent's path when `path` is omitted." },
+                                    "metadata": { "type": "object" }
+                                },
+                                "required": ["text"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["parent_id", "parts"],
+                    "additionalProperties": false
+                })),
+            },
+        },
+        ChatToolDefinition {
+            kind: "function".to_owned(),
+            function: ChatFunctionDefinition {
                 name: READ_FILE_RANGE_TOOL.to_owned(),
                 description: Some(
                     "Read a specific line range from a large file stored on disk during research."
@@ -836,6 +918,10 @@ async fn execute_server_tool(state: &AppState, tool_call: &AssistantToolCall) ->
                 Err(error) => json!({ "error": error.to_string() }).to_string(),
             }
         }
+        SPLIT_ENTRY_TOOL => match split_entry_tool(state, &tool_call.function.arguments).await {
+            Ok(result) => result,
+            Err(error) => json!({ "error": error.to_string() }).to_string(),
+        },
         _ => json!({
             "error": format!("unsupported server tool {}", tool_call.function.name)
         })
@@ -916,34 +1002,17 @@ async fn store_entry_tool(
         .with_context(|| format!("invalid arguments for {STORE_ENTRY_TOOL}"))
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
-    let id = resolve_store_id(arguments.id);
-    validate_non_empty("text", &arguments.text)?;
-    validate_metadata(&arguments.metadata)?;
-    validate_source_id(&arguments.source_id)?;
-
-    let embedder = state.embedder.get_ready()?;
-    let store = state.store.clone();
-    let created_at = current_timestamp_millis()?;
-    let item = ItemRecord {
-        id: id.clone(),
-        text: arguments.text.clone(),
+    let request = crate::api::StoreRequest {
+        id: arguments.id,
+        text: arguments.text,
         metadata: arguments.metadata,
-        source_id: arguments.source_id.clone(),
-        created_at,
-        path: None,
+        source_id: arguments.source_id,
+        chunk: None,
+        path: arguments.path.filter(|p| !p.is_empty()),
     };
 
-    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let embedding = embedder.embed(&item.text).map_err(ApiError::Internal)?;
-        store
-            .upsert_item(item, &embedding)
-            .map_err(ApiError::Internal)?;
-        Ok(())
-    })
-    .await
-    .map_err(ApiError::TaskJoin)??;
-
-    Ok(json!({ "id": id, "source_id": arguments.source_id, "created_at": created_at }).to_string())
+    let response = crate::api::store_entry_core(state, request, None).await?;
+    Ok(serde_json::to_string(&response).map_err(|error| ApiError::Internal(anyhow!(error)))?)
 }
 
 async fn list_categories_tool(state: &AppState) -> std::result::Result<String, ApiError> {
@@ -1025,42 +1094,148 @@ async fn update_item_tool(
         .with_context(|| format!("invalid arguments for {UPDATE_ITEM_TOOL}"))
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
 
-    validate_metadata(&arguments.metadata)?;
-    validate_source_id(&arguments.source_id)?;
-
-    let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
-    let id = arguments.id;
+    let lookup_id = arguments.id.clone();
+    let existing = tokio::task::spawn_blocking(move || store.get_item(&lookup_id))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("item {} not found", arguments.id)))?;
 
-    let updated = tokio::task::spawn_blocking(move || -> anyhow::Result<ItemRecord> {
-        let existing = store
-            .get_item(&id)?
-            .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
-        let item = ItemRecord {
-            id: existing.id,
-            text: arguments.text,
-            metadata: arguments.metadata,
-            source_id: arguments.source_id,
-            created_at: existing.created_at,
-            path: None,
-        };
-        let embedding = embedder.embed(&item.text)?;
-        store.upsert_item(item.clone(), &embedding)?;
-        Ok(item)
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("not found") {
-            ApiError::NotFound(message)
-        } else {
-            ApiError::Internal(error)
+    // path semantics: omitted → keep existing; "" → clear; non-empty → set.
+    let path = match arguments.path {
+        None => existing.path.clone(),
+        Some(s) if s.is_empty() => None,
+        Some(s) => Some(s),
+    };
+
+    let request = crate::api::StoreRequest {
+        id: Some(arguments.id),
+        text: arguments.text,
+        metadata: arguments.metadata,
+        source_id: arguments.source_id,
+        chunk: None,
+        path,
+    };
+
+    let response = crate::api::store_entry_core(state, request, None).await?;
+    Ok(serde_json::to_string(&response).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+}
+
+async fn split_entry_tool(
+    state: &AppState,
+    arguments: &str,
+) -> std::result::Result<String, ApiError> {
+    let arguments: SplitEntryArguments = serde_json::from_str(arguments)
+        .with_context(|| format!("invalid arguments for {SPLIT_ENTRY_TOOL}"))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+
+    if arguments.parts.is_empty() {
+        return Err(ApiError::BadRequest("parts must not be empty".to_owned()));
+    }
+
+    let store = state.store.clone();
+    let parent_id = arguments.parent_id.clone();
+    let parent = tokio::task::spawn_blocking(move || store.get_item(&parent_id))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("parent {} not found", arguments.parent_id))
+        })?;
+
+    let parent_path = parent.path.clone();
+    let target_source = arguments
+        .source_id
+        .clone()
+        .unwrap_or_else(|| parent.source_id.clone());
+
+    let mut written: Vec<crate::api::StoreResponse> = Vec::with_capacity(arguments.parts.len());
+    for (idx, part) in arguments.parts.into_iter().enumerate() {
+        validate_non_empty(&format!("parts[{idx}].text"), &part.text)?;
+
+        let path = derive_split_path(&parent_path, part.path.as_deref(), part.slug.as_deref());
+        if path.is_none() && parent_path.is_some() {
+            return Err(ApiError::BadRequest(format!(
+                "parts[{idx}] needs `path` or `slug` because the parent has a wiki path"
+            )));
         }
-    })?;
 
-    let payload: AdminItemPayload = updated.into();
-    Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
+        let metadata = match part.metadata {
+            Some(Value::Object(mut m)) => {
+                m.entry("split_from".to_owned())
+                    .or_insert_with(|| Value::String(arguments.parent_id.clone()));
+                Value::Object(m)
+            }
+            Some(other) => other,
+            None => json!({ "split_from": arguments.parent_id }),
+        };
+
+        let req = crate::api::StoreRequest {
+            id: part.id,
+            text: part.text,
+            metadata,
+            source_id: target_source.clone(),
+            chunk: None,
+            path,
+        };
+        let resp = crate::api::store_entry_core(state, req, None).await?;
+        written.push(resp);
+    }
+
+    let parent_deleted = if !arguments.keep_parent {
+        let store = state.store.clone();
+        let parent_id = arguments.parent_id.clone();
+        tokio::task::spawn_blocking(move || store.delete_item(&parent_id))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?
+    } else {
+        false
+    };
+
+    Ok(json!({
+        "parent_id": arguments.parent_id,
+        "parent_deleted": parent_deleted,
+        "kept_parent": arguments.keep_parent,
+        "parts": written,
+    })
+    .to_string())
+}
+
+fn derive_split_path(
+    parent_path: &Option<String>,
+    explicit: Option<&str>,
+    slug: Option<&str>,
+) -> Option<String> {
+    if let Some(p) = explicit {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix('/') {
+            return Some(rest.trim_matches('/').to_owned());
+        }
+        return match parent_path {
+            Some(parent) => Some(format!(
+                "{}/{}",
+                parent.trim_matches('/'),
+                trimmed.trim_matches('/')
+            )),
+            None => Some(trimmed.trim_matches('/').to_owned()),
+        };
+    }
+    if let Some(s) = slug {
+        let s = s.trim().trim_matches('/');
+        if s.is_empty() {
+            return None;
+        }
+        return match parent_path {
+            Some(parent) => Some(format!("{}/{}", parent.trim_matches('/'), s)),
+            None => Some(s.to_owned()),
+        };
+    }
+    None
 }
 
 async fn delete_item_tool(

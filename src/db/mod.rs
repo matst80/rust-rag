@@ -599,7 +599,6 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<SearchHit>>;
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
-    fn list_large_items(&self, min_chars: usize, limit: usize, offset: usize) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
     fn delete_item(&self, id: &str) -> Result<bool>;
 
@@ -1076,37 +1075,6 @@ impl VectorStore for SqliteVectorStore {
         list_items_internal(connection, request)
     }
 
-    fn list_large_items(&self, min_chars: usize, limit: usize, offset: usize) -> Result<(Vec<ItemRecord>, i64)> {
-        let guard = self.connection.lock().expect("sqlite mutex poisoned");
-        let connection = guard
-            .as_ref()
-            .context("sqlite connection has already been closed")?;
-
-        let min_chars = min_chars as i64;
-        let limit = limit as i64;
-        let offset = offset as i64;
-
-        let total_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM items WHERE LENGTH(text) > ?1 AND json_extract(metadata, '$._chunk') IS NULL",
-            params![min_chars],
-            |row| row.get(0),
-        )?;
-
-        let mut statement = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at
-             FROM items
-             WHERE LENGTH(text) > ?1 AND json_extract(metadata, '$._chunk') IS NULL
-             ORDER BY LENGTH(text) DESC
-             LIMIT ?2 OFFSET ?3",
-        )?;
-        let rows = statement.query_map(params![min_chars, limit, offset], map_item_row)?;
-        let mut items = Vec::new();
-        for row in rows {
-            items.push(row?);
-        }
-
-        Ok((items, total_count))
-    }
 
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");

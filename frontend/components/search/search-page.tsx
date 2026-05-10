@@ -31,7 +31,6 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const abortRef = useRef<AbortController | null>(null)
 
   // Basic search hook
-  console.log('render',{isAssisted,submittedQuery})
   const { data: basicResults, isLoading: isBasicLoading } = useSearch(
     !isAssisted ? submittedQuery : "",
     categoryFilter ?? undefined,

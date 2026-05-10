@@ -14,7 +14,6 @@ import type {
   GraphNodeDistance,
   GraphStatus,
   ListItemsRequest,
-  LargeItemsRequest,
   RechunkRequest,
   LlmRechunkRequest,
   RechunkResponse,
@@ -410,23 +409,6 @@ export async function getItem(id: string): Promise<Entry> {
   return item
 }
 
-export async function getLargeItems(
-  options: LargeItemsRequest = {}
-): Promise<PagedItems> {
-  const params = new URLSearchParams()
-  if (options.min_chars !== undefined) params.append("min_chars", options.min_chars.toString())
-  if (options.limit !== undefined) params.append("limit", options.limit.toString())
-  if (options.offset !== undefined) params.append("offset", options.offset.toString())
-  const queryString = params.toString() ? `?${params.toString()}` : ""
-  const response = await request<{ items: Entry[]; total_count: number }>(
-    `/admin/items/oversized${queryString}`
-  )
-  return {
-    items: ensureArray(response.items, "large items"),
-    total_count: response.total_count,
-  }
-}
-
 export async function rechunkItem(
   id: string,
   config: RechunkRequest = {}
@@ -772,7 +754,6 @@ export const api = {
     create: createItem,
     update: updateItem,
     delete: deleteItem,
-    listLarge: getLargeItems,
     rechunk: rechunkItem,
     llmRechunk: llmRechunkItem,
     uploadImage,

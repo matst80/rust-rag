@@ -755,40 +755,6 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn list_large_items(
-        &self,
-        min_chars: usize,
-        limit: usize,
-        offset: usize,
-    ) -> Result<(Vec<ItemRecord>, i64)> {
-        let pool = self.pool.clone();
-        let min_chars = min_chars as i32;
-        let limit = limit as i64;
-        let offset = offset as i64;
-
-        self.block(async move {
-            let client = pool.get().await?;
-            let total: i64 = client
-                .query_one(
-                    "SELECT count(*)::bigint FROM documents WHERE char_length(content) >= $1",
-                    &[&min_chars],
-                )
-                .await?
-                .get(0);
-            let rows = client
-                .query(
-                    "SELECT id, content, metadata, source_id, created_at, path FROM documents \
-                     WHERE char_length(content) >= $1 \
-                     ORDER BY char_length(content) DESC \
-                     LIMIT $2 OFFSET $3",
-                    &[&min_chars, &limit, &offset],
-                )
-                .await?;
-            let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
-            Ok((items, total))
-        })
-    }
-
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>> {
         let pool = self.pool.clone();
         let id = id.to_owned();

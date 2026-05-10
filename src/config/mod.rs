@@ -109,9 +109,6 @@ pub struct ChunkingConfig {
     /// Characters of the previous chunk's tail to prepend to each chunk's embedding for context.
     /// Env: RAG_CHUNK_OVERLAP_CHARS (default 200)
     pub chunk_overlap_chars: usize,
-    /// Items longer than this are flagged as oversized in the admin panel.
-    /// Env: RAG_LARGE_ITEM_THRESHOLD (default = chunk_max_chars)
-    pub large_item_threshold: usize,
 }
 
 impl Default for ChunkingConfig {
@@ -119,7 +116,6 @@ impl Default for ChunkingConfig {
         Self {
             chunk_max_chars: 1536,
             chunk_overlap_chars: 200,
-            large_item_threshold: 1536,
         }
     }
 }
@@ -338,11 +334,7 @@ impl AppConfig {
             chunking: {
                 let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;
                 let chunk_overlap_chars: usize = parse_env("RAG_CHUNK_OVERLAP_CHARS", "200")?;
-                let large_item_threshold: usize = parse_env(
-                    "RAG_LARGE_ITEM_THRESHOLD",
-                    &chunk_max_chars.to_string(),
-                )?;
-                ChunkingConfig { chunk_max_chars, chunk_overlap_chars, large_item_threshold }
+                ChunkingConfig { chunk_max_chars, chunk_overlap_chars }
             },
             manager: ManagerConfig {
                 enabled: parse_env("RAG_MANAGER_ENABLED", "false")?,
