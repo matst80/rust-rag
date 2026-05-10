@@ -1,9 +1,25 @@
 "use client"
 
 import Link from "next/link"
-import { useRouter, useSearchParams } from "next/navigation"
-import { Folder, FileText, ChevronRight, FolderTree } from "lucide-react"
+import { useState } from "react"
+import {
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderTree,
+  Menu,
+  X,
+} from "lucide-react"
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable"
+import { Button } from "@/components/ui/button"
 import { useCategories, useEntriesTree } from "@/lib/api"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { cn } from "@/lib/utils"
+import { WikiSourceRoot } from "./wiki-source-root"
 
 function buildHref(sourceId: string, path?: string) {
   const params = new URLSearchParams({ source_id: sourceId })
@@ -17,62 +33,94 @@ interface EntryTreeProps {
 }
 
 export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
-  const router = useRouter()
+  const isMobile = useIsMobile()
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const { data: categories } = useCategories()
   const { data: tree, isLoading } = useEntriesTree(sourceId, prefix)
 
   const segments = prefix ? prefix.split("/") : []
 
-  return (
-    <div className="flex h-[calc(100vh-3rem)] flex-col">
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
+  // Render every category as a candidate root; WikiSourceRoot self-hides when
+  // the source has no path-bearing data.
+  const sidebar = (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <FolderTree className="size-4 text-primary" />
-        <h1 className="font-mono text-xs font-bold uppercase tracking-[2px]">Wiki</h1>
-        <select
-          value={sourceId}
-          onChange={(e) =>
-            router.push(buildHref(e.target.value))
-          }
-          className="ml-auto font-mono text-xs bg-background border border-border px-2 py-1"
-        >
-          {categories?.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.id} ({c.count})
-            </option>
-          ))}
-          {!categories?.find((c) => c.id === sourceId) && (
-            <option value={sourceId}>{sourceId}</option>
-          )}
-        </select>
+        <span className="font-mono text-[11px] font-bold uppercase tracking-[2px]">
+          Sources
+        </span>
+        {isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="ml-auto size-7"
+            onClick={() => setMobileSidebarOpen(false)}
+            aria-label="Close sidebar"
+          >
+            <X className="size-4" />
+          </Button>
+        )}
       </div>
+      <div className="flex-1 overflow-y-auto py-2">
+        {!categories && (
+          <p className="font-mono text-xs text-muted-foreground px-3">Loading…</p>
+        )}
+        {categories
+          ?.filter((c) => c.count > 0)
+          .map((c) => (
+            <WikiSourceRoot
+              key={c.id}
+              sourceId={c.id}
+              selectedSourceId={sourceId}
+              selectedPath={prefix ?? null}
+            />
+          ))}
+      </div>
+    </div>
+  )
 
-      <nav className="flex items-center gap-1 px-4 py-3 border-b border-border font-mono text-xs">
-        <Link
-          href={buildHref(sourceId)}
-          className="text-muted-foreground hover:text-primary"
-        >
-          {sourceId}
-        </Link>
-        {segments.map((seg, i) => {
-          const sub = segments.slice(0, i + 1).join("/")
-          const isLast = i === segments.length - 1
-          return (
-            <span key={sub} className="flex items-center gap-1">
-              <ChevronRight className="size-3 text-muted-foreground" />
-              {isLast ? (
-                <span className="text-foreground">{seg}</span>
-              ) : (
-                <Link
-                  href={buildHref(sourceId, sub)}
-                  className="text-muted-foreground hover:text-primary"
-                >
-                  {seg}
-                </Link>
-              )}
-            </span>
-          )
-        })}
-      </nav>
+  const content = (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
+        {isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8"
+            onClick={() => setMobileSidebarOpen(true)}
+            aria-label="Open sidebar"
+          >
+            <Menu className="size-4" />
+          </Button>
+        )}
+        <nav className="flex items-center gap-1 font-mono text-xs flex-wrap min-w-0">
+          <Link
+            href={buildHref(sourceId)}
+            className="font-bold uppercase tracking-wider text-muted-foreground hover:text-primary"
+          >
+            {sourceId}
+          </Link>
+          {segments.map((seg, i) => {
+            const sub = segments.slice(0, i + 1).join("/")
+            const isLast = i === segments.length - 1
+            return (
+              <span key={sub} className="flex items-center gap-1">
+                <ChevronRight className="size-3 text-muted-foreground" />
+                {isLast ? (
+                  <span className="text-foreground">{seg}</span>
+                ) : (
+                  <Link
+                    href={buildHref(sourceId, sub)}
+                    className="text-muted-foreground hover:text-primary"
+                  >
+                    {seg}
+                  </Link>
+                )}
+              </span>
+            )
+          })}
+        </nav>
+      </div>
 
       <div className="flex-1 overflow-y-auto p-4">
         {isLoading && (
@@ -80,9 +128,12 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
         )}
 
         {tree && tree.children.length === 0 && tree.entries.length === 0 && (
-          <p className="font-mono text-xs text-muted-foreground">
-            No entries under this path.
-          </p>
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <Folder className="size-8 mb-3 text-muted-foreground/30" />
+            <p className="font-mono text-xs text-muted-foreground">
+              No entries under this path.
+            </p>
+          </div>
         )}
 
         {tree && tree.children.length > 0 && (
@@ -104,7 +155,7 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
                     </span>
                     <span className="font-mono text-[10px] text-muted-foreground">
                       {c.count} entr{c.count === 1 ? "y" : "ies"}
-                      {c.has_children ? " · has subfolders" : ""}
+                      {c.has_children ? " · subfolders" : ""}
                     </span>
                   </div>
                 </Link>
@@ -140,6 +191,39 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
           </div>
         )}
       </div>
+    </div>
+  )
+
+  if (isMobile) {
+    return (
+      <div className="flex h-[calc(100vh-3rem)] flex-col bg-background">
+        {content}
+        {mobileSidebarOpen && (
+          <div className="fixed inset-0 z-50 flex">
+            <div
+              className="absolute inset-0 bg-background/80 backdrop-blur-sm"
+              onClick={() => setMobileSidebarOpen(false)}
+            />
+            <div className="relative w-72 max-w-[80%] h-full border-r border-border shadow-lg">
+              {sidebar}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-[calc(100vh-3rem)] bg-background">
+      <ResizablePanelGroup direction="horizontal" className="h-full">
+        <ResizablePanel defaultSize={22} minSize={15} maxSize={40}>
+          {sidebar}
+        </ResizablePanel>
+        <ResizableHandle withHandle />
+        <ResizablePanel defaultSize={78} minSize={40}>
+          {content}
+        </ResizablePanel>
+      </ResizablePanelGroup>
     </div>
   )
 }
