@@ -41,9 +41,10 @@ tower-http = { version = "0.6.6", features = ["trace", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 opentelemetry = "0.27"
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics", "logs"] }
 opentelemetry-semantic-conventions = "0.27"
+opentelemetry-appender-tracing = "0.27"
 tracing-opentelemetry = "0.28"
 uuid = { version = "1.18.1", features = ["v7"] }
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }

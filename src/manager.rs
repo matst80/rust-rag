@@ -268,9 +268,24 @@ async fn run_iteration(
             }
         }
 
-        let stream_result =
-            stream_chat(state, model, &chat_messages, thinking_id.as_deref(), &mut accumulated)
-                .await?;
+        let stream_result = match stream_chat(
+            state,
+            model,
+            &chat_messages,
+            thinking_id.as_deref(),
+            &mut accumulated,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                if let Some(id) = thinking_id.as_deref() {
+                    let body = format!("⚠️ manager LLM call failed: {err:#}");
+                    let _ = update_thinking(state, id, &body, false).await;
+                }
+                return Err(err);
+            }
+        };
 
         chat_messages.push(serde_json::to_value(&stream_result.assistant_message)?);
 
@@ -373,6 +388,7 @@ struct StreamResult {
     tool_calls: Vec<ToolCall>,
 }
 
+#[tracing::instrument(skip_all, fields(model = %model, msg_count = messages.len()))]
 async fn stream_chat(
     state: &AppState,
     model: &str,
@@ -393,6 +409,13 @@ async fn stream_chat(
         .and_then(|c| c.api_key.clone())
         .or_else(|| openai.api_key.clone());
 
+    debug!(
+        base_url = %base_url,
+        has_api_key = api_key.is_some(),
+        api_key_len = api_key.as_deref().map(str::len).unwrap_or(0),
+        "manager: stream_chat request"
+    );
+
     let payload = json!({
         "model": model,
         "messages": messages,
@@ -410,7 +433,21 @@ async fn stream_chat(
         req = req.bearer_auth(key);
     }
 
-    let response = req.send().await?.error_for_status()?;
+    let response = req.send().await?;
+    let status = response.status();
+    debug!(status = %status, "manager: stream_chat response status");
+    let response = match response.error_for_status_ref() {
+        Ok(_) => response,
+        Err(err) => {
+            let body = response.text().await.unwrap_or_default();
+            warn!(
+                status = %status,
+                body = %truncate(&body, 800),
+                "manager: stream_chat upstream error"
+            );
+            return Err(anyhow!("upstream {status}: {}", truncate(&body, 400)).context(err));
+        }
+    };
     let mut stream = response.bytes_stream();
 
     let mut buffer = SseBuffer::default();

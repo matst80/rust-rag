@@ -1028,7 +1028,7 @@ async fn require_api_key(
                             &validation,
                         ) {
                             Ok(token_data) => {
-                                tracing::info!("authorized via session cookie");
+                                tracing::debug!("authorized via session cookie");
                                 let subject = token_data.claims.sub;
                                 request
                                     .extensions_mut()
@@ -1040,14 +1040,14 @@ async fn require_api_key(
                                 return Ok(next.run(request).await);
                             }
                             Err(err) => {
-                                tracing::warn!(error = %err, "failed to decode session cookie");
+                                tracing::debug!(error = %err, "failed to decode session cookie");
                             }
                         }
                     }
                 }
             }
         } else {
-            tracing::info!("no cookie header found in request");
+            tracing::debug!("no cookie header found in request");
         }
     } else {
         tracing::warn!(
@@ -1055,7 +1055,9 @@ async fn require_api_key(
         );
     }
 
-    tracing::warn!(
+    tracing::debug!(
+        method = %request.method(),
+        path = %request.uri().path(),
         has_x_api_key = provided.is_some(),
         has_cookies = request.headers().contains_key(axum::http::header::COOKIE),
         "unauthorized request: no valid credential found"

@@ -57,13 +57,22 @@ export function ChatInterface() {
 
       await api.chat.stream(
         {
-          messages: newMessages.map(m => ({
-            role: m.role,
-            content: m.content,
-            name: m.name,
-            tool_call_id: m.tool_call_id,
-            tool_calls: m.tool_calls
-          })),
+          messages: newMessages.flatMap(m => {
+            if (m.tool_calls && m.tool_results && Object.keys(m.tool_results).length > 0) {
+              const expanded = []
+              expanded.push({ role: m.role, content: null, tool_calls: m.tool_calls })
+              for (const tc of m.tool_calls) {
+                if (m.tool_results[tc.id] !== undefined) {
+                  expanded.push({ role: "tool" as const, tool_call_id: tc.id, content: m.tool_results[tc.id], name: tc.function.name })
+                }
+              }
+              if (m.content) {
+                expanded.push({ role: m.role, content: m.content })
+              }
+              return expanded
+            }
+            return [{ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id, tool_calls: m.tool_calls }]
+          }),
           stream: true
         },
         {

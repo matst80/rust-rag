@@ -1,7 +1,14 @@
 use anyhow::Result;
 use opentelemetry::{KeyValue, trace::TracerProvider as _};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::{Resource, runtime, trace::TracerProvider};
+use opentelemetry_sdk::{
+    Resource,
+    logs::LoggerProvider,
+    metrics::{PeriodicReader, SdkMeterProvider},
+    runtime,
+    trace::TracerProvider,
+};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::info;
@@ -18,9 +25,15 @@ use rust_rag::{
     manager, ontology,
 };
 
-/// Build an OTLP-gRPC trace pipeline if `RAG_OTEL_ENABLED=true`. Returns the
-/// provider so the caller can shut it down at exit (flushes the batcher).
-fn init_otel() -> Result<Option<TracerProvider>> {
+/// Bundle of OTel providers built from env. Caller shuts each down at exit.
+struct OtelProviders {
+    tracer: TracerProvider,
+    logger: LoggerProvider,
+    meter: SdkMeterProvider,
+}
+
+/// Build OTLP-gRPC trace + log + metric pipelines if `RAG_OTEL_ENABLED=true`.
+fn init_otel() -> Result<Option<OtelProviders>> {
     let enabled = std::env::var("RAG_OTEL_ENABLED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
@@ -30,19 +43,42 @@ fn init_otel() -> Result<Option<TracerProvider>> {
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_owned());
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "rust-rag".to_owned());
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
+    let resource = Resource::new([KeyValue::new("service.name", service_name.clone())]);
+
+    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
         .build()?;
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio)
-        .with_resource(Resource::new([KeyValue::new(
-            "service.name",
-            service_name.clone(),
-        )]))
+    let tracer = TracerProvider::builder()
+        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
         .build();
-    eprintln!("otel: traces → {endpoint} (service={service_name})");
-    Ok(Some(provider))
+
+    let log_exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let logger = LoggerProvider::builder()
+        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
+        .build();
+
+    let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let reader = PeriodicReader::builder(metric_exporter, runtime::Tokio)
+        .with_interval(std::time::Duration::from_secs(15))
+        .build();
+    let meter = SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(resource)
+        .build();
+
+    opentelemetry::global::set_meter_provider(meter.clone());
+
+    eprintln!("otel: traces+logs+metrics → {endpoint} (service={service_name})");
+    Ok(Some(OtelProviders { tracer, logger, meter }))
 }
 
 #[tokio::main]
@@ -56,7 +92,7 @@ async fn main() -> Result<()> {
         .with_filter(fmt_filter);
 
     let otel_provider = init_otel()?;
-    if let Some(provider) = otel_provider.as_ref() {
+    if let Some(providers) = otel_provider.as_ref() {
         // Request spans live at DEBUG inside tower_http; export them so
         // every HTTP call shows up as a root span at the collector. Keep
         // rust-rag at info to avoid drowning the trace stream.
@@ -68,16 +104,36 @@ async fn main() -> Result<()> {
                     "rust_rag=info,axum=info,tower_http=debug",
                 )
             });
-        let tracer = provider.tracer("rust-rag");
+        let log_filter = std::env::var("RAG_OTEL_LOG_FILTER")
+            .ok()
+            .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
+            .unwrap_or_else(|| {
+                tracing_subscriber::EnvFilter::new("rust_rag=info,axum=info,tower_http=info")
+            });
+        let tracer = providers.tracer.tracer("rust-rag");
         let otel_layer = tracing_opentelemetry::layer()
             .with_tracer(tracer)
             .with_filter(otel_filter);
+        let log_layer = OpenTelemetryTracingBridge::new(&providers.logger).with_filter(log_filter);
         tracing_subscriber::registry()
             .with(fmt_layer)
             .with(otel_layer)
+            .with(log_layer)
             .init();
     } else {
         tracing_subscriber::registry().with(fmt_layer).init();
+    }
+
+    if otel_provider.is_some() {
+        let meter = opentelemetry::global::meter("rust-rag");
+        let started = std::time::Instant::now();
+        let uptime = meter
+            .u64_observable_gauge("rust_rag.uptime_seconds")
+            .with_description("Seconds since process start")
+            .with_callback(move |obs| obs.observe(started.elapsed().as_secs(), &[]))
+            .build();
+        // Leak so the callback registration outlives this scope.
+        Box::leak(Box::new(uptime));
     }
 
     let config = AppConfig::from_env()?;
@@ -357,9 +413,11 @@ async fn main() -> Result<()> {
     info!("closing sqlite store");
     store.close()?;
 
-    if let Some(provider) = otel_provider {
-        info!("flushing otel exporter");
-        let _ = provider.shutdown();
+    if let Some(providers) = otel_provider {
+        info!("flushing otel exporters");
+        let _ = providers.tracer.shutdown();
+        let _ = providers.logger.shutdown();
+        let _ = providers.meter.shutdown();
     }
     Ok(())
 }

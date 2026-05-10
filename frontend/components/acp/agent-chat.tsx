@@ -89,6 +89,8 @@ export function AgentChat() {
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
 	const [projects, setProjects] = useState<ProjectInfo[]>([])
 	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
+	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+	const [projectPickerHighlight, setProjectPickerHighlight] = useState(0)
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
@@ -371,8 +373,10 @@ export function AgentChat() {
 	}
 
 	const spawn = () => {
-		const initial = projects[0]?.path ?? ""
+		const initial = projects.length === 1 ? projects[0].path : ""
 		setSpawnDialog({ projectPath: initial, agentCommand: "" })
+		setProjectPickerOpen(projects.length > 1)
+		setProjectPickerHighlight(0)
 	}
 
 	const submitSpawn = () => {
@@ -687,53 +691,105 @@ export function AgentChat() {
 							</button>
 						</div>
 
-						{projects.length > 0 ? (
-							<div className="mb-3">
-								<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
-									Project
-								</label>
-								<select
-									value={
-										projects.find((p) => p.path === spawnDialog.projectPath)
-											? spawnDialog.projectPath
-											: ""
-									}
-									onChange={(e) =>
-										setSpawnDialog((d) =>
-											d ? { ...d, projectPath: e.target.value } : d,
-										)
-									}
-									className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
-								>
-									{projects.map((p) => (
-										<option key={p.path} value={p.path}>
-											{p.name} — {p.path}
-										</option>
-									))}
-									<option value="">(custom path…)</option>
-								</select>
-							</div>
-						) : (
-							<p className="font-mono text-[10px] text-muted-foreground mb-2">
-								No project templates from the daemon. Enter a project path manually.
-							</p>
-						)}
-
-						<div className="mb-3">
+						<div className="mb-3 relative">
 							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
 								project_path
 							</label>
-							<input
-								type="text"
-								value={spawnDialog.projectPath}
-								onChange={(e) =>
-									setSpawnDialog((d) =>
-										d ? { ...d, projectPath: e.target.value } : d,
+							{(() => {
+								const q = spawnDialog.projectPath.trim().toLowerCase()
+								const filtered = q
+									? projects.filter(
+										(p) =>
+											p.name.toLowerCase().includes(q) ||
+											p.path.toLowerCase().includes(q),
 									)
-								}
-								placeholder="/abs/path or name relative to TELEGRAM_ACP_PROJECT_ROOT"
-								className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
-							/>
+									: projects
+								const max = filtered.length
+								return (
+									<>
+										<input
+											type="text"
+											value={spawnDialog.projectPath}
+											onChange={(e) => {
+												setSpawnDialog((d) =>
+													d ? { ...d, projectPath: e.target.value } : d,
+												)
+												setProjectPickerOpen(true)
+												setProjectPickerHighlight(0)
+											}}
+											onFocus={() => {
+												if (projects.length > 0) setProjectPickerOpen(true)
+											}}
+											onBlur={() => {
+												// Delay so click on dropdown registers first.
+												window.setTimeout(() => setProjectPickerOpen(false), 120)
+											}}
+											onKeyDown={(e) => {
+												if (!projectPickerOpen || max === 0) return
+												if (e.key === "ArrowDown") {
+													e.preventDefault()
+													setProjectPickerHighlight((i) => (i + 1) % max)
+												} else if (e.key === "ArrowUp") {
+													e.preventDefault()
+													setProjectPickerHighlight((i) => (i - 1 + max) % max)
+												} else if (e.key === "Enter") {
+													const pick = filtered[projectPickerHighlight]
+													if (pick) {
+														e.preventDefault()
+														setSpawnDialog((d) =>
+															d ? { ...d, projectPath: pick.path } : d,
+														)
+														setProjectPickerOpen(false)
+													}
+												} else if (e.key === "Escape") {
+													setProjectPickerOpen(false)
+												}
+											}}
+											placeholder="/abs/path or filter projects…"
+											className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+											autoComplete="off"
+										/>
+										{projectPickerOpen && filtered.length > 0 && (
+											<ul
+												className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto border border-border bg-background shadow-lg"
+												role="listbox"
+											>
+												{filtered.map((p, i) => (
+													<li
+														key={p.path}
+														role="option"
+														aria-selected={i === projectPickerHighlight}
+														onMouseDown={(e) => {
+															e.preventDefault()
+															setSpawnDialog((d) =>
+																d ? { ...d, projectPath: p.path } : d,
+															)
+															setProjectPickerOpen(false)
+														}}
+														onMouseEnter={() => setProjectPickerHighlight(i)}
+														className={cn(
+															"cursor-pointer px-2 py-1.5 font-mono text-xs",
+															i === projectPickerHighlight
+																? "bg-primary/10 text-primary"
+																: "hover:bg-muted/40",
+														)}
+													>
+														<div className="truncate font-medium">{p.name}</div>
+														<div className="truncate text-[10px] text-muted-foreground">
+															{p.path}
+														</div>
+													</li>
+												))}
+											</ul>
+										)}
+										{projects.length === 0 && (
+											<p className="mt-1 font-mono text-[10px] text-muted-foreground">
+												No project templates from the daemon. Enter a path manually.
+											</p>
+										)}
+									</>
+								)
+							})()}
 						</div>
 
 						<div className="mb-4">
