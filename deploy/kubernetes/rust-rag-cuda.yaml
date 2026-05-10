@@ -267,6 +267,9 @@ spec:
                 name: rust-rag-cuda-config
             - secretRef:
                 name: rust-rag-frontend-auth
+            ## RAG_MANAGER_API_KEY (xAI bearer for the Grok manager loop)
+            - secretRef:
+                name: common-secret
             ## RAG_DATABASE_URL = postgres://user:pass@host:5432/db
             ## Create out-of-band:
             ##   kubectl -n home create secret generic rust-rag-postgres \
