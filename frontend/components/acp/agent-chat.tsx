@@ -480,10 +480,15 @@ export function AgentChat() {
 				</div>
 				{instances.length > 0 && (
 					<div className="border-b border-border px-3 py-2">
-						<label className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1">
+						<label
+							htmlFor="acp-instance-select"
+							className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1"
+						>
 							ACP instance
 						</label>
 						<select
+							id="acp-instance-select"
+							aria-label="ACP instance"
 							value={activeInstance ?? ""}
 							onChange={(e) => void selectInstance(e.target.value)}
 							className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
