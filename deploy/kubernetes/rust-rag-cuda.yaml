@@ -82,6 +82,12 @@ data:
   ## HTTP-only mode: clients call POST /api/acp/register from the LAN side.
   RAG_ACP_DISCOVERY_MODE: "http"
   RAG_ACP_REGISTER_TTL_SECS: "120"
+  ## OpenTelemetry traces. otel-debug-service in monitoring exposes OTLP
+  ## gRPC on :4317; tracing-opentelemetry layers on top of the existing
+  ## tracing fmt subscriber so every #[instrument] span ships through.
+  RAG_OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-debug-service.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "rust-rag"
   ZITADEL_ISSUER: "https://auth.k6n.net"
   ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"

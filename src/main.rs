@@ -1,7 +1,13 @@
 use anyhow::Result;
+use opentelemetry::{KeyValue, trace::TracerProvider as _};
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{Resource, runtime, trace::TracerProvider};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::info;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use rust_rag::{
     api::{AppState, EmbedderHandle},
@@ -12,14 +18,67 @@ use rust_rag::{
     manager, ontology,
 };
 
+/// Build an OTLP-gRPC trace pipeline if `RAG_OTEL_ENABLED=true`. Returns the
+/// provider so the caller can shut it down at exit (flushes the batcher).
+fn init_otel() -> Result<Option<TracerProvider>> {
+    let enabled = std::env::var("RAG_OTEL_ENABLED")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_owned());
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "rust-rag".to_owned());
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let provider = TracerProvider::builder()
+        .with_batch_exporter(exporter, runtime::Tokio)
+        .with_resource(Resource::new([KeyValue::new(
+            "service.name",
+            service_name.clone(),
+        )]))
+        .build();
+    eprintln!("otel: traces → {endpoint} (service={service_name})");
+    Ok(Some(provider))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_rag=info,axum=info,tower_http=info".into()),
-        )
-        .init();
+    // fmt subscriber stays terse: drop tower_http's per-request DEBUG events
+    // and normal axum chatter from console output. OTel layer (below) gets
+    // its own filter that opens these up so request spans actually export.
+    let fmt_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "rust_rag=info,axum=info,tower_http=info".into());
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_filter(fmt_filter);
+
+    let otel_provider = init_otel()?;
+    if let Some(provider) = otel_provider.as_ref() {
+        // Request spans live at DEBUG inside tower_http; export them so
+        // every HTTP call shows up as a root span at the collector. Keep
+        // rust-rag at info to avoid drowning the trace stream.
+        let otel_filter = std::env::var("RAG_OTEL_FILTER")
+            .ok()
+            .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
+            .unwrap_or_else(|| {
+                tracing_subscriber::EnvFilter::new(
+                    "rust_rag=info,axum=info,tower_http=debug",
+                )
+            });
+        let tracer = provider.tracer("rust-rag");
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(otel_filter);
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(otel_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry().with(fmt_layer).init();
+    }
 
     let config = AppConfig::from_env()?;
     println!("rust-rag booting");
@@ -297,6 +356,11 @@ async fn main() -> Result<()> {
 
     info!("closing sqlite store");
     store.close()?;
+
+    if let Some(provider) = otel_provider {
+        info!("flushing otel exporter");
+        let _ = provider.shutdown();
+    }
     Ok(())
 }
 
