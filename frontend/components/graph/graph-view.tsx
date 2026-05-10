@@ -141,6 +141,7 @@ function GraphViewContent() {
   const [open, setOpen] = useState(false)
   const [openTarget, setOpenTarget] = useState(false)
   const [newEdge, setNewEdge] = useState({ target: "", relationship: "" })
+  const [detailLevel, setDetailLevel] = useState<"coarse" | "medium" | "fine">("medium")
 
   const {
     data: neighborhood,
@@ -176,9 +177,10 @@ function GraphViewContent() {
     router.replace(`/visualize?${params.toString()}`, { scroll: false })
   }, [centerNode, focusId, router, searchParams])
 
+  const resolution = detailLevel === "fine" ? 2.5 : detailLevel === "coarse" ? 0.6 : 1.2
   const clusters = useMemo(
-    () => computeCommunities(graphEntries, graphEdges, pairwise),
-    [graphEntries, graphEdges, pairwise]
+    () => computeCommunities(graphEntries, graphEdges, pairwise, { resolution }),
+    [graphEntries, graphEdges, pairwise, resolution]
   )
 
   const reagraphNodes = useMemo<GraphNode[]>(() => {
@@ -386,6 +388,11 @@ function GraphViewContent() {
           edges={reagraphEdges}
           clusterAttribute="cluster"
           layoutType="forceDirected2d"
+          layoutOverrides={{
+            linkDistance: 110,
+            nodeStrength: -400,
+            clusterStrength: 0.6,
+          }}
           labelType="all"
           selections={selectedNode ? [selectedNode] : []}
           actives={centerNode ? [centerNode] : []}
@@ -499,6 +506,25 @@ function GraphViewContent() {
                   )}
                   Expand
                 </Button>
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center justify-center gap-3 px-2 animate-in fade-in duration-1000 delay-500 fill-mode-both">
+              <div className="flex items-center gap-0.5 rounded-full bg-background/50 backdrop-blur-md border border-primary/5 p-0.5">
+                {(["coarse", "medium", "fine"] as const).map((level) => (
+                  <button
+                    key={level}
+                    onClick={() => setDetailLevel(level)}
+                    className={cn(
+                      "px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-[0.15em] transition-colors",
+                      detailLevel === level
+                        ? "bg-primary/15 text-primary"
+                        : "text-muted-foreground/40 hover:text-muted-foreground/70"
+                    )}
+                  >
+                    {level}
+                  </button>
+                ))}
               </div>
             </div>
 

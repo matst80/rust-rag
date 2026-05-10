@@ -61,10 +61,19 @@ function topByCount<K>(items: Iterable<K>): K | undefined {
   return best?.key
 }
 
+export interface CommunityOptions {
+  /**
+   * Louvain resolution. >1 produces more, smaller communities; <1 merges
+   * into fewer, broader communities. Default 1.
+   */
+  resolution?: number
+}
+
 export function computeCommunities(
   entries: Entry[],
   edges: Edge[],
-  pairwiseDistances: GraphNodeDistance[] = []
+  pairwiseDistances: GraphNodeDistance[] = [],
+  options: CommunityOptions = {}
 ): ClusterAssignment {
   const byNode = new Map<string, string>()
   const colorByCluster = new Map<string, string>()
@@ -99,9 +108,10 @@ export function computeCommunities(
     addEdge(d.from_item_id, d.to_item_id, 1 - d.distance)
   }
 
+  const resolution = options.resolution ?? 1
   let louvainAssignments: Record<string, number>
   try {
-    louvainAssignments = louvain(graph, { getEdgeWeight: "weight" })
+    louvainAssignments = louvain(graph, { getEdgeWeight: "weight", resolution })
   } catch {
     louvainAssignments = Object.fromEntries(entries.map((e, i) => [e.id, i]))
   }
