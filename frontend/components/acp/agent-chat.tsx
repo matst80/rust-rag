@@ -84,7 +84,10 @@ export function AgentChat() {
 	const [eventsBySession, setEventsBySession] = useState<Record<string, AcpEvent[]>>({})
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
-	const [draft, setDraft] = useState("")
+	// Per-session draft buffer. Each session keeps its in-progress prompt in
+	// localStorage under `acp:draft:<session_id>` so switching tabs/sessions
+	// before pressing Send doesn't lose the text.
+	const [drafts, setDrafts] = useState<Record<string, string>>({})
 	const [instances, setInstances] = useState<AcpInstance[]>([])
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
 	const [projects, setProjects] = useState<ProjectInfo[]>([])
@@ -255,6 +258,17 @@ export function AgentChat() {
 						}
 						return next
 					})
+					setDrafts((prev) => {
+						if (prev[sid] === undefined) return prev
+						const next = { ...prev }
+						delete next[sid]
+						return next
+					})
+					try {
+						window.localStorage.removeItem(`acp:draft:${sid}`)
+					} catch {
+						// ignore
+					}
 				}
 			}
 
@@ -351,6 +365,38 @@ export function AgentChat() {
 				: [],
 		[activeSessionId, pendingPermissions],
 	)
+
+	const draftKey = (sid: string) => `acp:draft:${sid}`
+	const draft = activeSessionId ? drafts[activeSessionId] ?? "" : ""
+
+	// Hydrate the active session's draft from localStorage on first switch.
+	useEffect(() => {
+		if (!activeSessionId) return
+		if (drafts[activeSessionId] !== undefined) return
+		try {
+			const stored = window.localStorage.getItem(draftKey(activeSessionId))
+			if (stored) {
+				setDrafts((prev) => ({ ...prev, [activeSessionId]: stored }))
+			}
+		} catch {
+			// Ignore quota / privacy-mode errors.
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [activeSessionId])
+
+	const setDraft = (value: string) => {
+		if (!activeSessionId) return
+		setDrafts((prev) => ({ ...prev, [activeSessionId]: value }))
+		try {
+			if (value) {
+				window.localStorage.setItem(draftKey(activeSessionId), value)
+			} else {
+				window.localStorage.removeItem(draftKey(activeSessionId))
+			}
+		} catch {
+			// Ignore.
+		}
+	}
 
 	const sendPrompt = () => {
 		if (!activeSessionId || !draft.trim()) return
