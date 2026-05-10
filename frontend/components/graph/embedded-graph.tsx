@@ -23,19 +23,31 @@ interface EmbeddedGraphProps {
 
 function buildEmbeddedTheme(isDark: boolean): Theme {
   const base = isDark ? darkTheme : lightTheme
+  const bg = isDark ? "#0a0a0a" : "#fafafa"
   return {
     ...base,
-    canvas: {
-      background: "transparent",
-      fog: null,
+    canvas: { background: "transparent", fog: null },
+    node: {
+      ...base.node,
+      label: {
+        ...base.node.label,
+        color: isDark ? "#e2e8f0" : "#1e293b",
+        stroke: bg,
+      },
+      subLabel: {
+        ...(base.node.subLabel ?? { color: isDark ? "#94a3b8" : "#64748b", activeColor: "#4338ca" }),
+        color: isDark ? "#94a3b8" : "#64748b",
+        stroke: bg,
+      },
     },
     cluster: {
-      ...(base.cluster ?? {}),
-      stroke: isDark ? "rgba(148,163,184,0.3)" : "rgba(71,85,105,0.3)",
-      fill: "rgba(99,102,241,0.04)",
+      stroke: isDark ? "#475569" : "#cbd5e1",
+      opacity: 0.4,
+      selectedOpacity: 0.6,
+      inactiveOpacity: 0.15,
       label: {
-        ...(base.cluster?.label ?? { color: isDark ? "#cbd5e1" : "#334155" }),
-        color: isDark ? "#cbd5e1" : "#334155",
+        color: isDark ? "#94a3b8" : "#64748b",
+        stroke: bg,
         fontSize: 11,
       },
     },

@@ -61,21 +61,48 @@ export function GraphView() {
 
 function buildReagraphTheme(isDark: boolean): Theme {
   const base = isDark ? darkTheme : lightTheme
-  // Override canvas to inherit page background so the graph blends in.
+  const bg = isDark ? "#0a0a0a" : "#fafafa"
+  const labelColor = isDark ? "#e2e8f0" : "#1e293b"
+  const subLabelColor = isDark ? "#94a3b8" : "#64748b"
+  const clusterStroke = isDark ? "#475569" : "#cbd5e1"
+  const clusterLabel = isDark ? "#94a3b8" : "#64748b"
+
   return {
     ...base,
-    canvas: {
-      background: isDark ? "#0a0a0a" : "#fafafa",
-      fog: isDark ? "#0a0a0a" : "#fafafa",
+    canvas: { background: bg, fog: bg },
+    node: {
+      ...base.node,
+      label: {
+        ...base.node.label,
+        color: labelColor,
+        stroke: bg,
+        activeColor: isDark ? "#a5b4fc" : "#4338ca",
+      },
+      subLabel: {
+        ...(base.node.subLabel ?? { color: subLabelColor, activeColor: subLabelColor }),
+        color: subLabelColor,
+        stroke: bg,
+        activeColor: isDark ? "#a5b4fc" : "#4338ca",
+      },
+    },
+    edge: {
+      ...base.edge,
+      label: {
+        ...base.edge.label,
+        color: subLabelColor,
+        stroke: bg,
+        activeColor: isDark ? "#a5b4fc" : "#4338ca",
+      },
     },
     cluster: {
-      ...(base.cluster ?? {}),
-      stroke: isDark ? "rgba(148,163,184,0.35)" : "rgba(71,85,105,0.35)",
-      fill: isDark ? "rgba(99,102,241,0.04)" : "rgba(99,102,241,0.05)",
-      opacity: 0.9,
+      // Drop fill entirely so only a thin colored ring remains.
+      stroke: clusterStroke,
+      opacity: 0.45,
+      selectedOpacity: 0.7,
+      inactiveOpacity: 0.15,
       label: {
-        ...(base.cluster?.label ?? { color: isDark ? "#cbd5e1" : "#334155" }),
-        color: isDark ? "#e2e8f0" : "#1e293b",
+        color: clusterLabel,
+        stroke: bg,
         fontSize: 14,
       },
     },
