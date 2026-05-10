@@ -33,6 +33,7 @@ import type {
   Attachment,
   AttachmentsResponse,
   EntriesTreeResponse,
+  EntriesPathsResponse,
   Message,
   MessageChannel,
   SendMessageRequest,
@@ -524,6 +525,17 @@ export async function getEntriesTree(
   return request<EntriesTreeResponse>(`/api/entries/tree?${params.toString()}`)
 }
 
+export async function getEntriesPaths(
+  sourceId?: string
+): Promise<EntriesPathsResponse> {
+  const params = new URLSearchParams()
+  if (sourceId) params.set("source_id", sourceId)
+  const qs = params.toString()
+  return request<EntriesPathsResponse>(
+    qs ? `/api/entries/paths?${qs}` : "/api/entries/paths"
+  )
+}
+
 export async function updateItem(
   id: string,
   data: UpdateItemRequest
@@ -773,6 +785,7 @@ export const api = {
   },
   tree: {
     get: getEntriesTree,
+    paths: getEntriesPaths,
   },
   search,
   messages: {

@@ -19,6 +19,7 @@ import type {
   PagedItems,
   Attachment,
   EntriesTreeResponse,
+  EntriesPathsResponse,
 } from "./types"
 
 // Categories hooks
@@ -121,6 +122,13 @@ export function useEntriesTree(sourceId: string | null, prefix?: string) {
   return useSWR<EntriesTreeResponse>(
     sourceId ? ["entries-tree", sourceId, prefix ?? ""] : null,
     ([, src, p]) => api.tree.get(src as string, (p as string) || undefined)
+  )
+}
+
+export function useEntriesPaths(sourceId?: string) {
+  return useSWR<EntriesPathsResponse>(
+    ["entries-paths", sourceId ?? ""],
+    ([, src]) => api.tree.paths((src as string) || undefined)
   )
 }
 

@@ -12,8 +12,8 @@ use super::{
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
     GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
-    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, SearchHit,
-    SortOrder, UserMemoryStore, UserProfile, VectorStore,
+    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, PathRow,
+    SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -892,6 +892,46 @@ impl VectorStore for PostgresVectorStore {
             }
             tx.commit().await?;
             Ok(stored_name)
+        })
+    }
+
+    fn list_all_paths(
+        &self,
+        source_id_filter: Option<&str>,
+    ) -> Result<Vec<PathRow>> {
+        let pool = self.pool.clone();
+        let filter = source_id_filter.map(|s| s.to_owned());
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = if let Some(s) = &filter {
+                client
+                    .query(
+                        "SELECT source_id, path, COUNT(*)::bigint AS cnt FROM documents \
+                         WHERE path IS NOT NULL AND path <> '' AND source_id = $1 \
+                         GROUP BY source_id, path \
+                         ORDER BY source_id ASC, path ASC",
+                        &[&s],
+                    )
+                    .await?
+            } else {
+                client
+                    .query(
+                        "SELECT source_id, path, COUNT(*)::bigint AS cnt FROM documents \
+                         WHERE path IS NOT NULL AND path <> '' \
+                         GROUP BY source_id, path \
+                         ORDER BY source_id ASC, path ASC",
+                        &[],
+                    )
+                    .await?
+            };
+            Ok(rows
+                .iter()
+                .map(|r| PathRow {
+                    source_id: r.get::<_, String>("source_id"),
+                    path: r.get::<_, String>("path"),
+                    count: r.get::<_, i64>("cnt"),
+                })
+                .collect())
         })
     }
 

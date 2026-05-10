@@ -885,6 +885,7 @@ pub fn router(state: AppState) -> Router {
             get(attachments::list_for_item),
         )
         .route("/api/entries/tree", get(attachments::entries_tree))
+        .route("/api/entries/paths", get(attachments::entries_paths))
         .route("/api/messages", post(send_message).get(list_messages))
         .route("/api/messages/channels", get(list_message_channels))
         .route("/api/acp/instances", get(list_acp_instances))

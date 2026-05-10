@@ -40,6 +40,15 @@ pub struct ItemRecord {
     pub path: Option<String>,
 }
 
+/// One (source_id, path) pair with entry count. Returned by `list_all_paths`
+/// for bulk wiki-tree rendering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRow {
+    pub source_id: String,
+    pub path: String,
+    pub count: i64,
+}
+
 /// One direct child segment under a wiki path prefix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathChild {
@@ -621,6 +630,16 @@ pub trait VectorStore: Send + Sync {
         _source_id: &str,
         _prefix: Option<&str>,
     ) -> Result<Vec<PathChild>> {
+        anyhow::bail!("path tree not supported by this store")
+    }
+
+    /// Every distinct (source_id, path) with entry count. Lets the wiki
+    /// sidebar render the full tree from a single round-trip. When
+    /// `source_id_filter` is `Some`, scoped to one namespace.
+    fn list_all_paths(
+        &self,
+        _source_id_filter: Option<&str>,
+    ) -> Result<Vec<PathRow>> {
         anyhow::bail!("path tree not supported by this store")
     }
     fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>>;
@@ -1206,6 +1225,48 @@ impl VectorStore for SqliteVectorStore {
         }
         tx.commit()?;
         Ok(stored_name)
+    }
+
+    fn list_all_paths(
+        &self,
+        source_id_filter: Option<&str>,
+    ) -> Result<Vec<PathRow>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let (sql, has_filter) = match source_id_filter {
+            Some(_) => (
+                "SELECT source_id, path, COUNT(*) AS cnt FROM items
+                 WHERE path IS NOT NULL AND path != '' AND source_id = ?1
+                 GROUP BY source_id, path
+                 ORDER BY source_id ASC, path ASC",
+                true,
+            ),
+            None => (
+                "SELECT source_id, path, COUNT(*) AS cnt FROM items
+                 WHERE path IS NOT NULL AND path != ''
+                 GROUP BY source_id, path
+                 ORDER BY source_id ASC, path ASC",
+                false,
+            ),
+        };
+        let mut stmt = connection.prepare(sql)?;
+        let map = |row: &rusqlite::Row<'_>| {
+            Ok(PathRow {
+                source_id: row.get::<_, String>(0)?,
+                path: row.get::<_, String>(1)?,
+                count: row.get::<_, i64>(2)?,
+            })
+        };
+        let rows: Vec<PathRow> = if has_filter {
+            stmt.query_map(params![source_id_filter.unwrap()], map)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([], map)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
     }
 
     fn list_path_children(

@@ -1,11 +1,14 @@
 "use client"
 
 import Link from "next/link"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import {
+  ChevronDown,
   ChevronRight,
+  Database,
   FileText,
   Folder,
+  FolderOpen,
   FolderTree,
   Menu,
   X,
@@ -16,10 +19,11 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
 import { Button } from "@/components/ui/button"
-import { useCategories, useEntriesTree } from "@/lib/api"
+import { useEntriesPaths, useEntriesTree } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
-import { WikiSourceRoot } from "./wiki-source-root"
+import type { PathRow } from "@/lib/api"
+import { WikiTreeNode, type TreeNodeData } from "./wiki-tree-node"
 
 function buildHref(sourceId: string, path?: string) {
   const params = new URLSearchParams({ source_id: sourceId })
@@ -32,16 +36,98 @@ interface EntryTreeProps {
   prefix?: string
 }
 
+interface SourceTree {
+  sourceId: string
+  totalCount: number
+  roots: TreeNodeData[]
+}
+
+/** Build per-source nested trees from a flat list of (source, path, count). */
+function buildSourceTrees(rows: PathRow[]): SourceTree[] {
+  const bySource = new Map<string, PathRow[]>()
+  for (const r of rows) {
+    if (!bySource.has(r.source_id)) bySource.set(r.source_id, [])
+    bySource.get(r.source_id)!.push(r)
+  }
+  const out: SourceTree[] = []
+  for (const [sourceId, sourceRows] of bySource) {
+    // Build a node for each path. Map by full path. Insert intermediate
+    // nodes for any segment that isn't itself a stored path (e.g. only
+    // `a/b/c` exists → still want `a` and `a/b` as folder nodes).
+    const byPath = new Map<string, TreeNodeData>()
+    const ensure = (path: string): TreeNodeData => {
+      const existing = byPath.get(path)
+      if (existing) return existing
+      const segment = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path
+      const node: TreeNodeData = {
+        segment,
+        path,
+        count: 0,
+        subtreeCount: 0,
+        children: [],
+      }
+      byPath.set(path, node)
+      return node
+    }
+    for (const r of sourceRows) {
+      const segs = r.path.split("/")
+      // create chain of ancestors
+      for (let i = 1; i <= segs.length; i++) {
+        ensure(segs.slice(0, i).join("/"))
+      }
+      ensure(r.path).count = r.count
+    }
+    // Wire parent → children
+    for (const node of byPath.values()) {
+      const idx = node.path.lastIndexOf("/")
+      if (idx === -1) continue
+      const parentPath = node.path.slice(0, idx)
+      const parent = byPath.get(parentPath)
+      if (parent) parent.children.push(node)
+    }
+    // Sort children alphabetically per node
+    for (const node of byPath.values()) {
+      node.children.sort((a, b) => a.segment.localeCompare(b.segment))
+    }
+    // Compute subtree counts via post-order walk on roots.
+    const roots = Array.from(byPath.values()).filter((n) => !n.path.includes("/"))
+    roots.sort((a, b) => a.segment.localeCompare(b.segment))
+    const fillSubtree = (n: TreeNodeData): number => {
+      n.subtreeCount = n.count + n.children.reduce((s, c) => s + fillSubtree(c), 0)
+      return n.subtreeCount
+    }
+    let total = 0
+    for (const r of roots) total += fillSubtree(r)
+    out.push({ sourceId, totalCount: total, roots })
+  }
+  out.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+  return out
+}
+
+/** Active path → set of every ancestor path along the chain (inclusive). */
+function ancestorChain(prefix?: string): Set<string> {
+  const set = new Set<string>()
+  if (!prefix) return set
+  const segs = prefix.split("/")
+  for (let i = 1; i <= segs.length; i++) {
+    set.add(segs.slice(0, i).join("/"))
+  }
+  return set
+}
+
 export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
   const isMobile = useIsMobile()
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const { data: categories } = useCategories()
-  const { data: tree, isLoading } = useEntriesTree(sourceId, prefix)
+  const { data: pathsResp } = useEntriesPaths()
+  const { data: tree, isLoading: treeLoading } = useEntriesTree(sourceId, prefix)
 
+  const sourceTrees = useMemo(
+    () => (pathsResp ? buildSourceTrees(pathsResp.paths) : []),
+    [pathsResp]
+  )
+  const activeChain = useMemo(() => ancestorChain(prefix), [prefix])
   const segments = prefix ? prefix.split("/") : []
 
-  // Render every category as a candidate root; WikiSourceRoot self-hides when
-  // the source has no path-bearing data.
   const sidebar = (
     <div className="flex h-full flex-col bg-background">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
@@ -62,19 +148,23 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
         )}
       </div>
       <div className="flex-1 overflow-y-auto py-2">
-        {!categories && (
+        {!pathsResp && (
           <p className="font-mono text-xs text-muted-foreground px-3">Loading…</p>
         )}
-        {categories
-          ?.filter((c) => c.count > 0)
-          .map((c) => (
-            <WikiSourceRoot
-              key={c.id}
-              sourceId={c.id}
-              selectedSourceId={sourceId}
-              selectedPath={prefix ?? null}
-            />
-          ))}
+        {pathsResp && sourceTrees.length === 0 && (
+          <p className="font-mono text-xs text-muted-foreground px-3">
+            No entries with paths yet. Set a `path` on an entry to populate the wiki.
+          </p>
+        )}
+        {sourceTrees.map((s) => (
+          <SourceRoot
+            key={s.sourceId}
+            tree={s}
+            selectedSourceId={sourceId}
+            selectedPath={prefix ?? null}
+            activeChain={activeChain}
+          />
+        ))}
       </div>
     </div>
   )
@@ -123,7 +213,7 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
-        {isLoading && (
+        {treeLoading && (
           <p className="font-mono text-xs text-muted-foreground">Loading…</p>
         )}
 
@@ -224,6 +314,78 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
           {content}
         </ResizablePanel>
       </ResizablePanelGroup>
+    </div>
+  )
+}
+
+interface SourceRootProps {
+  tree: SourceTree
+  selectedSourceId: string
+  selectedPath: string | null
+  activeChain: Set<string>
+}
+
+function SourceRoot({
+  tree,
+  selectedSourceId,
+  selectedPath,
+  activeChain,
+}: SourceRootProps) {
+  const isActive = tree.sourceId === selectedSourceId
+  const [open, setOpen] = useState(isActive)
+  const isSelected = isActive && (selectedPath ?? null) === null
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 flex items-center justify-center size-5 ml-1 text-muted-foreground hover:text-foreground transition-colors"
+          aria-label={open ? "Collapse" : "Expand"}
+        >
+          {open ? (
+            <ChevronDown className="size-3.5" />
+          ) : (
+            <ChevronRight className="size-3.5" />
+          )}
+        </button>
+        <Link
+          href={buildHref(tree.sourceId)}
+          className={cn(
+            "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs font-bold uppercase tracking-wider transition-colors hover:bg-card",
+            isSelected
+              ? "bg-primary/10 text-primary border-l-2 border-primary"
+              : "text-foreground border-l-2 border-transparent"
+          )}
+        >
+          {open ? (
+            <FolderOpen className="size-3.5 text-primary shrink-0" />
+          ) : (
+            <Database className="size-3.5 text-muted-foreground shrink-0" />
+          )}
+          <span className="truncate">{tree.sourceId}</span>
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
+            {tree.totalCount}
+          </span>
+        </Link>
+      </div>
+
+      {open && (
+        <div className="flex flex-col">
+          {tree.roots.map((node) => (
+            <WikiTreeNode
+              key={node.path}
+              sourceId={tree.sourceId}
+              node={node}
+              selectedSourceId={selectedSourceId}
+              selectedPath={selectedPath}
+              depth={1}
+              activeChain={activeChain}
+            />
+          ))}
+        </div>
+      )}
     </div>
   )
 }

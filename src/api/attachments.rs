@@ -96,6 +96,25 @@ pub struct EntriesTreeResponse {
     pub entries: Vec<super::AdminItemPayload>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EntriesPathsQuery {
+    /// Optional namespace filter. Omit for every source_id at once.
+    #[serde(default)]
+    pub source_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PathRowPayload {
+    pub source_id: String,
+    pub path: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EntriesPathsResponse {
+    pub paths: Vec<PathRowPayload>,
+}
+
 fn attachment_max_bytes() -> u64 {
     std::env::var("RAG_ATTACHMENT_MAX_BYTES")
         .ok()
@@ -561,4 +580,36 @@ pub async fn entries_tree(
     Query(query): Query<EntriesTreeQuery>,
 ) -> Result<Json<EntriesTreeResponse>, ApiError> {
     entries_tree_core(&state, query).await.map(Json)
+}
+
+pub async fn entries_paths_core(
+    state: &AppState,
+    query: EntriesPathsQuery,
+) -> Result<EntriesPathsResponse, ApiError> {
+    if let Some(s) = query.source_id.as_deref() {
+        super::validate_source_id(s)?;
+    }
+    let store = state.store.clone();
+    let filter = query.source_id.clone();
+    let rows = tokio::task::spawn_blocking(move || store.list_all_paths(filter.as_deref()))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+    Ok(EntriesPathsResponse {
+        paths: rows
+            .into_iter()
+            .map(|r| PathRowPayload {
+                source_id: r.source_id,
+                path: r.path,
+                count: r.count,
+            })
+            .collect(),
+    })
+}
+
+pub async fn entries_paths(
+    State(state): State<AppState>,
+    Query(query): Query<EntriesPathsQuery>,
+) -> Result<Json<EntriesPathsResponse>, ApiError> {
+    entries_paths_core(&state, query).await.map(Json)
 }

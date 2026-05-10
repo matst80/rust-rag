@@ -46,6 +46,16 @@ export interface EntriesTreeResponse {
   entries: Entry[]
 }
 
+export interface PathRow {
+  source_id: string
+  path: string
+  count: number
+}
+
+export interface EntriesPathsResponse {
+  paths: PathRow[]
+}
+
 export interface Category {
   id: string
   name: string
