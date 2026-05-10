@@ -78,3 +78,48 @@ This project uses its own MCP server as durable cross-session, cross-agent memor
 - Tag liberally; tags drive future search narrowing.
 - Link related entries with `create_manual_edge`.
 - Tool descriptions in `src/mcp.rs` and `mcp-stdio/src/server.rs` must stay in sync — change both when editing one.
+
+## Observability — OpenTelemetry
+
+In-cluster: traces ship to `otel-debug-service.monitoring.svc.cluster.local:4317`
+(OTLP gRPC) when `RAG_OTEL_ENABLED=true` (default in cuda manifest). Layered
+on top of the existing `tracing` fmt subscriber via `tracing-opentelemetry`,
+filtered separately so console stays terse while exports stay rich.
+
+Key knobs (cuda Deployment):
+
+- `RAG_OTEL_ENABLED=true`
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-debug-service.monitoring.svc.cluster.local:4317`
+- `OTEL_SERVICE_NAME=rust-rag` (resource attribute; surfaces in queries)
+- `RAG_OTEL_FILTER` — overrides the trace filter. Default
+  `rust_rag=info,axum=info,tower_http=debug` (tower-http request spans live at
+  DEBUG; exclude that and there are no spans to export).
+
+### Inspecting traces
+
+The collector is `matst80/otel-debug` — minimal viewer + JSON history API.
+Public ingress at `https://otel.k6n.net`.
+
+History endpoints (port 8080 internally):
+
+- `GET /api/history` — every signal type
+- `GET /api/history/traces` — traces only
+- `GET /api/history/metrics` — metrics only
+- `GET /api/history/logs` — logs only
+
+Filter rust-rag spans:
+
+```bash
+curl -s 'https://otel.k6n.net/api/history/traces?limit=500' \
+  | jq '[.[] | select(.data.resourceSpans[].resource.attributes[]
+        | select(.key=="service.name" and .value.stringValue=="rust-rag"))]'
+```
+
+UI at `https://otel.k6n.net/`. The viewer is a SPA; trace data lives behind
+`/api/history/*`, not on the SPA paths.
+
+### Adding spans
+
+`#[tracing::instrument]` on hot paths gets you nested children inside the
+tower-http request span. The OTel layer auto-converts every `tracing::span!`
+to an OTel span and bridges `info!`/`warn!` events as span events.
