@@ -17,6 +17,7 @@ import {
 import { MarkdownView } from "./markdown-view"
 import { EmbeddedGraph } from "../graph/embedded-graph"
 import { AttachmentsPanel } from "./attachments-panel"
+import { WikiPathPicker } from "./wiki-path-picker"
 import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -108,12 +109,14 @@ export function EntryDetail({ id }: EntryDetailProps) {
             <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">
               {entry.source_id}
             </span>
+            <WikiPathPicker entry={entry} />
             {entry.path && (
               <Link
                 href={`/wiki?source_id=${encodeURIComponent(entry.source_id)}&path=${encodeURIComponent(entry.path)}`}
-                className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border border-border text-primary hover:bg-primary/10 transition-colors"
+                className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors"
+                title="Open this wiki folder"
               >
-                {entry.path}
+                ↗
               </Link>
             )}
           </div>

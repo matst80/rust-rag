@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { useMemo, useState } from "react"
 import {
+  ArrowUpRight,
   ChevronDown,
   ChevronRight,
   Database,
@@ -13,6 +14,7 @@ import {
   Menu,
   X,
 } from "lucide-react"
+import { MarkdownView } from "@/components/entries/markdown-view"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -257,25 +259,39 @@ export function EntryTree({ sourceId, prefix }: EntryTreeProps) {
         {tree && tree.entries.length > 0 && (
           <div>
             <h2 className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-3">
-              Entries here
+              Entries here — {tree.entries.length}
             </h2>
-            <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-6">
               {tree.entries.map((e) => (
-                <Link
+                <article
                   key={e.id}
-                  href={`/entries/${encodeURIComponent(e.id)}`}
-                  className="flex items-center gap-3 border border-border bg-card p-3 hover:border-primary/40 transition-colors"
+                  className="border border-border bg-card transition-colors hover:border-primary/30"
                 >
-                  <FileText className="size-4 text-muted-foreground shrink-0" />
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="font-mono text-xs font-bold truncate">
-                      {e.id}
-                    </span>
-                    <span className="font-mono text-[10px] text-muted-foreground line-clamp-1">
-                      {e.text.slice(0, 200)}
-                    </span>
+                  <header className="flex items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-2.5">
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <FileText className="size-3.5 text-muted-foreground shrink-0" />
+                      <Link
+                        href={`/entries/${encodeURIComponent(e.id)}`}
+                        className="font-mono text-xs font-bold truncate hover:text-primary transition-colors"
+                      >
+                        {e.id}
+                      </Link>
+                      <span className="font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground shrink-0">
+                        {e.source_id}
+                      </span>
+                    </div>
+                    <Link
+                      href={`/entries/${encodeURIComponent(e.id)}`}
+                      className="flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground hover:text-primary transition-colors shrink-0"
+                      title="Open in detail view"
+                    >
+                      Open <ArrowUpRight className="size-3" />
+                    </Link>
+                  </header>
+                  <div className="px-5 py-4">
+                    <MarkdownView content={e.text} />
                   </div>
-                </Link>
+                </article>
               ))}
             </div>
           </div>
