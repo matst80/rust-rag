@@ -38,6 +38,16 @@ interface AcpInstance {
 	txt: Record<string, string>
 }
 
+interface WorkerStatus {
+	instance_id: string
+	url: string
+	connected: boolean
+	last_error: string | null
+	session_count: number
+	pending_permissions: number
+	buffered_events: number
+}
+
 interface ConnectionState {
 	status: "connecting" | "open" | "closed" | "error" | "disabled"
 	error?: string
@@ -90,6 +100,7 @@ export function AgentChat() {
 	const [drafts, setDrafts] = useState<Record<string, string>>({})
 	const [instances, setInstances] = useState<AcpInstance[]>([])
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
+	const [workers, setWorkers] = useState<WorkerStatus[]>([])
 	const [projects, setProjects] = useState<ProjectInfo[]>([])
 	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
 	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
@@ -97,14 +108,34 @@ export function AgentChat() {
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
+	// Read the current desired instance synchronously from connect()/reconnect
+	// without re-creating the callback on every change.
+	const activeInstanceRef = useRef<string | null>(null)
+	useEffect(() => {
+		activeInstanceRef.current = activeInstance
+	}, [activeInstance])
 
 	const refreshInstances = useCallback(async () => {
 		try {
 			const res = await fetch("/bff/acp/instances", { credentials: "include" })
 			if (!res.ok) return
-			const data = (await res.json()) as { instances: AcpInstance[]; active: string | null }
+			const data = (await res.json()) as {
+				instances: AcpInstance[]
+				active: string | null
+				workers?: WorkerStatus[]
+			}
 			setInstances(data.instances)
-			setActiveInstance(data.active)
+			setWorkers(data.workers ?? [])
+			setActiveInstance((prev) => {
+				// Preserve a user-chosen instance even if backend "active" hint
+				// changes; only auto-pick when nothing selected yet.
+				if (prev && (data.workers ?? []).some((w) => w.instance_id === prev)) {
+					return prev
+				}
+				if (data.active) return data.active
+				if ((data.workers ?? []).length === 1) return data.workers![0].instance_id
+				return null
+			})
 		} catch (err) {
 			console.warn("acp instances fetch failed", err)
 		}
@@ -152,6 +183,14 @@ export function AgentChat() {
 			wsUrl = `${proto}//${window.location.host}${url}`
 		} else {
 			wsUrl = url
+		}
+		// Backend resolves per-instance worker from ?instance=. Skip the param
+		// when no selection yet — backend auto-picks the sole worker if exactly
+		// one is registered.
+		const target = activeInstanceRef.current
+		if (target) {
+			const sep = wsUrl.includes("?") ? "&" : "?"
+			wsUrl = `${wsUrl}${sep}instance=${encodeURIComponent(target)}`
 		}
 		const ws = new WebSocket(wsUrl)
 		wsRef.current = ws
@@ -305,8 +344,13 @@ export function AgentChat() {
 	}, [activeSessionId])
 
 	useEffect(() => {
-		connect()
-		void refreshInstances()
+		// Fetch instances first so the initial WS connect can carry
+		// ?instance=. With one worker the backend auto-resolves, so this
+		// only matters once multiple are registered.
+		;(async () => {
+			await refreshInstances()
+			connect()
+		})()
 		const t = window.setInterval(() => void refreshInstances(), 10_000)
 		return () => {
 			window.clearInterval(t)
@@ -320,34 +364,32 @@ export function AgentChat() {
 	const selectInstance = useCallback(
 		async (name: string) => {
 			if (name === activeInstance) return
+			activeInstanceRef.current = name
+			setActiveInstance(name)
+			// Best-effort: tell the backend our default-instance preference.
+			// Failure is non-fatal — the WS reconnect below uses ?instance=
+			// directly so the UI works even if the select endpoint is gone.
 			try {
-				const res = await fetch("/bff/acp/select", {
+				await fetch("/bff/acp/select", {
 					method: "POST",
 					credentials: "include",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify({ name }),
 				})
-				if (!res.ok) {
-					console.error("acp select failed", await res.text())
-					return
-				}
-				setActiveInstance(name)
-				// Backend swapped its client; force browser reconnect to new URL.
-				// Detach handlers before close so any in-flight messages from the
-				// old socket don't double-dispatch into the new state.
-				const ws = wsRef.current
-				wsRef.current = null
-				reconnectAttemptRef.current = 0
-				if (ws) detachAndClose(ws)
-				// Reset session view; new instance has its own state.
-				setSessions({})
-				setEventsBySession({})
-				setActiveSessionId(null)
-				setPendingPermissions({})
-				connect()
 			} catch (err) {
-				console.error("acp select error", err)
+				console.warn("acp select hint failed", err)
 			}
+			// Each instance has its own worker + sessions; reset view, then
+			// reconnect against the new instance via ?instance=.
+			const ws = wsRef.current
+			wsRef.current = null
+			reconnectAttemptRef.current = 0
+			if (ws) detachAndClose(ws)
+			setSessions({})
+			setEventsBySession({})
+			setActiveSessionId(null)
+			setPendingPermissions({})
+			connect()
 		},
 		[activeInstance, connect],
 	)
@@ -540,11 +582,16 @@ export function AgentChat() {
 							className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
 						>
 							{!activeInstance && <option value="">— pick instance —</option>}
-							{instances.map((inst) => (
-								<option key={inst.name} value={inst.name}>
-									{inst.name} ({inst.host}:{inst.port})
-								</option>
-							))}
+							{instances.map((inst) => {
+								const w = workers.find((w) => w.instance_id === inst.name)
+								const dot = w ? (w.connected ? "●" : "○") : "·"
+								const count = w ? ` · ${w.session_count}s` : ""
+								return (
+									<option key={inst.name} value={inst.name}>
+										{dot} {inst.name} ({inst.host}:{inst.port}){count}
+									</option>
+								)
+							})}
 						</select>
 					</div>
 				)}
