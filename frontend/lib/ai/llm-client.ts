@@ -13,7 +13,7 @@ const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai/wasm"
 
 export type LlmStatus =
   | { kind: "idle" }
-  | { kind: "loading"; loaded: number; total: number | null }
+  | { kind: "loading"; loaded: number; total: number | null; source: "network" | "cache" }
   | { kind: "ready" }
   | { kind: "generating" }
   | { kind: "error"; message: string }
@@ -39,6 +39,71 @@ class LlmClient extends EventTarget {
     return typeof (navigator as unknown as { gpu?: unknown }).gpu !== "undefined"
   }
 
+  private async fetchModelBuffer(modelUrl: string): Promise<Uint8Array> {
+    const cacheName = "litert-models-v1"
+    let cache: Cache | null = null
+    try {
+      cache = await caches.open(cacheName)
+    } catch {
+      cache = null
+    }
+
+    // Cache hit: pull from CacheStorage, still stream so the user sees progress.
+    if (cache) {
+      const cached = await cache.match(modelUrl)
+      if (cached) {
+        return this.streamBody(cached, "cache")
+      }
+    }
+
+    const response = await fetch(modelUrl)
+    if (!response.ok) {
+      throw new Error(
+        `Model fetch failed: ${response.status} ${response.statusText}`
+      )
+    }
+    // Store before consuming the original body so we can use a clone for parsing.
+    if (cache) {
+      try {
+        await cache.put(modelUrl, response.clone())
+      } catch (err) {
+        // Quota or opaque-response errors — ignore, fall back to one-shot use.
+        console.warn("[llm] cache.put failed; model will re-download next time", err)
+      }
+    }
+    return this.streamBody(response, "network")
+  }
+
+  private async streamBody(
+    response: Response,
+    source: "cache" | "network"
+  ): Promise<Uint8Array> {
+    const totalHeader = response.headers.get("content-length")
+    const total = totalHeader ? parseInt(totalHeader, 10) : null
+
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error("ReadableStream unsupported")
+
+    const chunks: Uint8Array[] = []
+    let loaded = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        chunks.push(value)
+        loaded += value.byteLength
+        this.setStatus({ kind: "loading", loaded, total, source })
+      }
+    }
+    const buffer = new Uint8Array(loaded)
+    let off = 0
+    for (const c of chunks) {
+      buffer.set(c, off)
+      off += c.byteLength
+    }
+    return buffer
+  }
+
   async load(modelUrl: string = DEFAULT_MODEL_URL): Promise<LlmInferenceType> {
     if (this.llm) return this.llm
     if (this.loadPromise) return this.loadPromise
@@ -49,36 +114,8 @@ class LlmClient extends EventTarget {
           throw new Error("WebGPU is not available in this browser.")
         }
 
-        this.setStatus({ kind: "loading", loaded: 0, total: null })
-
-        // Fetch model with progress so users can see the ~1.3GB download.
-        const response = await fetch(modelUrl)
-        if (!response.ok) {
-          throw new Error(`Model fetch failed: ${response.status} ${response.statusText}`)
-        }
-        const totalHeader = response.headers.get("content-length")
-        const total = totalHeader ? parseInt(totalHeader, 10) : null
-
-        const reader = response.body?.getReader()
-        if (!reader) throw new Error("ReadableStream unsupported")
-
-        const chunks: Uint8Array[] = []
-        let loaded = 0
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          if (value) {
-            chunks.push(value)
-            loaded += value.byteLength
-            this.setStatus({ kind: "loading", loaded, total })
-          }
-        }
-        const buffer = new Uint8Array(loaded)
-        let off = 0
-        for (const c of chunks) {
-          buffer.set(c, off)
-          off += c.byteLength
-        }
+        this.setStatus({ kind: "loading", loaded: 0, total: null, source: "network" })
+        const buffer = await this.fetchModelBuffer(modelUrl)
 
         // Dynamic import keeps MediaPipe out of the initial bundle.
         const { FilesetResolver, LlmInference } = await import(
@@ -148,9 +185,19 @@ export function getLlmClient(): LlmClient {
 export function formatLoadProgress(s: LlmStatus): string {
   if (s.kind !== "loading") return ""
   const mb = (n: number) => (n / 1024 / 1024).toFixed(0)
+  const tag = s.source === "cache" ? "cache" : "downloading"
   if (s.total) {
     const pct = ((s.loaded / s.total) * 100).toFixed(1)
-    return `${mb(s.loaded)} / ${mb(s.total)} MB · ${pct}%`
+    return `${tag} · ${mb(s.loaded)} / ${mb(s.total)} MB · ${pct}%`
   }
-  return `${mb(s.loaded)} MB`
+  return `${tag} · ${mb(s.loaded)} MB`
+}
+
+/** Drop the cached model — next load will re-download. */
+export async function clearModelCache(): Promise<void> {
+  try {
+    await caches.delete("litert-models-v1")
+  } catch {
+    // ignore
+  }
 }
