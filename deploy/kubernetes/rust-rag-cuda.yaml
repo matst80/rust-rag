@@ -77,6 +77,17 @@ data:
   RAG_ADMIN_SUBJECTS: "369527412653951321"
   RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
   RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
+  ## LLM-on-store analysis pass. Probe-verified config: bare-metal
+  ## llama.cpp at 10.10.11.135:8082 serving unsloth/Qwen3.5-4B-GGUF
+  ## with thinking disabled via chat_template_kwargs (llama.cpp build
+  ## ignores reasoning_effort + thinking_budget — must be hard-off).
+  ## Falls back to RAG_OPENAI_* if any of these are unset.
+  RAG_ANALYSIS_ENABLED: "true"
+  RAG_ANALYSIS_BASE_URL: "http://10.10.11.135:8082/v1"
+  RAG_ANALYSIS_MODEL: "unsloth/Qwen3.5-4B-GGUF"
+  RAG_ANALYSIS_TIMEOUT_SECS: "30"
+  RAG_ANALYSIS_MAX_NEIGHBORS: "8"
+  RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.65"
   ## Manager loop. Drives the cron + mention-triggered orchestrator that
   ## reads `manager` channel + tool-calls into ACP / RAG / message tools.
   ## Uses xAI Grok Fast Reasoning over the public API; api key lands via
