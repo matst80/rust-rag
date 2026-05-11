@@ -2810,6 +2810,16 @@ async fn heartbeat_acp_instance(
         .as_ref()
         .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
     let refreshed = disc.heartbeat(&req.name).await;
+    // 404 on unknown so the daemon's error path can re-POST /register.
+    // Sending 200 + {refreshed:false} was indistinguishable from success
+    // for daemons that only check the HTTP status, so they'd silently
+    // stay unregistered after the backend pruned their TTL.
+    if !refreshed {
+        return Err(ApiError::NotFound(format!(
+            "unknown acp instance '{}'; POST /api/acp/register first",
+            req.name
+        )));
+    }
     Ok(Json(HeartbeatAcpResponse { refreshed }))
 }
 
