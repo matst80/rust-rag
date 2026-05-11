@@ -1111,21 +1111,57 @@ async fn execute_tool(
     }
 }
 
-fn require_acp(state: &AppState) -> Result<&crate::acp_ws::AcpWsHandle> {
-    state
+async fn require_acp(
+    state: &AppState,
+    instance: Option<&str>,
+) -> Result<std::sync::Arc<crate::acp_ws::AcpWsHandle>> {
+    let registry = state
         .acp_ws
         .as_ref()
-        .ok_or_else(|| anyhow!("ACP WS client not configured (set RAG_ACP_WS_URL)"))
+        .ok_or_else(|| anyhow!("ACP WS registry not initialized"))?;
+    if let Some(worker) = registry.resolve(instance).await {
+        return Ok(worker);
+    }
+    let n = registry.len().await;
+    if n == 0 {
+        Err(anyhow!(
+            "no ACP instances registered; start a daemon or POST /api/acp/register"
+        ))
+    } else if instance.is_some() {
+        Err(anyhow!(
+            "unknown ACP instance '{}'",
+            instance.unwrap_or("?")
+        ))
+    } else {
+        Err(anyhow!(
+            "multiple ACP instances registered ({n}); specify `instance` (see /api/acp/instances)"
+        ))
+    }
+}
+
+fn parse_instance(args: &str) -> Option<String> {
+    if args.trim().is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(args).ok()?;
+    v.get("instance")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 async fn tool_acp_simple(state: &AppState, variant: &str, payload: Value) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = payload
+        .get("instance")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let handle = require_acp(state, instance.as_deref()).await?;
     handle.command(variant, payload)?;
     Ok(json!({"ok": true, "sent": variant}).to_string())
 }
 
 async fn tool_acp_passthrough(state: &AppState, variant: &str, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let payload: Value = if args.trim().is_empty() {
         Value::Object(Default::default())
     } else {
@@ -1137,7 +1173,8 @@ async fn tool_acp_passthrough(state: &AppState, variant: &str, args: &str) -> Re
 }
 
 async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let payload: Value = serde_json::from_str(args)
         .map_err(|err| anyhow!("invalid JSON args for PermissionResponse: {err}"))?;
     let request_id = payload
@@ -1146,7 +1183,7 @@ async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<Str
         .ok_or_else(|| anyhow!("request_id required"))?
         .to_owned();
     handle.command("permission_response", payload.clone())?;
-    crate::acp_ws::mark_permission_resolved(handle, &request_id).await;
+    handle.mark_permission_resolved(&request_id).await;
     Ok(json!({"ok": true, "request_id": request_id}).to_string())
 }
 
@@ -1163,7 +1200,8 @@ struct AcpRecentEventsArgs {
 }
 
 async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let parsed: AcpRecentEventsArgs = if args.trim().is_empty() {
         AcpRecentEventsArgs::default()
     } else {
@@ -1182,13 +1220,13 @@ async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> 
 }
 
 async fn tool_acp_pending_permissions(state: &AppState) -> Result<String> {
-    let handle = require_acp(state)?;
+    let handle = require_acp(state, None).await?;
     let events = handle.pending_permissions().await;
     Ok(serde_json::to_string(&events)?)
 }
 
 async fn tool_acp_get_snapshot(state: &AppState) -> Result<String> {
-    let handle = require_acp(state)?;
+    let handle = require_acp(state, None).await?;
     let snap = handle.latest_snapshot().await;
     Ok(serde_json::to_string(&snap)?)
 }

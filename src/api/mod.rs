@@ -49,7 +49,7 @@ mod presence;
 mod query;
 mod tombstones;
 
-pub use analysis::{AnalyzeEntryParams, run_analysis};
+pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -87,7 +87,7 @@ pub struct AppState {
     pub user_memory: Arc<dyn UserMemoryStore>,
     pub messages: Arc<dyn MessageStore>,
     pub manager_runtime: Option<Arc<ManagerConfig>>,
-    pub acp_ws: Option<crate::acp_ws::AcpWsHandle>,
+    pub acp_ws: Option<Arc<crate::acp_ws::AcpWsRegistry>>,
     pub acp_discovery: Option<crate::acp_discovery::AcpDiscoveryHandle>,
     pub presence: Arc<PresenceTracker>,
     pub tombstones: Arc<TombstoneTracker>,
@@ -2700,20 +2700,35 @@ async fn clear_message_channel(
 struct AcpInstancesResponse {
     instances: Vec<crate::acp_discovery::AcpInstance>,
     active: Option<String>,
+    /// Per-instance WS worker status, sorted by `instance_id`. Mirrors the
+    /// `instances` list but adds runtime fields (`connected`, `session_count`,
+    /// `pending_permissions`) so the frontend can pick a default and surface
+    /// liveness without polling each worker individually.
+    workers: Vec<crate::acp_ws::InstanceStatus>,
 }
 
 async fn list_acp_instances(
     State(state): State<AppState>,
 ) -> Result<Json<AcpInstancesResponse>, ApiError> {
-    let Some(disc) = state.acp_discovery.clone() else {
-        return Ok(Json(AcpInstancesResponse {
-            instances: vec![],
-            active: None,
-        }));
+    let instances = if let Some(disc) = state.acp_discovery.as_ref() {
+        disc.list().await
+    } else {
+        Vec::new()
     };
-    let instances = disc.list().await;
-    let active = disc.active().await.map(|i| i.name);
-    Ok(Json(AcpInstancesResponse { instances, active }))
+    let active = match state.acp_discovery.as_ref() {
+        Some(disc) => disc.active().await.map(|i| i.name),
+        None => None,
+    };
+    let workers = if let Some(reg) = state.acp_ws.as_ref() {
+        reg.statuses().await
+    } else {
+        Vec::new()
+    };
+    Ok(Json(AcpInstancesResponse {
+        instances,
+        active,
+        workers,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2814,23 +2829,40 @@ async fn unregister_acp_instance(
 }
 
 /// Browser-facing WebSocket proxy. Bridges a same-origin `wss://…/api/acp/ws`
-/// upgrade onto the singleton AcpWsHandle so multiple browser tabs share one
-/// daemon connection. Auth is inherited from `require_api_key` (session cookie
-/// for browsers, x-api-key for service callers).
+/// upgrade onto a per-instance AcpWsHandle so multiple browser tabs can each
+/// subscribe to the daemon of their choice. `?instance=<id>` selects the
+/// target; omit when only one instance is registered. Auth inherited from
+/// `require_api_key`.
 async fn acp_ws_proxy(
     ws: axum::extract::WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<axum::response::Response, ApiError> {
-    let handle = state
+    let registry = state
         .acp_ws
         .clone()
         .ok_or_else(|| ApiError::BadRequest("acp_ws not enabled".to_owned()))?;
+    let requested = params.get("instance").map(String::as_str);
+    let handle = match registry.resolve(requested).await {
+        Some(h) => h,
+        None => {
+            let n = registry.len().await;
+            let msg = if n == 0 {
+                "no ACP instances registered".to_owned()
+            } else if requested.is_some() {
+                format!("unknown ACP instance '{}'", requested.unwrap_or("?"))
+            } else {
+                format!("multiple ACP instances registered ({n}); specify ?instance=")
+            };
+            return Err(ApiError::BadRequest(msg));
+        }
+    };
     Ok(ws.on_upgrade(move |socket| acp_ws_proxy_task(socket, handle)))
 }
 
 async fn acp_ws_proxy_task(
     socket: axum::extract::ws::WebSocket,
-    handle: crate::acp_ws::AcpWsHandle,
+    handle: std::sync::Arc<crate::acp_ws::AcpWsHandle>,
 ) {
     use axum::extract::ws::Message as AxumMessage;
     use futures_util::{SinkExt, StreamExt};
@@ -2839,7 +2871,11 @@ async fn acp_ws_proxy_task(
     let (mut sink, mut stream) = socket.split();
     let mut rx = handle.subscribe();
 
-    if let Some(snap) = handle.latest_snapshot_text().await {
+    // Kick the upstream to emit a fresh snapshot — closes the late-joiner
+    // race where SessionStarted events landed after the cached snapshot.
+    let _ = handle.request_list_sessions();
+
+    if let Some(snap) = handle.subscriber_snapshot().await {
         if sink.send(AxumMessage::Text(snap.into())).await.is_err() {
             return;
         }

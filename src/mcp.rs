@@ -251,6 +251,9 @@ pub struct AcpSpawnParams {
     pub agent_command: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -259,11 +262,17 @@ pub struct AcpSendPromptParams {
     pub text: String,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AcpSessionIdParams {
     pub session_id: String,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -272,6 +281,9 @@ pub struct AcpEndSessionParams {
     pub session_id: Option<String>,
     #[serde(default)]
     pub thread_id: Option<i64>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -279,6 +291,8 @@ pub struct AcpSetPermissionModeParams {
     pub session_id: String,
     /// "auto" | "manual"
     pub mode: String,
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -286,6 +300,8 @@ pub struct AcpPermissionRespondParams {
     pub request_id: String,
     /// allow_once | allow_always | deny | deny_always
     pub decision: String,
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -298,6 +314,14 @@ pub struct AcpRecentEventsParams {
     pub kinds: Option<Vec<String>>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
+pub struct AcpInstanceParams {
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -319,6 +343,9 @@ pub struct AcpDelegateTaskParams {
     /// Seconds to wait for SessionStarted before giving up. Default 15.
     #[serde(default)]
     pub wait_secs: Option<u64>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -395,18 +422,16 @@ impl RustRagMcpServer {
     async fn analyze_entry(
         &self,
         Parameters(params): Parameters<crate::api::AnalyzeEntryParams>,
-    ) -> Result<Json<serde_json::Value>, String> {
-        let analysis = crate::api::run_analysis(
+    ) -> Result<Json<crate::api::StoreAnalysis>, String> {
+        crate::api::run_analysis(
             &self.state,
             &params.text,
             params.source_id.as_deref(),
             params.exclude_id.as_deref(),
         )
         .await
-        .map_err(|e| e.to_string())?;
-        serde_json::to_value(analysis)
-            .map(Json)
-            .map_err(|e| e.to_string())
+        .map(Json)
+        .map_err(|e| e.to_string())
     }
 
     #[tool(description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or a hand-off message references a specific entry id.")]
@@ -1060,20 +1085,23 @@ impl RustRagMcpServer {
             .ok_or_else(|| format!("unknown acp instance: {name}"))
     }
 
-    #[tool(description = "Ask the active ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`.")]
-    async fn acp_list_sessions(&self) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+    #[tool(description = "Ask the target ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`. Pass `instance` to disambiguate when multiple are registered.")]
+    async fn acp_list_sessions(
+        &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         h.command("list_sessions", serde_json::json!({}))
             .map_err(|e| e.to_string())?;
         Ok(Json(AcpCommandAck { ok: true, sent: "list_sessions".into(), context: None }))
     }
 
-    #[tool(description = "Spawn a headless ACP session on the active daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt.")]
+    #[tool(description = "Spawn a headless ACP session on the target daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt. Pass `instance` when multiple are registered.")]
     async fn acp_spawn_session(
         &self,
         Parameters(params): Parameters<AcpSpawnParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let mut payload = serde_json::Map::new();
         payload.insert("project_path".into(), serde_json::Value::String(params.project_path));
         if let Some(cmd) = params.agent_command {
@@ -1087,12 +1115,12 @@ impl RustRagMcpServer {
         Ok(Json(AcpCommandAck { ok: true, sent: "spawn_session".into(), context: None }))
     }
 
-    #[tool(description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`.")]
+    #[tool(description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`. Pass `instance` when multiple are registered.")]
     async fn acp_send_prompt(
         &self,
         Parameters(params): Parameters<AcpSendPromptParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let mut payload = serde_json::Map::new();
         payload.insert("session_id".into(), serde_json::Value::String(params.session_id));
         payload.insert("text".into(), serde_json::Value::String(params.text));
@@ -1110,10 +1138,10 @@ impl RustRagMcpServer {
     #[tool(description = "Cancel the currently running prompt on an ACP session.")]
     async fn acp_cancel(
         &self,
-        Parameters(AcpSessionIdParams { session_id }): Parameters<AcpSessionIdParams>,
+        Parameters(params): Parameters<AcpSessionIdParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
-        h.command("cancel", serde_json::json!({ "session_id": session_id }))
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command("cancel", serde_json::json!({ "session_id": params.session_id }))
             .map_err(|e| e.to_string())?;
         Ok(Json(AcpCommandAck { ok: true, sent: "cancel".into(), context: None }))
     }
@@ -1123,7 +1151,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(params): Parameters<AcpEndSessionParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let mut payload = serde_json::Map::new();
         if let Some(s) = params.session_id {
             payload.insert("session_id".into(), serde_json::Value::String(s));
@@ -1144,7 +1172,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(params): Parameters<AcpSetPermissionModeParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         h.command(
             "set_permission_mode",
             serde_json::json!({ "session_id": params.session_id, "mode": params.mode }),
@@ -1158,13 +1186,13 @@ impl RustRagMcpServer {
         &self,
         Parameters(params): Parameters<AcpPermissionRespondParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         h.command(
             "permission_response",
             serde_json::json!({ "request_id": params.request_id, "decision": params.decision }),
         )
         .map_err(|e| e.to_string())?;
-        crate::acp_ws::mark_permission_resolved(h, &params.request_id).await;
+        h.mark_permission_resolved(&params.request_id).await;
         Ok(Json(AcpCommandAck {
             ok: true,
             sent: "permission_response".into(),
@@ -1177,7 +1205,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(params): Parameters<AcpRecentEventsParams>,
     ) -> Result<Json<AcpEventsResponse>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let events = h
             .recent_events(
                 params.session_id.as_deref(),
@@ -1192,8 +1220,9 @@ impl RustRagMcpServer {
     #[tool(description = "List outstanding PermissionRequest events awaiting a decision.")]
     async fn acp_pending_permissions(
         &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
     ) -> Result<Json<AcpEventsResponse>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         Ok(Json(AcpEventsResponse {
             events: h.pending_permissions().await,
         }))
@@ -1202,8 +1231,9 @@ impl RustRagMcpServer {
     #[tool(description = "Return the most recent Snapshot event (full session state) the WS client has seen, or null if none yet.")]
     async fn acp_get_snapshot(
         &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
     ) -> Result<Json<AcpSnapshotResponse>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         Ok(Json(AcpSnapshotResponse {
             snapshot: h.latest_snapshot().await,
         }))
@@ -1214,7 +1244,7 @@ impl RustRagMcpServer {
         &self,
         Parameters(params): Parameters<AcpDelegateTaskParams>,
     ) -> Result<Json<AcpDelegateTaskResponse>, String> {
-        let h = require_acp(&self.state)?;
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let name = params.name.trim().to_string();
         if name.is_empty() {
             return Err("name must not be empty".into());
@@ -1305,11 +1335,27 @@ impl RustRagMcpServer {
     }
 }
 
-fn require_acp(state: &AppState) -> Result<&crate::acp_ws::AcpWsHandle, String> {
-    state
+async fn require_acp(
+    state: &AppState,
+    instance: Option<&str>,
+) -> Result<std::sync::Arc<crate::acp_ws::AcpWsHandle>, String> {
+    let registry = state
         .acp_ws
         .as_ref()
-        .ok_or_else(|| "ACP WS client not configured (set RAG_ACP_WS_URL or register an instance)".to_string())
+        .ok_or_else(|| "ACP WS registry not initialized".to_string())?;
+    if let Some(worker) = registry.resolve(instance).await {
+        return Ok(worker);
+    }
+    let n = registry.len().await;
+    if n == 0 {
+        Err("no ACP instances registered; start a daemon or POST /api/acp/register".to_string())
+    } else if instance.is_some() {
+        Err(format!("unknown ACP instance '{}'", instance.unwrap_or("?")))
+    } else {
+        Err(format!(
+            "multiple ACP instances registered ({n}); specify `instance` (see /api/acp/instances)"
+        ))
+    }
 }
 
 /// Filter predicate for `wait_for_message`. All supplied filters must match.

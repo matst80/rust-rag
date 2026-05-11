@@ -59,7 +59,7 @@ Output JSON ONLY, no prose, matching this shape:
 }"#;
 
 /// Output of a single analysis pass. All fields tolerant: missing → default.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct StoreAnalysis {
     #[serde(default)]
     pub verdicts: Vec<Verdict>,
@@ -84,7 +84,7 @@ pub struct StoreAnalysis {
     pub raw: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Verdict {
     #[serde(default, deserialize_with = "strip_brackets")]
     pub target_id: String,
@@ -96,7 +96,7 @@ pub struct Verdict {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SuggestedEdge {
     #[serde(default, deserialize_with = "strip_brackets")]
     pub target_id: String,
@@ -106,7 +106,7 @@ pub struct SuggestedEdge {
     pub weight: f32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct Quality {
     #[serde(default, deserialize_with = "clamp_unit")]
     pub score: f32,

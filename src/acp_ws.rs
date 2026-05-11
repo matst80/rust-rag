@@ -1,23 +1,30 @@
-//! WebSocket client for Telegram-ACP.
+//! ACP WebSocket fan-in / fan-out.
 //!
-//! Long-lived connection. Pushes incoming events into a per-session ring buffer
-//! and tracks pending PermissionRequests. Manager tools call `command` to send
-//! WS commands and the read methods to inspect recent state.
+//! One [`AcpWsHandle`] per upstream ACP daemon. Each handle owns a single
+//! long-lived WS connection, a per-session ring buffer, the last snapshot,
+//! pending permissions, and a `broadcast::Sender` that fans the daemon's
+//! frames out to every subscribed browser proxy.
 //!
-//! Wire surface (frozen as Telegram-ACP WS protocol v1.3.0). See RAG entry
-//! `telegram_acp_ws_protocol_v1` for the canonical doc.
+//! [`AcpWsRegistry`] holds the active set of handles keyed by instance id.
+//! Discovery (mDNS or HTTP register) drives `register` / `unregister` so
+//! every reachable daemon gets its own worker without any single-target
+//! swap. Browser sessions specify which instance to subscribe to (or the
+//! sole one when only one is registered).
+//!
+//! Wire surface frozen as Telegram-ACP WS protocol v1.3.0. See RAG entry
+//! `telegram_acp_ws_protocol_v1` for canonical doc.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
-use tokio::sync::{broadcast, mpsc, Mutex, Notify};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use crate::config::AcpWsConfig;
@@ -33,6 +40,9 @@ fn is_permission_request(kind: &str) -> bool {
 }
 fn is_session_ended(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("SessionEnded") || kind == "session_ended"
+}
+fn is_session_started(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("SessionStarted") || kind == "session_started"
 }
 
 /// One event captured from the WS stream.
@@ -63,11 +73,20 @@ struct InnerState {
     next_seq: u64,
     /// Ring buffer per session id. Events without a session id go in the empty-string bucket.
     buffers: HashMap<String, SessionBuffer>,
-    /// Latest Snapshot payload, if any.
+    /// Last snapshot decoded into struct form (for MCP `acp_get_snapshot`).
     latest_snapshot: Option<AcpEvent>,
-    /// Verbatim text of the most recent snapshot frame, replayed to new browser
-    /// subscribers so they don't have to wait for the daemon to emit one.
+    /// Verbatim text of the most recent snapshot frame, replayed verbatim
+    /// to new subscribers when present.
     latest_snapshot_text: Option<String>,
+    /// Live session id → most recently observed SessionInfo (from Snapshot
+    /// or SessionStarted payloads). Late-joining browsers get a synthesized
+    /// snapshot built from this map when the daemon hasn't recently emitted
+    /// one — closes the "new browser sees 0 sessions even though daemon has
+    /// N" window.
+    live_sessions: HashMap<String, Value>,
+    /// Projects list from the last Snapshot. Carried alongside `live_sessions`
+    /// so synthesized snapshots look identical to daemon-emitted ones.
+    live_projects: Vec<Value>,
     /// Outstanding PermissionRequest events keyed by request_id.
     pending_permissions: HashMap<String, AcpEvent>,
     /// Connection status for diagnostics.
@@ -75,42 +94,44 @@ struct InnerState {
     last_error: Option<String>,
 }
 
+/// Public status row for one instance.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct InstanceStatus {
+    pub instance_id: String,
+    pub url: String,
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub session_count: usize,
+    pub pending_permissions: usize,
+    pub buffered_events: usize,
+}
+
+/// Per-instance ACP WS worker. Cloning is cheap; clones share inner state.
 #[derive(Clone)]
 pub struct AcpWsHandle {
+    instance_id: String,
+    url: String,
     inner: Arc<Mutex<InnerState>>,
     outbound: mpsc::UnboundedSender<Value>,
     cap_per_session: usize,
-    /// Wakes anyone watching for new events (optional).
+    /// Wakes anyone watching for new events (MCP `wait_for_event`).
     pub event_notify: Arc<Notify>,
-    /// Target (url, optional token). Updating + signalling `target_changed`
-    /// causes the run loop to drop its current connection and reconnect.
-    target: Arc<Mutex<(String, Option<String>)>>,
-    target_changed: Arc<Notify>,
     /// Fan-out of every Text frame received from the daemon. Browser-side
     /// proxies subscribe here so a single daemon connection feeds many tabs.
     events_tx: broadcast::Sender<String>,
+    /// Notify the run loop to drop its WS and exit when the registry removes
+    /// this instance.
+    shutdown: Arc<Notify>,
 }
 
 impl AcpWsHandle {
-    /// Swap the active WS target. Any existing connection is dropped and a
-    /// new one opens against `url` with `token`.
-    pub async fn set_target(&self, url: String, token: Option<String>) {
-        {
-            let mut g = self.target.lock().await;
-            if g.0 == url && g.1 == token {
-                return;
-            }
-            *g = (url, token);
-        }
-        self.target_changed.notify_waiters();
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
-    pub async fn current_target(&self) -> (String, Option<String>) {
-        self.target.lock().await.clone()
-    }
-}
-
-impl AcpWsHandle {
     /// Send a raw command JSON to the server. Caller is responsible for shape.
     pub fn send_raw(&self, value: Value) -> Result<()> {
         self.outbound
@@ -119,7 +140,6 @@ impl AcpWsHandle {
     }
 
     /// Build the canonical lowercase-tagged envelope: `{ "type": "<variant>", ...payload }`.
-    /// `variant` should be `snake_case`.
     pub fn command(&self, variant: &str, payload: Value) -> Result<()> {
         let mut map = match payload {
             Value::Object(m) => m,
@@ -134,15 +154,23 @@ impl AcpWsHandle {
         self.send_raw(Value::Object(map))
     }
 
-    pub async fn status(&self) -> Value {
+    /// Ask the daemon for a fresh ListSessions snapshot. Best-effort.
+    pub fn request_list_sessions(&self) -> Result<()> {
+        self.command("list_sessions", json!({}))
+    }
+
+    pub async fn status(&self) -> InstanceStatus {
         let g = self.inner.lock().await;
-        json!({
-            "connected": g.connected,
-            "last_error": g.last_error,
-            "sessions_buffered": g.buffers.len(),
-            "pending_permissions": g.pending_permissions.len(),
-            "next_seq": g.next_seq,
-        })
+        let buffered_events: usize = g.buffers.values().map(|b| b.events.len()).sum();
+        InstanceStatus {
+            instance_id: self.instance_id.clone(),
+            url: self.url.clone(),
+            connected: g.connected,
+            last_error: g.last_error.clone(),
+            session_count: g.live_sessions.len(),
+            pending_permissions: g.pending_permissions.len(),
+            buffered_events,
+        }
     }
 
     pub async fn recent_events(
@@ -167,9 +195,7 @@ impl AcpWsHandle {
                 .collect(),
         };
         out.retain(|ev| {
-            since_local_seq
-                .map(|s| ev.local_seq > s)
-                .unwrap_or(true)
+            since_local_seq.map(|s| ev.local_seq > s).unwrap_or(true)
                 && kinds
                     .map(|ks| ks.iter().any(|k| k == &ev.kind))
                     .unwrap_or(true)
@@ -192,10 +218,24 @@ impl AcpWsHandle {
         g.latest_snapshot.clone()
     }
 
-    /// Verbatim text of the last snapshot frame the daemon sent us, ready to
-    /// forward to a freshly-connected browser subscriber.
-    pub async fn latest_snapshot_text(&self) -> Option<String> {
+    /// Snapshot frame to forward to a freshly-connected subscriber.
+    ///
+    /// Prefers a frame synthesized from the live session/project maps over
+    /// the daemon's last raw snapshot. The daemon only emits Snapshot at
+    /// connect + on explicit `list_sessions`, so the raw cache can lag
+    /// behind in-flight `SessionStarted`/`SessionEnded` deltas. The
+    /// synthesized form merges those deltas in and stays current.
+    pub async fn subscriber_snapshot(&self) -> Option<String> {
         let g = self.inner.lock().await;
+        if !g.live_sessions.is_empty() || !g.live_projects.is_empty() {
+            let sessions: Vec<Value> = g.live_sessions.values().cloned().collect();
+            let payload = json!({
+                "type": "state_snapshot",
+                "sessions": sessions,
+                "projects": g.live_projects,
+            });
+            return Some(payload.to_string());
+        }
         g.latest_snapshot_text.clone()
     }
 
@@ -205,52 +245,167 @@ impl AcpWsHandle {
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.events_tx.subscribe()
     }
+
+    pub async fn mark_permission_resolved(&self, request_id: &str) {
+        let mut g = self.inner.lock().await;
+        g.pending_permissions.remove(request_id);
+    }
+
+    /// Stop the worker. Closes the upstream WS; subscribers see broadcast
+    /// receiver closed. Idempotent.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_waiters();
+    }
 }
 
-/// Spawn the long-lived WS client task. Returns the handle even when no URL
-/// is configured up-front; callers can later point it at a discovered target
-/// via `set_target`. Returns `None` only when ring buffer config is invalid.
-pub fn spawn(cfg: AcpWsConfig) -> Option<AcpWsHandle> {
-    let url = cfg.url.clone();
-    let token = cfg.token.clone();
-    let cap = cfg.ring_buffer_per_session.max(20);
-    let initial = cfg.reconnect_initial_secs.max(1);
-    let max = cfg.reconnect_max_secs.max(initial);
+/// Registry of per-instance workers. One worker = one upstream WS.
+pub struct AcpWsRegistry {
+    workers: RwLock<HashMap<String, Arc<AcpWsHandle>>>,
+    cap_per_session: usize,
+    initial_backoff: u64,
+    max_backoff: u64,
+}
 
+impl AcpWsRegistry {
+    pub fn new(cfg: &AcpWsConfig) -> Arc<Self> {
+        let initial = cfg.reconnect_initial_secs.max(1);
+        let max = cfg.reconnect_max_secs.max(initial);
+        Arc::new(Self {
+            workers: RwLock::new(HashMap::new()),
+            cap_per_session: cfg.ring_buffer_per_session.max(20),
+            initial_backoff: initial,
+            max_backoff: max,
+        })
+    }
+
+    /// Register (or replace) an instance. Spawns a worker that connects to
+    /// `url`. If `id` already exists, the old worker is shut down and a new
+    /// one is created — supports re-resolution after a host change.
+    pub async fn register(
+        self: &Arc<Self>,
+        id: String,
+        url: String,
+        token: Option<String>,
+    ) -> Arc<AcpWsHandle> {
+        let mut g = self.workers.write().await;
+        if let Some(old) = g.remove(&id) {
+            if old.url == url {
+                // No change — put it back.
+                g.insert(id.clone(), old.clone());
+                return old;
+            }
+            info!(instance_id = %id, "acp_registry: re-registering, dropping old worker");
+            old.shutdown();
+        }
+        let worker = spawn_worker(
+            id.clone(),
+            url,
+            token,
+            self.cap_per_session,
+            self.initial_backoff,
+            self.max_backoff,
+        );
+        g.insert(id, worker.clone());
+        worker
+    }
+
+    pub async fn unregister(&self, id: &str) -> bool {
+        let mut g = self.workers.write().await;
+        if let Some(worker) = g.remove(id) {
+            info!(instance_id = %id, "acp_registry: unregistering worker");
+            worker.shutdown();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn get(&self, id: &str) -> Option<Arc<AcpWsHandle>> {
+        let g = self.workers.read().await;
+        g.get(id).cloned()
+    }
+
+    pub async fn list(&self) -> Vec<Arc<AcpWsHandle>> {
+        let g = self.workers.read().await;
+        g.values().cloned().collect()
+    }
+
+    pub async fn statuses(&self) -> Vec<InstanceStatus> {
+        let workers = self.list().await;
+        let mut out = Vec::with_capacity(workers.len());
+        for w in workers {
+            out.push(w.status().await);
+        }
+        out.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+        out
+    }
+
+    /// Resolve a worker by optional explicit id. If `id` is `None`:
+    /// - exactly one worker registered → return it
+    /// - zero or more than one → return None (caller must error)
+    pub async fn resolve(&self, id: Option<&str>) -> Option<Arc<AcpWsHandle>> {
+        if let Some(id) = id {
+            return self.get(id).await;
+        }
+        let g = self.workers.read().await;
+        if g.len() == 1 {
+            return g.values().next().cloned();
+        }
+        None
+    }
+
+    /// Total worker count. Lets callers distinguish "no instance registered"
+    /// from "ambiguous instance" when `resolve(None)` returns `None`.
+    pub async fn len(&self) -> usize {
+        self.workers.read().await.len()
+    }
+}
+
+fn spawn_worker(
+    instance_id: String,
+    url: String,
+    token: Option<String>,
+    cap_per_session: usize,
+    initial_backoff: u64,
+    max_backoff: u64,
+) -> Arc<AcpWsHandle> {
     let inner = Arc::new(Mutex::new(InnerState::default()));
     let (tx, rx) = mpsc::unbounded_channel::<Value>();
     let notify = Arc::new(Notify::new());
-    let target = Arc::new(Mutex::new((url.unwrap_or_default(), token)));
-    let target_changed = Arc::new(Notify::new());
     let (events_tx, _) = broadcast::channel::<String>(256);
+    let shutdown = Arc::new(Notify::new());
 
-    let handle = AcpWsHandle {
+    let handle = Arc::new(AcpWsHandle {
+        instance_id: instance_id.clone(),
+        url: url.clone(),
         inner: inner.clone(),
         outbound: tx,
-        cap_per_session: cap,
+        cap_per_session,
         event_notify: notify.clone(),
-        target: target.clone(),
-        target_changed: target_changed.clone(),
         events_tx: events_tx.clone(),
-    };
+        shutdown: shutdown.clone(),
+    });
 
     tokio::spawn(run_loop(
-        target,
-        target_changed,
-        cap,
-        initial,
-        max,
+        instance_id,
+        url,
+        token,
+        cap_per_session,
+        initial_backoff,
+        max_backoff,
         inner,
         rx,
         notify,
         events_tx,
+        shutdown,
     ));
-    Some(handle)
+    handle
 }
 
 async fn run_loop(
-    target: Arc<Mutex<(String, Option<String>)>>,
-    target_changed: Arc<Notify>,
+    instance_id: String,
+    url: String,
+    token: Option<String>,
     cap_per_session: usize,
     initial_backoff: u64,
     max_backoff: u64,
@@ -258,101 +413,101 @@ async fn run_loop(
     mut outbound_rx: mpsc::UnboundedReceiver<Value>,
     notify: Arc<Notify>,
     events_tx: broadcast::Sender<String>,
+    shutdown: Arc<Notify>,
 ) {
     let mut backoff = initial_backoff;
 
     loop {
-        let (url, token) = target.lock().await.clone();
         if url.is_empty() {
-            // No target yet; park until set_target signals.
-            target_changed.notified().await;
-            backoff = initial_backoff;
-            continue;
+            info!(instance_id = %instance_id, "acp_ws: empty url, exiting worker");
+            return;
         }
-        info!("acp_ws: connecting target={url}");
+        info!(instance_id = %instance_id, url = %url, "acp_ws: connecting");
 
-        match connect(&url, token.as_deref()).await {
-            Ok(ws) => {
-                {
-                    let mut g = inner.lock().await;
-                    g.connected = true;
-                    g.last_error = None;
-                }
-                backoff = initial_backoff;
-                info!("acp_ws: connected");
-
-                let (mut sink, mut stream) = ws.split();
-
-                // After a fresh connect (server restart, target switch, or
-                // first connect) the ring buffer is empty. Ask the daemon to
-                // emit ListSessions + Snapshot so the in-process state is
-                // repopulated without waiting for the daemon's own periodic
-                // snapshot tick.
-                for variant in ["list_sessions"] {
-                    let frame = serde_json::json!({ "type": variant }).to_string();
-                    if let Err(err) = sink.send(Message::Text(frame.into())).await {
-                        warn!("acp_ws: failed to request {variant} after connect: {err}");
-                        break;
-                    }
-                    debug!("acp_ws: requested {variant} on connect");
-                }
-
-                loop {
-                    tokio::select! {
-                        _ = target_changed.notified() => {
-                            info!("acp_ws: target changed; dropping current connection");
-                            break;
-                        }
-                        Some(value) = outbound_rx.recv() => {
-                            let text = match serde_json::to_string(&value) {
-                                Ok(t) => t,
-                                Err(err) => {
-                                    warn!("acp_ws: failed to serialize outbound: {err}");
-                                    continue;
-                                }
-                            };
-                            if let Err(err) = sink.send(Message::Text(text)).await {
-                                warn!("acp_ws: send error, reconnecting: {err}");
-                                break;
-                            }
-                        }
-                        Some(msg) = stream.next() => {
-                            match msg {
-                                Ok(Message::Text(text)) => {
-                                    // Fan out the raw frame to browser subscribers
-                                    // first; ring-buffer ingestion runs after and is
-                                    // independent.
-                                    let _ = events_tx.send(text.to_string());
-                                    handle_incoming(&inner, cap_per_session, &text).await;
-                                    notify.notify_waiters();
-                                }
-                                Ok(Message::Binary(_)) => {
-                                    debug!("acp_ws: ignoring binary frame");
-                                }
-                                Ok(Message::Ping(payload)) => {
-                                    let _ = sink.send(Message::Pong(payload)).await;
-                                }
-                                Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
-                                Ok(Message::Close(reason)) => {
-                                    info!("acp_ws: server closed: {reason:?}");
-                                    break;
-                                }
-                                Err(err) => {
-                                    warn!("acp_ws: read error: {err}");
-                                    break;
-                                }
-                            }
-                        }
-                        else => break,
-                    }
-                }
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                info!(instance_id = %instance_id, "acp_ws: shutdown before connect");
+                return;
             }
-            Err(err) => {
-                let mut g = inner.lock().await;
-                g.connected = false;
-                g.last_error = Some(err.to_string());
-                drop(g);
-                warn!("acp_ws: connect failed, retry in {backoff}s: {err}");
+            connect_res = connect(&url, token.as_deref()) => {
+                match connect_res {
+                    Ok(ws) => {
+                        {
+                            let mut g = inner.lock().await;
+                            g.connected = true;
+                            g.last_error = None;
+                        }
+                        backoff = initial_backoff;
+                        info!(instance_id = %instance_id, "acp_ws: connected");
+
+                        let (mut sink, mut stream) = ws.split();
+
+                        // Ask the daemon to emit a snapshot so the in-process
+                        // state catches up before any subscribers attach.
+                        let frame = json!({ "type": "list_sessions" }).to_string();
+                        if let Err(err) = sink.send(Message::Text(frame.into())).await {
+                            warn!(instance_id = %instance_id, "acp_ws: failed to request list_sessions on connect: {err}");
+                        } else {
+                            debug!(instance_id = %instance_id, "acp_ws: requested list_sessions on connect");
+                        }
+
+                        loop {
+                            tokio::select! {
+                                _ = shutdown.notified() => {
+                                    info!(instance_id = %instance_id, "acp_ws: shutdown signalled; closing");
+                                    let _ = sink.send(Message::Close(None)).await;
+                                    return;
+                                }
+                                Some(value) = outbound_rx.recv() => {
+                                    let text = match serde_json::to_string(&value) {
+                                        Ok(t) => t,
+                                        Err(err) => {
+                                            warn!(instance_id = %instance_id, "acp_ws: failed to serialize outbound: {err}");
+                                            continue;
+                                        }
+                                    };
+                                    if let Err(err) = sink.send(Message::Text(text.into())).await {
+                                        warn!(instance_id = %instance_id, "acp_ws: send error, reconnecting: {err}");
+                                        break;
+                                    }
+                                }
+                                Some(msg) = stream.next() => {
+                                    match msg {
+                                        Ok(Message::Text(text)) => {
+                                            let _ = events_tx.send(text.to_string());
+                                            handle_incoming(&inner, cap_per_session, &text).await;
+                                            notify.notify_waiters();
+                                        }
+                                        Ok(Message::Binary(_)) => {
+                                            debug!(instance_id = %instance_id, "acp_ws: ignoring binary frame");
+                                        }
+                                        Ok(Message::Ping(payload)) => {
+                                            let _ = sink.send(Message::Pong(payload)).await;
+                                        }
+                                        Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+                                        Ok(Message::Close(reason)) => {
+                                            info!(instance_id = %instance_id, "acp_ws: server closed: {reason:?}");
+                                            break;
+                                        }
+                                        Err(err) => {
+                                            warn!(instance_id = %instance_id, "acp_ws: read error: {err}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                else => break,
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let mut g = inner.lock().await;
+                        g.connected = false;
+                        g.last_error = Some(err.to_string());
+                        drop(g);
+                        warn!(instance_id = %instance_id, "acp_ws: connect failed, retry in {backoff}s: {err}");
+                    }
+                }
             }
         }
 
@@ -362,9 +517,9 @@ async fn run_loop(
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
-            _ = target_changed.notified() => {
-                backoff = initial_backoff;
-                continue;
+            _ = shutdown.notified() => {
+                info!(instance_id = %instance_id, "acp_ws: shutdown during backoff");
+                return;
             }
         }
         backoff = (backoff * 2).min(max_backoff);
@@ -379,8 +534,10 @@ async fn connect(
     let mut req = url.into_client_request()?;
     if let Some(t) = token {
         let value = format!("Bearer {t}");
-        req.headers_mut()
-            .insert(AUTHORIZATION, value.parse().map_err(|e| anyhow!("bad token header: {e}"))?);
+        req.headers_mut().insert(
+            AUTHORIZATION,
+            value.parse().map_err(|e| anyhow!("bad token header: {e}"))?,
+        );
     }
     let (ws, _resp) = tokio_tungstenite::connect_async(req).await?;
     Ok(ws)
@@ -432,18 +589,54 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
     if is_snapshot(&kind) {
         g.latest_snapshot = Some(event.clone());
         g.latest_snapshot_text = Some(text.to_string());
-    }
-
-    if is_permission_request(&kind) {
-        if let Some(req_id) = payload.get("request_id").and_then(Value::as_str) {
-            g.pending_permissions
-                .insert(req_id.to_owned(), event.clone());
+        // Rebuild live session/project maps from the authoritative snapshot.
+        if let Some(arr) = payload.get("sessions").and_then(Value::as_array) {
+            g.live_sessions.clear();
+            for s in arr {
+                let sid = s
+                    .get("acp_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if let Some(sid) = sid {
+                    g.live_sessions.insert(sid, s.clone());
+                }
+            }
+        }
+        if let Some(arr) = payload.get("projects").and_then(Value::as_array) {
+            g.live_projects = arr.clone();
         }
     }
 
-    // Permission resolution: a SessionEnded for a session clears its pending perms.
+    if is_session_started(&kind)
+        && let Some(sid) = &session_id
+    {
+        // Capture as much SessionInfo as the event carries. Daemon emits a
+        // partial — frontend treats missing fields as defaults. If a fuller
+        // Snapshot arrives later it overwrites this entry.
+        g.live_sessions
+            .entry(sid.clone())
+            .and_modify(|v| {
+                if let Value::Object(existing) = v
+                    && let Value::Object(incoming) = &payload
+                {
+                    for (k, val) in incoming {
+                        existing.insert(k.clone(), val.clone());
+                    }
+                }
+            })
+            .or_insert_with(|| payload.clone());
+    }
+
+    if is_permission_request(&kind)
+        && let Some(req_id) = payload.get("request_id").and_then(Value::as_str)
+    {
+        g.pending_permissions
+            .insert(req_id.to_owned(), event.clone());
+    }
+
     if is_session_ended(&kind) {
         if let Some(sid) = &session_id {
+            g.live_sessions.remove(sid);
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
         }
@@ -476,14 +669,11 @@ fn extract_envelope(value: &Value) -> Option<(String, Value)> {
     None
 }
 
-/// Mark a pending permission as resolved. Manager calls this from the
-/// `acp_permission_respond` tool wrapper after sending the WS response.
+/// Helper kept for the existing MCP `acp_permission_respond` call site.
 pub async fn mark_permission_resolved(handle: &AcpWsHandle, request_id: &str) {
-    let mut g = handle.inner.lock().await;
-    g.pending_permissions.remove(request_id);
+    handle.mark_permission_resolved(request_id).await;
 }
 
-/// Ensure cap_per_session is reachable from outside if needed in future.
 #[allow(dead_code)]
 impl AcpWsHandle {
     pub fn cap_per_session(&self) -> usize {

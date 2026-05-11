@@ -299,10 +299,10 @@ async fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(50_usize);
 
-    let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
+    let acp_registry = rust_rag::acp_ws::AcpWsRegistry::new(&config.acp_ws);
     let mut state = state;
     state.md_chunker = md_chunker;
-    state.acp_ws = acp_ws_handle.clone();
+    state.acp_ws = Some(acp_registry.clone());
     if let Some(r) = reranker {
         state.reranker = Some(r);
         state.reranker_top_n = reranker_top_n.max(1);
@@ -312,24 +312,38 @@ async fn main() -> Result<()> {
     // When the service runs in k8s on a subnet that can't see the user's
     // network (multicast doesn't traverse), set RAG_ACP_DISCOVERY_MODE=http
     // so clients register over HTTP instead.
+    //
+    // Every discovered/registered instance gets its own worker in the
+    // registry, so multiple daemons can be served concurrently to multiple
+    // browser tabs.
     let acp_token = config.acp_ws.token.clone();
-    let ws_for_disc = acp_ws_handle.clone();
-    let on_select = move |instance: &rust_rag::acp_discovery::AcpInstance| {
-        let Some(handle) = ws_for_disc.clone() else { return };
-        let url = instance.url.clone();
-        let token = acp_token.clone();
-        tokio::spawn(async move {
-            handle.set_target(url, token).await;
-        });
+    let registry_for_register = acp_registry.clone();
+    let registry_for_unregister = acp_registry.clone();
+    let hooks = rust_rag::acp_discovery::DiscoveryHooks {
+        on_register: std::sync::Arc::new(move |instance| {
+            let registry = registry_for_register.clone();
+            let name = instance.name.clone();
+            let url = instance.url.clone();
+            let token = acp_token.clone();
+            tokio::spawn(async move {
+                registry.register(name, url, token).await;
+            });
+        }),
+        on_unregister: std::sync::Arc::new(move |name| {
+            let registry = registry_for_unregister.clone();
+            let name = name.to_owned();
+            tokio::spawn(async move {
+                registry.unregister(&name).await;
+            });
+        }),
+        on_select: std::sync::Arc::new(|_| {}),
     };
     let discovery_mode = std::env::var("RAG_ACP_DISCOVERY_MODE")
         .unwrap_or_else(|_| "mdns".to_owned())
         .to_lowercase();
     let discovery = match discovery_mode.as_str() {
-        "http" | "register" | "off" => {
-            Some(rust_rag::acp_discovery::spawn_http_only(on_select))
-        }
-        _ => rust_rag::acp_discovery::spawn(on_select),
+        "http" | "register" | "off" => Some(rust_rag::acp_discovery::spawn_http_only(hooks)),
+        _ => rust_rag::acp_discovery::spawn(hooks),
     };
     state.acp_discovery = discovery;
 
