@@ -24,8 +24,11 @@ export interface ModelProfile {
 
 const DEFAULT_TEXT_URL =
   "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
+// Gemma 3n is gated on HF (401 without token). Try Gemma 4 web.task with
+// maxNumImages set — if MediaPipe rejects the modality, the error will be
+// explicit and we can swap back. Cheap experiment.
 const DEFAULT_VISION_URL =
-  "https://huggingface.co/google/gemma-3n-E2B-it-litert-lm/resolve/main/gemma-3n-E2B-it-int4-Web.litertlm"
+  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
 
 /** Resolve a model URL by checking common env / global override slots. */
 function resolveUrl(globalKey: string, fallback: string): string {
