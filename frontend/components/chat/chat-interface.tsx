@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, CheckCircle2 } from "lucide-react"
+import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, CheckCircle2, Sparkles, Cpu } from "lucide-react"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type {
@@ -13,11 +13,19 @@ import type {
 } from "@/lib/api/types"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
+import { runLocalChat, type LocalChatMessage, type LocalToolCall } from "@/lib/ai/local-chat"
+import { formatLoadProgress } from "@/lib/ai/llm-client"
+import { useLlmStatus } from "@/lib/ai/use-llm-status"
 
 interface ExtendedMessage extends ChatCompletionMessage {
   reasoning?: string
   tool_results?: Record<string, string>
+  local_tool_calls?: LocalToolCall[]
 }
+
+const WEBGPU_AVAILABLE =
+  typeof navigator !== "undefined" &&
+  typeof (navigator as unknown as { gpu?: unknown }).gpu !== "undefined"
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<ExtendedMessage[]>([
@@ -25,6 +33,8 @@ export function ChatInterface() {
   ])
   const [input, setInput] = useState("")
   const [isStreaming, setIsStreaming] = useState(false)
+  const [localMode, setLocalMode] = useState(false)
+  const llmStatus = useLlmStatus()
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -35,6 +45,46 @@ export function ChatInterface() {
   useEffect(() => {
     scrollToBottom()
   }, [messages, scrollToBottom])
+
+  const handleLocalSend = async (newMessages: ExtendedMessage[]) => {
+    abortControllerRef.current = new AbortController()
+    const history: LocalChatMessage[] = newMessages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+      }))
+
+    try {
+      await runLocalChat({
+        history,
+        signal: abortControllerRef.current.signal,
+        onUpdate: ({ partialAnswer, toolCalls }) => {
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (last.role === "assistant") {
+              last.content = partialAnswer ?? ""
+              if (toolCalls) last.local_tool_calls = toolCalls
+            }
+            return next
+          })
+        },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg !== "aborted") {
+        setMessages((prev) => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last.role === "assistant") last.content = `Local chat error: ${msg}`
+          return next
+        })
+      }
+    } finally {
+      setIsStreaming(false)
+    }
+  }
 
   const handleSend = async () => {
     if (!input.trim() || isStreaming) return
@@ -47,6 +97,11 @@ export function ChatInterface() {
 
     const assistantMessage: ExtendedMessage = { role: "assistant", content: "", reasoning: "" }
     setMessages(prev => [...prev, assistantMessage])
+
+    if (localMode) {
+      await handleLocalSend([...newMessages, assistantMessage])
+      return
+    }
 
     abortControllerRef.current = new AbortController()
 
@@ -194,6 +249,33 @@ export function ChatInterface() {
                   </Accordion>
                 )}
 
+                {/* Local tool calls (on-device chat) */}
+                {message.local_tool_calls?.map((tc, idx) => (
+                  <div key={`local-${idx}`} className="w-full border border-primary/20 bg-primary/5 overflow-hidden text-xs">
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/10 font-mono font-bold text-primary">
+                      <Cpu className="size-3" />
+                      <span>{tc.name}</span>
+                      {tc.result && !tc.error && <CheckCircle2 className="size-3 text-green-500 ml-auto" />}
+                      {tc.error && <span className="ml-auto text-destructive">err</span>}
+                    </div>
+                    <div className="p-2 font-mono text-[10px] opacity-70 truncate" title={JSON.stringify(tc.args)}>
+                      {JSON.stringify(tc.args)}
+                    </div>
+                    {tc.result && (
+                      <Accordion type="single" collapsible className="w-full border-t border-primary/5">
+                        <AccordionItem value="result" className="border-none">
+                          <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
+                            View result
+                          </AccordionTrigger>
+                          <AccordionContent className="p-3 bg-muted/20 max-h-40 overflow-auto border-t border-primary/5">
+                            <pre className="text-[10px] whitespace-pre-wrap font-mono">{tc.result}</pre>
+                          </AccordionContent>
+                        </AccordionItem>
+                      </Accordion>
+                    )}
+                  </div>
+                ))}
+
                 {/* Tool calls */}
                 {message.tool_calls?.map((tc, idx) => (
                   <div key={idx} className="w-full border border-primary/20 bg-primary/5 overflow-hidden text-xs">
@@ -294,14 +376,38 @@ export function ChatInterface() {
           </div>
 
           <div className="flex items-center justify-between mt-2">
-            <div className="flex items-center gap-4 opacity-30">
-              <p className="font-mono text-[9px] text-muted-foreground flex items-center gap-1.5 uppercase tracking-[1px]">
-                <Terminal className="size-2.5" /> Agents enabled
-              </p>
-              <div className="w-px h-3 bg-border" />
-              <p className="font-mono text-[9px] text-muted-foreground flex items-center gap-1.5 uppercase tracking-[1px]">
-                <Brain className="size-2.5" /> Cognitive RAG
-              </p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => WEBGPU_AVAILABLE && setLocalMode((v) => !v)}
+                disabled={!WEBGPU_AVAILABLE}
+                title={WEBGPU_AVAILABLE ? "Toggle on-device Gemma + RAG tools" : "WebGPU not available"}
+                className={cn(
+                  "flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[1.5px] px-2 py-1 border transition-colors",
+                  localMode
+                    ? "border-primary/50 text-primary bg-primary/10"
+                    : "border-border text-muted-foreground/50 hover:text-foreground",
+                  !WEBGPU_AVAILABLE && "opacity-30 cursor-not-allowed"
+                )}
+              >
+                {localMode ? <Sparkles className="size-2.5" /> : <Brain className="size-2.5" />}
+                {localMode ? "Local · Gemma" : "Backend"}
+              </button>
+              {localMode && llmStatus.kind === "loading" && (
+                <span className="font-mono text-[9px] text-muted-foreground tabular-nums">
+                  {formatLoadProgress(llmStatus)}
+                </span>
+              )}
+              {localMode && llmStatus.kind === "error" && (
+                <span className="font-mono text-[9px] text-destructive truncate max-w-[16rem]" title={llmStatus.message}>
+                  {llmStatus.message}
+                </span>
+              )}
+              {!localMode && (
+                <p className="font-mono text-[9px] text-muted-foreground/30 flex items-center gap-1.5 uppercase tracking-[1px]">
+                  <Terminal className="size-2.5" /> Backend agent
+                </p>
+              )}
             </div>
             <button
               type="button"
