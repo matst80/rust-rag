@@ -44,31 +44,54 @@ class LlmClient extends EventTarget {
     let cache: Cache | null = null
     try {
       cache = await caches.open(cacheName)
-    } catch {
-      cache = null
+    } catch (err) {
+      console.warn("[llm] caches.open failed", err)
     }
 
-    // Cache hit: pull from CacheStorage, still stream so the user sees progress.
     if (cache) {
-      const cached = await cache.match(modelUrl)
-      if (cached) {
-        return this.streamBody(cached, "cache")
+      try {
+        // ignoreVary because HF sometimes sends Vary: * which otherwise misses.
+        const cached = await cache.match(modelUrl, { ignoreVary: true })
+        if (cached) {
+          console.info("[llm] model cache HIT", modelUrl)
+          return this.streamBody(cached, "cache")
+        }
+        console.info("[llm] model cache MISS", modelUrl)
+      } catch (err) {
+        console.warn("[llm] cache.match threw", err)
       }
     }
 
+    // Strip headers that block caching (Vary: *, Set-Cookie). We rebuild the
+    // Response with the same body but only the headers we care about.
     const response = await fetch(modelUrl)
     if (!response.ok) {
       throw new Error(
         `Model fetch failed: ${response.status} ${response.statusText}`
       )
     }
-    // Store before consuming the original body so we can use a clone for parsing.
+
     if (cache) {
       try {
-        await cache.put(modelUrl, response.clone())
+        const cloneForStore = response.clone()
+        // Re-wrap to drop Vary and other troublesome headers before cache.put.
+        const sanitizedHeaders = new Headers()
+        const ct = cloneForStore.headers.get("content-type")
+        const cl = cloneForStore.headers.get("content-length")
+        if (ct) sanitizedHeaders.set("content-type", ct)
+        if (cl) sanitizedHeaders.set("content-length", cl)
+        const sanitized = new Response(cloneForStore.body, {
+          status: cloneForStore.status,
+          statusText: cloneForStore.statusText,
+          headers: sanitizedHeaders,
+        })
+        await cache.put(modelUrl, sanitized)
+        console.info("[llm] model cached to CacheStorage", modelUrl)
       } catch (err) {
-        // Quota or opaque-response errors — ignore, fall back to one-shot use.
-        console.warn("[llm] cache.put failed; model will re-download next time", err)
+        console.warn(
+          "[llm] cache.put failed; model will re-download next time",
+          err
+        )
       }
     }
     return this.streamBody(response, "network")
