@@ -151,7 +151,25 @@ export function AgentChat() {
 		return true
 	}, [])
 
+	const workersRef = useRef<WorkerStatus[]>([])
+	useEffect(() => {
+		workersRef.current = workers
+	}, [workers])
+
 	const connect = useCallback(async () => {
+		// Backend rejects WS upgrades when no workers are registered or when
+		// multiple are registered and ?instance= is missing. Avoid the
+		// failed-handshake noise by reading worker state first.
+		const target = activeInstanceRef.current
+		const ws_count = workersRef.current.length
+		if (ws_count === 0) {
+			setConn({ status: "disabled", error: "no ACP instances registered" })
+			return
+		}
+		if (!target && ws_count > 1) {
+			setConn({ status: "disabled", error: "pick an instance" })
+			return
+		}
 		setConn({ status: "connecting" })
 		let url: string
 		try {
@@ -187,7 +205,6 @@ export function AgentChat() {
 		// Backend resolves per-instance worker from ?instance=. Skip the param
 		// when no selection yet — backend auto-picks the sole worker if exactly
 		// one is registered.
-		const target = activeInstanceRef.current
 		if (target) {
 			const sep = wsUrl.includes("?") ? "&" : "?"
 			wsUrl = `${wsUrl}${sep}instance=${encodeURIComponent(target)}`
@@ -342,6 +359,18 @@ export function AgentChat() {
 			}, delay)
 		}
 	}, [activeSessionId])
+
+	// Auto-(re)connect when a viable target appears. Covers the "first
+	// daemon registers mid-session" case without forcing the user to
+	// refresh the page.
+	useEffect(() => {
+		if (wsRef.current) return
+		if (conn.status === "open" || conn.status === "connecting") return
+		const resolvable = workers.length === 1 || !!activeInstance
+		if (!resolvable) return
+		connect()
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [workers, activeInstance])
 
 	useEffect(() => {
 		// Fetch instances first so the initial WS connect can carry
