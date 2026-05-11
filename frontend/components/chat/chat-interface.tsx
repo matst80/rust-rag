@@ -23,9 +23,10 @@ interface ExtendedMessage extends ChatCompletionMessage {
   local_tool_calls?: LocalToolCall[]
 }
 
-const WEBGPU_AVAILABLE =
-  typeof navigator !== "undefined" &&
-  typeof (navigator as unknown as { gpu?: unknown }).gpu !== "undefined"
+function detectWebGpu(): boolean {
+  if (typeof navigator === "undefined") return false
+  return Boolean((navigator as unknown as { gpu?: unknown }).gpu)
+}
 
 export function ChatInterface() {
   const [messages, setMessages] = useState<ExtendedMessage[]>([
@@ -34,6 +35,8 @@ export function ChatInterface() {
   const [input, setInput] = useState("")
   const [isStreaming, setIsStreaming] = useState(false)
   const [localMode, setLocalMode] = useState(false)
+  const [webgpuAvailable, setWebgpuAvailable] = useState(false)
+  useEffect(() => { setWebgpuAvailable(detectWebGpu()) }, [])
   const llmStatus = useLlmStatus()
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -379,15 +382,15 @@ export function ChatInterface() {
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => WEBGPU_AVAILABLE && setLocalMode((v) => !v)}
-                disabled={!WEBGPU_AVAILABLE}
-                title={WEBGPU_AVAILABLE ? "Toggle on-device Gemma + RAG tools" : "WebGPU not available"}
+                onClick={() => webgpuAvailable && setLocalMode((v) => !v)}
+                disabled={!webgpuAvailable}
+                title={webgpuAvailable ? "Toggle on-device Gemma + RAG tools" : "WebGPU not available"}
                 className={cn(
                   "flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[1.5px] px-2 py-1 border transition-colors",
                   localMode
                     ? "border-primary/50 text-primary bg-primary/10"
                     : "border-border text-muted-foreground/50 hover:text-foreground",
-                  !WEBGPU_AVAILABLE && "opacity-30 cursor-not-allowed"
+                  !webgpuAvailable && "opacity-30 cursor-not-allowed"
                 )}
               >
                 {localMode ? <Sparkles className="size-2.5" /> : <Brain className="size-2.5" />}
