@@ -18,6 +18,7 @@ import { MarkdownView } from "./markdown-view"
 import { EmbeddedGraph } from "../graph/embedded-graph"
 import { AttachmentsPanel } from "./attachments-panel"
 import { WikiPathPicker } from "./wiki-path-picker"
+import { AiAssistPanel } from "../ai/ai-assist-panel"
 import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -192,9 +193,23 @@ export function EntryDetail({ id }: EntryDetailProps) {
 
             {/* Content */}
             <div>
-              <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
-                Content
-              </h2>
+              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                  Content
+                </h2>
+                <AiAssistPanel
+                  label="Explain this"
+                  buildPrompt={() =>
+                    `Summarize the following note in 3-5 sentences (markdown). Identify what it is, why it exists, and the single most useful takeaway. If it's a runbook or list, surface the key steps as bullets.
+
+Title: ${entry.id}
+Source: ${entry.source_id}
+
+---
+${(entry.text ?? "").slice(0, 6000)}`
+                  }
+                />
+              </div>
               <div className="border border-border bg-card p-6">
                 <MarkdownView content={entry.text} />
               </div>
