@@ -4,8 +4,12 @@ import { useEffect, useRef, useState } from "react"
 import { Sparkles, X, LoaderCircle, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MarkdownView } from "@/components/entries/markdown-view"
-import { getLlmClient, formatLoadProgress } from "@/lib/ai/llm-client"
-import { useLlmStatus } from "@/lib/ai/use-llm-status"
+import {
+  getLlmClient,
+  formatLoadProgress,
+  isWebGpuAvailable,
+  useLlmStatus,
+} from "@rust-rag/llm"
 
 interface AiAssistPanelProps {
   /** Short button label. */
@@ -23,9 +27,8 @@ export function AiAssistPanel({ label, buildPrompt, hint }: AiAssistPanelProps) 
   const [error, setError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
-  const supported =
-    typeof navigator !== "undefined" &&
-    typeof (navigator as unknown as { gpu?: unknown }).gpu !== "undefined"
+  const [supported, setSupported] = useState(false)
+  useEffect(() => { setSupported(isWebGpuAvailable()) }, [])
 
   useEffect(
     () => () => {

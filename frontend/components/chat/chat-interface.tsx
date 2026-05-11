@@ -13,9 +13,14 @@ import type {
 } from "@/lib/api/types"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
-import { runLocalChat, type LocalChatMessage, type LocalToolCall } from "@/lib/ai/local-chat"
-import { formatLoadProgress } from "@/lib/ai/llm-client"
-import { useLlmStatus } from "@/lib/ai/use-llm-status"
+import {
+  runLocalChat,
+  formatLoadProgress,
+  useLlmStatus,
+  type LocalChatMessage,
+  type LocalToolCall,
+} from "@rust-rag/llm"
+import { buildRagTools } from "@/lib/ai/tools"
 
 interface ExtendedMessage extends ChatCompletionMessage {
   reasoning?: string
@@ -61,6 +66,7 @@ export function ChatInterface() {
     try {
       await runLocalChat({
         history,
+        tools: buildRagTools(),
         signal: abortControllerRef.current.signal,
         onUpdate: ({ partialAnswer, toolCalls }) => {
           setMessages((prev) => {

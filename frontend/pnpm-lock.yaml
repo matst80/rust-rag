@@ -95,6 +95,9 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: 1.2.8
         version: 1.2.8(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@rust-rag/llm':
+        specifier: file:../shared/llm
+        version: file:../shared/llm(@mediapipe/tasks-genai@0.10.27)(react@19.2.4)
       '@rust-rag/ui':
         specifier: file:../shared/ui
         version: file:../shared/ui(react@19.2.4)
@@ -1210,6 +1213,12 @@ packages:
         optional: true
       react-native:
         optional: true
+
+  '@rust-rag/llm@file:../shared/llm':
+    resolution: {directory: ../shared/llm, type: directory}
+    peerDependencies:
+      '@mediapipe/tasks-genai': ^0.10.27
+      react: '>=18'
 
   '@rust-rag/ui@file:../shared/ui':
     resolution: {directory: ../shared/ui, type: directory}
@@ -3549,6 +3558,11 @@ snapshots:
     transitivePeerDependencies:
       - '@types/react'
       - immer
+
+  '@rust-rag/llm@file:../shared/llm(@mediapipe/tasks-genai@0.10.27)(react@19.2.4)':
+    dependencies:
+      '@mediapipe/tasks-genai': 0.10.27
+      react: 19.2.4
 
   '@rust-rag/ui@file:../shared/ui(react@19.2.4)':
     dependencies:

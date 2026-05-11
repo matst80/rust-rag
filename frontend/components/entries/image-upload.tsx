@@ -1,14 +1,27 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Upload, ImageIcon, X, CheckCircle } from "lucide-react"
+import { ArrowLeft, Upload, ImageIcon, X, CheckCircle, Sparkles, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { uploadImage } from "@/lib/api"
+import { uploadImage, api } from "@/lib/api"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import {
+  captionImage,
+  formatLoadProgress,
+  isWebGpuAvailable,
+  useLlmStatus,
+} from "@rust-rag/llm"
+import { MarkdownView } from "./markdown-view"
+
+const IMAGE_PROMPT = `You are extracting text and describing this image for a personal knowledge base.
+
+If the image contains readable text (screenshot, document, whiteboard), transcribe it verbatim in markdown.
+If it is a photo or diagram, write 2-4 sentences describing the scene, then list any visible text.
+Output plain markdown only, no preamble.`
 
 export function ImageUpload() {
   const router = useRouter()
@@ -17,6 +30,15 @@ export function ImageUpload() {
   const [sourceId, setSourceId] = useState("images")
   const [uploading, setUploading] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
+  const [webgpu, setWebgpu] = useState(false)
+  const [useLocal, setUseLocal] = useState(true)
+  const [caption, setCaption] = useState<string>("")
+  const [captioning, setCaptioning] = useState(false)
+  const visionStatus = useLlmStatus("vision")
+  const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => { setWebgpu(isWebGpuAvailable()) }, [])
+  useEffect(() => { if (!webgpu) setUseLocal(false) }, [webgpu])
 
   const handleFile = useCallback((f: File) => {
     if (!f.type.startsWith("image/")) {
@@ -120,14 +142,68 @@ export function ImageUpload() {
     })
   }
 
+  const runLocalCaption = useCallback(async (sourceFile: File): Promise<string> => {
+    setCaptioning(true)
+    setCaption("")
+    abortRef.current = new AbortController()
+    try {
+      const scaledBlob = await scaleImage(sourceFile)
+      const text = await captionImage(scaledBlob, {
+        prompt: IMAGE_PROMPT,
+        onToken: (partial) => setCaption(partial),
+        signal: abortRef.current.signal,
+      })
+      setCaption(text)
+      return text
+    } catch (err) {
+      console.error("Caption error", err)
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg !== "aborted") toast.error(`Local caption failed: ${msg}`)
+      return ""
+    } finally {
+      setCaptioning(false)
+    }
+  }, [])
+
+  const handleRecaption = () => {
+    if (file) runLocalCaption(file)
+  }
+
   const handleUpload = async () => {
     if (!file) return
     setUploading(true)
     try {
       const scaledBlob = await scaleImage(file)
       const scaledFile = new File([scaledBlob], file.name, { type: file.type })
+
+      if (useLocal && webgpu) {
+        // Caption locally if not already done, then create entry + attach.
+        let text = caption
+        if (!text) {
+          text = await runLocalCaption(file)
+        }
+        if (!text) throw new Error("No caption produced")
+        const entry = await api.items.create({
+          text,
+          source_id: sourceId || "images",
+          metadata: {
+            source_type: "image",
+            original_filename: file.name,
+            captioned_by: "gemma-3n-E2B-it",
+          },
+        })
+        try {
+          await api.attachments.upload(entry.id, scaledFile)
+        } catch (err) {
+          console.warn("Attachment upload failed (entry already created)", err)
+        }
+        toast.success("Image indexed locally")
+        router.push(`/entries/${encodeURIComponent(entry.id)}`)
+        return
+      }
+
       const result = await uploadImage(scaledFile, sourceId)
-      toast.success("Image indexed successfully")
+      toast.success("Image indexed (server)")
       router.push(`/entries/${encodeURIComponent(result.id)}`)
     } catch (err) {
       console.error("Upload error:", err)
@@ -238,6 +314,76 @@ export function ImageUpload() {
           className="font-mono text-sm"
         />
       </div>
+
+      {/* Engine toggle */}
+      <div className="flex items-center justify-between gap-3 px-3 py-2 border border-border bg-card">
+        <div className="flex items-center gap-2 min-w-0">
+          <Sparkles className={cn("size-3.5 shrink-0", useLocal ? "text-primary" : "text-muted-foreground/40")} />
+          <div className="min-w-0">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+              {useLocal ? "Caption locally (Gemma 3n · private)" : "Caption on backend (Claude)"}
+            </p>
+            {useLocal && visionStatus.kind === "loading" && (
+              <p className="font-mono text-[9px] text-muted-foreground/70 tabular-nums">
+                {formatLoadProgress(visionStatus)}
+              </p>
+            )}
+            {useLocal && visionStatus.kind === "error" && (
+              <p className="font-mono text-[9px] text-destructive truncate">
+                {visionStatus.message}
+              </p>
+            )}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => webgpu && setUseLocal((v) => !v)}
+          disabled={!webgpu}
+          className={cn(
+            "font-mono text-[9px] uppercase tracking-[1.5px] px-2 py-1 border transition-colors",
+            useLocal
+              ? "border-primary/50 text-primary bg-primary/10"
+              : "border-border text-muted-foreground hover:text-foreground",
+            !webgpu && "opacity-30 cursor-not-allowed"
+          )}
+          title={webgpu ? "Toggle engine" : "WebGPU not available — server only"}
+        >
+          {useLocal ? "Local" : "Server"}
+        </button>
+      </div>
+
+      {/* Caption preview */}
+      {file && useLocal && (caption || captioning) && (
+        <div className="relative border border-primary/20 bg-primary/[0.02] p-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="size-3 text-primary" />
+              <span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-primary/80">
+                Extracted caption
+              </span>
+              {captioning && (
+                <span className="font-mono text-[9px] text-primary/60 uppercase tracking-widest animate-pulse">
+                  generating…
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleRecaption}
+              disabled={captioning}
+              className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60 hover:text-primary flex items-center gap-1 disabled:opacity-30"
+            >
+              <RotateCcw className="size-2.5" />
+              Re-caption
+            </button>
+          </div>
+          {caption ? (
+            <MarkdownView content={caption} />
+          ) : (
+            <p className="text-sm text-muted-foreground/60 italic">…</p>
+          )}
+        </div>
+      )}
 
       {/* Upload button */}
       <Button

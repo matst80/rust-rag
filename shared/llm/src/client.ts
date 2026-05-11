@@ -1,15 +1,68 @@
-"use client"
+// Client-side LLM inference via @mediapipe/tasks-genai (LiteRT-powered WebGPU).
+// One instance per model profile (text vs vision). Cached in CacheStorage.
 
-// Client-side LLM inference via @mediapipe/tasks-genai (LiteRT-powered WebGPU
-// runtime). Singleton + EventTarget so multiple UI components share one model.
-
-import type { LlmInference as LlmInferenceType } from "@mediapipe/tasks-genai"
-
-const DEFAULT_MODEL_URL =
-  process.env.NEXT_PUBLIC_LLM_MODEL_URL ??
-  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
+import type {
+  LlmInference as LlmInferenceType,
+  Prompt,
+} from "@mediapipe/tasks-genai"
 
 const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai/wasm"
+const CACHE_NAME = "litert-models-v1"
+
+export interface ModelProfile {
+  url: string
+  /** Passed straight to LlmInference.createFromOptions. */
+  options: {
+    maxTokens?: number
+    topK?: number
+    temperature?: number
+    randomSeed?: number
+    maxNumImages?: number
+    supportAudio?: boolean
+  }
+}
+
+const DEFAULT_TEXT_URL =
+  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
+const DEFAULT_VISION_URL =
+  "https://huggingface.co/google/gemma-3n-E2B-it-litert-lm/resolve/main/gemma-3n-E2B-it-int4-Web.litertlm"
+
+/** Resolve a model URL by checking common env / global override slots. */
+function resolveUrl(globalKey: string, fallback: string): string {
+  const proc = (globalThis as unknown as {
+    process?: { env?: Record<string, string | undefined> }
+  }).process
+  const env = proc?.env
+  if (env) {
+    if (globalKey === "text" && env.NEXT_PUBLIC_LLM_MODEL_URL)
+      return env.NEXT_PUBLIC_LLM_MODEL_URL
+    if (globalKey === "vision" && env.NEXT_PUBLIC_LLM_VISION_MODEL_URL)
+      return env.NEXT_PUBLIC_LLM_VISION_MODEL_URL
+  }
+  const g = globalThis as unknown as Record<string, string | undefined>
+  const key = globalKey === "vision" ? "RUST_RAG_LLM_VISION_URL" : "RUST_RAG_LLM_URL"
+  if (g[key]) return g[key] as string
+  return fallback
+}
+
+export const MODEL_PROFILES = {
+  text: (): ModelProfile => ({
+    url: resolveUrl("text", DEFAULT_TEXT_URL),
+    options: { maxTokens: 2048, topK: 40, temperature: 0.6, randomSeed: 1 },
+  }),
+  vision: (): ModelProfile => ({
+    url: resolveUrl("vision", DEFAULT_VISION_URL),
+    options: {
+      maxTokens: 1024,
+      topK: 40,
+      temperature: 0.4,
+      randomSeed: 1,
+      maxNumImages: 1,
+    },
+  }),
+}
+
+export type ProfileKey = keyof typeof MODEL_PROFILES
 
 export type LlmStatus =
   | { kind: "idle" }
@@ -22,8 +75,11 @@ class LlmClient extends EventTarget {
   private llm: LlmInferenceType | null = null
   private loadPromise: Promise<LlmInferenceType> | null = null
   private _status: LlmStatus = { kind: "idle" }
-  // Serialize generateResponse calls — MediaPipe only allows one at a time.
   private inflight: Promise<unknown> = Promise.resolve()
+
+  constructor(public readonly profile: ProfileKey) {
+    super()
+  }
 
   get status(): LlmStatus {
     return this._status
@@ -40,17 +96,15 @@ class LlmClient extends EventTarget {
   }
 
   private async fetchModelBuffer(modelUrl: string): Promise<Uint8Array> {
-    const cacheName = "litert-models-v1"
     let cache: Cache | null = null
     try {
-      cache = await caches.open(cacheName)
+      cache = await caches.open(CACHE_NAME)
     } catch (err) {
       console.warn("[llm] caches.open failed", err)
     }
 
     if (cache) {
       try {
-        // ignoreVary because HF sometimes sends Vary: * which otherwise misses.
         const cached = await cache.match(modelUrl, { ignoreVary: true })
         if (cached) {
           console.info("[llm] model cache HIT", modelUrl)
@@ -62,8 +116,6 @@ class LlmClient extends EventTarget {
       }
     }
 
-    // Strip headers that block caching (Vary: *, Set-Cookie). We rebuild the
-    // Response with the same body but only the headers we care about.
     const response = await fetch(modelUrl)
     if (!response.ok) {
       throw new Error(
@@ -74,7 +126,6 @@ class LlmClient extends EventTarget {
     if (cache) {
       try {
         const cloneForStore = response.clone()
-        // Re-wrap to drop Vary and other troublesome headers before cache.put.
         const sanitizedHeaders = new Headers()
         const ct = cloneForStore.headers.get("content-type")
         const cl = cloneForStore.headers.get("content-length")
@@ -127,9 +178,11 @@ class LlmClient extends EventTarget {
     return buffer
   }
 
-  async load(modelUrl: string = DEFAULT_MODEL_URL): Promise<LlmInferenceType> {
+  async load(): Promise<LlmInferenceType> {
     if (this.llm) return this.llm
     if (this.loadPromise) return this.loadPromise
+
+    const profile = MODEL_PROFILES[this.profile]()
 
     this.loadPromise = (async () => {
       try {
@@ -138,19 +191,15 @@ class LlmClient extends EventTarget {
         }
 
         this.setStatus({ kind: "loading", loaded: 0, total: null, source: "network" })
-        const buffer = await this.fetchModelBuffer(modelUrl)
+        const buffer = await this.fetchModelBuffer(profile.url)
 
-        // Dynamic import keeps MediaPipe out of the initial bundle.
         const { FilesetResolver, LlmInference } = await import(
           "@mediapipe/tasks-genai"
         )
         const fileset = await FilesetResolver.forGenAiTasks(WASM_BASE)
         const llm = await LlmInference.createFromOptions(fileset, {
           baseOptions: { modelAssetBuffer: buffer },
-          maxTokens: 2048,
-          topK: 40,
-          temperature: 0.6,
-          randomSeed: 1,
+          ...profile.options,
         })
 
         this.llm = llm
@@ -167,14 +216,13 @@ class LlmClient extends EventTarget {
     return this.loadPromise
   }
 
-  /** Stream a response. `onToken` receives the cumulative text on every chunk. */
+  /** Stream a response. `onToken` receives cumulative text on every chunk. */
   async generate(
-    prompt: string,
+    prompt: Prompt,
     onToken: (partial: string, done: boolean) => void,
     signal?: AbortSignal
   ): Promise<string> {
     const llm = await this.load()
-    // Serialize through inflight queue.
     const previous = this.inflight
     let resolveQueue: () => void = () => {}
     this.inflight = new Promise<void>((r) => { resolveQueue = r })
@@ -199,11 +247,17 @@ class LlmClient extends EventTarget {
   }
 }
 
-let _client: LlmClient | null = null
-export function getLlmClient(): LlmClient {
-  if (!_client) _client = new LlmClient()
-  return _client
+const _clients = new Map<ProfileKey, LlmClient>()
+export function getLlmClient(profile: ProfileKey = "text"): LlmClient {
+  let c = _clients.get(profile)
+  if (!c) {
+    c = new LlmClient(profile)
+    _clients.set(profile, c)
+  }
+  return c
 }
+
+export type { LlmClient }
 
 export function formatLoadProgress(s: LlmStatus): string {
   if (s.kind !== "loading") return ""
@@ -216,11 +270,30 @@ export function formatLoadProgress(s: LlmStatus): string {
   return `${tag} · ${mb(s.loaded)} MB`
 }
 
-/** Drop the cached model — next load will re-download. */
 export async function clearModelCache(): Promise<void> {
   try {
-    await caches.delete("litert-models-v1")
+    await caches.delete(CACHE_NAME)
   } catch {
     // ignore
   }
+}
+
+export async function requestPersistentStorage(): Promise<boolean> {
+  try {
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.storage &&
+      "persist" in navigator.storage
+    ) {
+      return await navigator.storage.persist()
+    }
+  } catch {
+    // ignore
+  }
+  return false
+}
+
+export function isWebGpuAvailable(): boolean {
+  if (typeof navigator === "undefined") return false
+  return Boolean((navigator as unknown as { gpu?: unknown }).gpu)
 }

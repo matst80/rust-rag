@@ -8,7 +8,8 @@
     "notifications",
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "sidePanel"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -17,6 +18,12 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; connect-src 'self' https://*.huggingface.co https://*.hf.co https://cdn.jsdelivr.net https://rag.k6n.net http://localhost:4001"
   },
   "background": {
     "service_worker": "background.js"
