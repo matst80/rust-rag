@@ -391,6 +391,24 @@ impl RustRagMcpServer {
         Ok(format_search_result(&response, &query))
     }
 
+    #[tool(description = "Dry-run LLM analysis of a candidate entry: embeds it, retrieves top-K semantically similar neighbors, then asks an OpenAI-compatible chat backend to classify the candidate vs each neighbor (agrees/refines/supersedes/contradicts/duplicates/unrelated) and extract cluster_hint, tags, title, summary, doc_type, freshness, quality, suggested_edges. Returns the analysis JSON without writing anything. Useful for the entry-view re-run button or for previewing what `store_entry` would auto-tag. Server must be configured with RAG_ANALYSIS_ENABLED + model.")]
+    async fn analyze_entry(
+        &self,
+        Parameters(params): Parameters<crate::api::AnalyzeEntryParams>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        let analysis = crate::api::run_analysis(
+            &self.state,
+            &params.text,
+            params.source_id.as_deref(),
+            params.exclude_id.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        serde_json::to_value(analysis)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
     #[tool(description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or a hand-off message references a specific entry id.")]
     async fn get_entry(
         &self,

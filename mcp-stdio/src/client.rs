@@ -101,6 +101,14 @@ impl RustRagHttpClient {
             .await
     }
 
+    pub async fn analyze_entry(
+        &self,
+        request: &rust_rag::api::AnalyzeEntryParams,
+    ) -> Result<serde_json::Value> {
+        self.send_json(Method::POST, "api/store/analyze", Some(request), None::<&()>)
+            .await
+    }
+
     pub async fn list_categories(&self) -> Result<CategoriesResponse> {
         self.send_json::<(), (), CategoriesResponse>(Method::GET, "admin/categories", None, None)
             .await

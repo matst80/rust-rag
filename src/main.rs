@@ -221,7 +221,8 @@ async fn main() -> Result<()> {
         config.upload_path.clone(),
         config.chunking.clone(),
     )
-    .with_manager(config.manager.clone());
+    .with_manager(config.manager.clone())
+    .with_analysis(config.analysis.clone());
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against

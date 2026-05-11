@@ -219,6 +219,9 @@ pub(super) fn initialize_schema(
     connection.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_items_path ON items(path);",
     )?;
+    ensure_column_exists(connection, "items", "analysis_json", "TEXT")?;
+    ensure_column_exists(connection, "items", "analysis_at", "INTEGER")?;
+    ensure_column_exists(connection, "items", "analysis_model", "TEXT")?;
 
     connection.execute_batch(&format!(
         "

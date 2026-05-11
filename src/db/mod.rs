@@ -597,6 +597,11 @@ pub trait VectorStore: Send + Sync {
         top_k: usize,
         source_id: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
+    /// Persist analysis JSON + model name onto an existing item. Best-effort;
+    /// non-existent ids should return `Ok(false)`.
+    fn update_item_analysis(&self, _id: &str, _json: &str, _model: &str) -> Result<bool> {
+        anyhow::bail!("update_item_analysis not supported by this store")
+    }
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
@@ -1037,6 +1042,22 @@ impl VectorStore for SqliteVectorStore {
             results.push(row?);
         }
         Ok(results)
+    }
+
+    fn update_item_analysis(&self, id: &str, json: &str, model: &str) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let n = connection.execute(
+            "UPDATE items SET analysis_json = ?1, analysis_at = ?2, analysis_model = ?3 WHERE id = ?4",
+            rusqlite::params![json, now, model, id],
+        )?;
+        Ok(n > 0)
     }
 
     fn list_categories(&self) -> Result<Vec<CategorySummary>> {

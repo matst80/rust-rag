@@ -1,5 +1,8 @@
 use crate::{
-    config::{AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig, OpenAiChatConfig},
+    config::{
+        AnalysisConfig, AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig,
+        OpenAiChatConfig,
+    },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
@@ -29,10 +32,15 @@ use std::{
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
 pub mod attachments;
+mod analysis;
 mod auth;
 mod chunking;
 mod multimodal;
@@ -41,6 +49,7 @@ mod presence;
 mod query;
 mod tombstones;
 
+pub use analysis::{AnalyzeEntryParams, run_analysis};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -105,6 +114,7 @@ pub struct AppState {
     pub reranker_top_n: usize,
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
+    pub analysis: Arc<AnalysisConfig>,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
@@ -152,8 +162,14 @@ impl AppState {
                 .timeout(Duration::from_secs(multimodal_timeout))
                 .build()
                 .expect("multimodal http client should build"),
+            analysis: Arc::new(AnalysisConfig::default()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
+    }
+
+    pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
+        self.analysis = Arc::new(analysis);
+        self
     }
 
     pub fn with_manager(mut self, manager: ManagerConfig) -> Self {
@@ -222,6 +238,7 @@ impl AppState {
                 .timeout(Duration::from_secs(120))
                 .build()
                 .expect("multimodal http client should build"),
+            analysis: Arc::new(AnalysisConfig::default()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -856,6 +873,7 @@ pub fn router(state: AppState) -> Router {
         .route("/store", post(store))
         .route("/api/store", post(store))
         .route("/api/store/smart", post(smart_store))
+        .route("/api/store/analyze", post(analysis::analyze_endpoint))
         .route("/search", post(search))
         .route("/api/search", post(search))
         .route(
@@ -919,11 +937,26 @@ pub fn router(state: AppState) -> Router {
             "/api/messages/{id}",
             axum::routing::patch(update_message).delete(delete_message),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ))
+        .with_state(state.clone());
+
+    let mcp_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers([
+            axum::http::HeaderName::from_static("mcp-session-id"),
+        ]);
+    let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
         ))
+        .layer(mcp_cors)
         .with_state(state.clone());
 
     let upload_path = state.upload_path.as_str().to_owned();
@@ -933,6 +966,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
+        .merge(mcp_router)
         .fallback_service(ServeDir::new("static-frontend/dist"))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
@@ -1285,6 +1319,18 @@ pub(crate) async fn store_entry_core(
         .as_deref()
         .unwrap_or(&[id.clone()])
         .to_vec();
+
+    // Best-effort async LLM analysis: contradictions, edges, cluster hint,
+    // tags, freshness. Only fires when RAG_ANALYSIS_ENABLED + model are set.
+    // Skipped for legacy multi-chunk paths since the parent has no row.
+    if chunk_ids.is_none() {
+        analysis::spawn_analysis(
+            state.clone(),
+            id.clone(),
+            request.text.clone(),
+            source_id.clone(),
+        );
+    }
 
     if let Some(sub) = subject {
         let memory = state.user_memory.clone();

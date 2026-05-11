@@ -180,6 +180,20 @@ impl RustRagMcpServer {
     }
 
     #[tool(
+        description = "Dry-run LLM analysis of a candidate entry: embeds it, retrieves top-K semantically similar neighbors, then asks an OpenAI-compatible chat backend to classify the candidate vs each neighbor (agrees/refines/supersedes/contradicts/duplicates/unrelated) and extract cluster_hint, tags, title, summary, doc_type, freshness, quality, suggested_edges. Returns the analysis JSON without writing anything. Useful for previewing what `store_entry` would auto-tag. Server must be configured with RAG_ANALYSIS_ENABLED + model."
+    )]
+    async fn analyze_entry(
+        &self,
+        Parameters(params): Parameters<rust_rag::api::AnalyzeEntryParams>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        self.client
+            .analyze_entry(&params)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(
         description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or when a hand-off message references a specific entry id."
     )]
     async fn get_entry(
