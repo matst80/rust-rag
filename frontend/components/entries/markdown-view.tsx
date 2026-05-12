@@ -53,8 +53,10 @@ export function MarkdownView({ content, className }: MarkdownViewProps) {
             return <>{children}</>
           },
           code({ node, inline, className, children, ...props }: any) {
-            const match = /language-(\w+)/.exec(className || "")
-            const language = match ? match[1] : ""
+            const language = (className || "")
+              .split(" ")
+              .find((c: string) => c.startsWith("language-"))
+              ?.slice(9) || ""
             const isBlock = !inline && (language || String(children).includes("\n"))
             const value = String(children).replace(/\n$/, "")
 
