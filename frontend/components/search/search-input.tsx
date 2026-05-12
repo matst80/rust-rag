@@ -68,7 +68,7 @@ export function SearchInput({
   }
 
   return (
-    <div className="w-full max-w-3xl mx-auto">
+    <div className="w-full max-w-5xl mx-auto">
       <div
         className={cn(
           "relative flex flex-col w-full border border-border bg-card transition-all duration-200",

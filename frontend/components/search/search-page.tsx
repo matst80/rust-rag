@@ -148,7 +148,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
 
   return (
     <div className="relative flex w-full min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
-      <div className="mx-auto w-full max-w-3xl flex-1 flex flex-col px-4 md:px-6">
+      <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-4 md:px-6">
         {!submittedQuery ? (
           <div className="flex flex-1 flex-col items-center justify-start pt-10 md:justify-center md:-mt-16">
 
