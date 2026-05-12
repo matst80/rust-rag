@@ -40,8 +40,7 @@ export function ImageUpload() {
   const visionStatus = useLlmHelperStatus()
   const abortRef = useRef<AbortController | null>(null)
 
-  useEffect(() => { setWebgpu(isWebGpuAvailable()) }, [])
-  useEffect(() => { if (!webgpu) setUseLocal(false) }, [webgpu])
+  useEffect(() => { const hasGpu = isWebGpuAvailable(); setWebgpu(hasGpu); setUseLocal(hasGpu) }, [])
 
   const handleFile = useCallback((f: File) => {
     if (!f.type.startsWith("image/")) {
@@ -191,7 +190,7 @@ export function ImageUpload() {
       const scaledBlob = await scaleImage(file)
       const scaledFile = new File([scaledBlob], file.name, { type: file.type })
 
-      if (useLocal && webgpu) {
+      if (useLocal) {
         // Caption locally if not already done, then create entry + attach.
         let text = caption
         if (!text) {
