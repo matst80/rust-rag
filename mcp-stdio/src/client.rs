@@ -266,6 +266,58 @@ impl RustRagHttpClient {
             .await
     }
 
+    pub async fn list_schemas(
+        &self,
+    ) -> Result<rust_rag::api::schemas::SchemaListResponse> {
+        self.send_json::<(), (), _>(Method::GET, "api/schemas", None, None)
+            .await
+    }
+
+    pub async fn get_schema(
+        &self,
+        type_name: &str,
+    ) -> Result<rust_rag::api::schemas::SchemaPayload> {
+        self.send_json::<(), (), _>(
+            Method::GET,
+            &format!("api/schemas/{type_name}"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn upsert_schema(
+        &self,
+        type_name: &str,
+        request: &rust_rag::api::schemas::UpsertSchemaRequest,
+    ) -> Result<rust_rag::api::schemas::SchemaPayload> {
+        self.send_json(
+            Method::PUT,
+            &format!("api/schemas/{type_name}"),
+            Some(request),
+            None::<&()>,
+        )
+        .await
+    }
+
+    pub async fn delete_schema(
+        &self,
+        type_name: &str,
+        force: bool,
+    ) -> Result<rust_rag::api::schemas::DeleteSchemaResponse> {
+        #[derive(serde::Serialize)]
+        struct Q {
+            force: bool,
+        }
+        self.send_json::<(), _, _>(
+            Method::DELETE,
+            &format!("api/schemas/{type_name}"),
+            None,
+            Some(&Q { force }),
+        )
+        .await
+    }
+
     async fn send_json<Body, Query, Response>(
         &self,
         method: Method,

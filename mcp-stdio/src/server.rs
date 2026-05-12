@@ -94,6 +94,13 @@ pub struct UpdateItemParams {
     /// existing value, or a slash-separated path to set/replace.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional structured-data type name. References a registered schema.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Typed payload validated against the schema for `type`. Supply only
+    /// when updating; omit to leave existing payload unchanged.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -116,6 +123,8 @@ impl From<UpdateItemParams> for UpdateItemRequest {
             metadata: value.metadata,
             source_id: value.source_id,
             path: value.path,
+            type_name: value.type_name,
+            data: value.data,
         }
     }
 }
@@ -304,6 +313,81 @@ impl RustRagMcpServer {
             .map(Json)
             .map_err(stringify_error)
     }
+
+    #[tool(description = "List every registered typed-entry schema. Each row carries the type_name, the JSON Schema, optional title/description, and item_count (how many entries are currently typed). Use to discover what mini-app types are available before calling store_entry with a `type`.")]
+    async fn list_schemas(
+        &self,
+    ) -> Result<Json<rust_rag::api::schemas::SchemaListResponse>, String> {
+        self.client
+            .list_schemas()
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Fetch one typed-entry schema by `type_name`. Returns the JSON Schema plus metadata. Returns an error when the type is not registered.")]
+    async fn get_schema(
+        &self,
+        Parameters(params): Parameters<SchemaTypeParams>,
+    ) -> Result<Json<rust_rag::api::schemas::SchemaPayload>, String> {
+        self.client
+            .get_schema(&params.type_name)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Register or update a typed-entry schema. Supply `type_name`, the `json_schema` (Draft 2020-12 / Draft-07 compatible), and optional `title` / `description`. The schema itself is validated as a JSON Schema before storage. The compiled validator cache for that type is invalidated; subsequent store_entry / update_item calls revalidate against the new schema.")]
+    async fn upsert_schema(
+        &self,
+        Parameters(params): Parameters<UpsertSchemaToolParams>,
+    ) -> Result<Json<rust_rag::api::schemas::SchemaPayload>, String> {
+        let request = rust_rag::api::schemas::UpsertSchemaRequest {
+            type_name: Some(params.type_name.clone()),
+            json_schema: params.json_schema,
+            title: params.title,
+            description: params.description,
+        };
+        self.client
+            .upsert_schema(&params.type_name, &request)
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+
+    #[tool(description = "Delete a typed-entry schema. Refuses (returns an error) when items still reference the type, unless `force=true` — in which case those items have their `type` and `data` cleared. Returns deleted=true and items_unset count.")]
+    async fn delete_schema(
+        &self,
+        Parameters(params): Parameters<DeleteSchemaToolParams>,
+    ) -> Result<Json<rust_rag::api::schemas::DeleteSchemaResponse>, String> {
+        self.client
+            .delete_schema(&params.type_name, params.force.unwrap_or(false))
+            .await
+            .map(Json)
+            .map_err(stringify_error)
+    }
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SchemaTypeParams {
+    pub type_name: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct UpsertSchemaToolParams {
+    pub type_name: String,
+    pub json_schema: serde_json::Value,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct DeleteSchemaToolParams {
+    pub type_name: String,
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 #[rmcp::tool_router(router = graph_tools)]

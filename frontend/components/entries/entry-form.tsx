@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { useCreateItem, useUpdateItem, type Entry, type EntryMetadata } from "@/lib/api"
+import { useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
 import Link from "next/link"
 
@@ -32,6 +33,11 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
   const [newMetaKey, setNewMetaKey] = useState("")
   const [newMetaValue, setNewMetaValue] = useState("")
   const [error, setError] = useState<string | null>(null)
+  const [typeName, setTypeName] = useState<string>(entry?.type ?? "")
+  const [dataText, setDataText] = useState<string>(
+    entry?.data ? JSON.stringify(entry.data, null, 2) : ""
+  )
+  const { data: schemas } = useSchemas()
 
   const isMutating = isCreating || isUpdating
 
@@ -62,8 +68,25 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
       return
     }
 
+    let parsedData: Record<string, unknown> | null = null
+    if (typeName) {
+      if (!dataText.trim()) {
+        setError(`Type "${typeName}" requires a data payload`)
+        return
+      }
+      try {
+        parsedData = JSON.parse(dataText)
+      } catch (err) {
+        setError(`Invalid JSON in data: ${(err as Error).message}`)
+        return
+      }
+    }
+
     try {
       const trimmedPath = path.trim()
+      const typedFields = typeName
+        ? { type: typeName, data: parsedData }
+        : { type: null, data: null }
       if (mode === "create") {
         await createItem({
           ...(id.trim() && { id: id.trim() }),
@@ -71,6 +94,7 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
           source_id: sourceId.trim(),
           metadata,
           ...(trimmedPath && { path: trimmedPath }),
+          ...(typeName && typedFields),
         })
       } else {
         await updateItem({
@@ -78,6 +102,7 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
           source_id: sourceId.trim(),
           metadata,
           path: trimmedPath,
+          ...typedFields,
         })
       }
       mutate("items")
@@ -157,6 +182,46 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
               className="min-h-32"
             />
           </div>
+
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="type">Type (optional)</Label>
+            <select
+              id="type"
+              value={typeName}
+              onChange={(e) => setTypeName(e.target.value)}
+              className="flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm"
+            >
+              <option value="">— Untyped —</option>
+              {schemas?.map((s) => (
+                <option key={s.type_name} value={s.type_name}>
+                  {s.type_name}
+                  {s.title ? ` — ${s.title}` : ""}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Pick a registered schema to attach structured data. Manage schemas at{" "}
+              <Link href="/schemas" className="underline">
+                /schemas
+              </Link>
+              .
+            </p>
+          </div>
+
+          {typeName && (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="data">Data (JSON, validated against {typeName})</Label>
+              <Textarea
+                id="data"
+                value={dataText}
+                onChange={(e) => setDataText(e.target.value)}
+                rows={10}
+                className="font-mono text-xs"
+                spellCheck={false}
+                placeholder="{}"
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 

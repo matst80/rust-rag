@@ -39,6 +39,10 @@ import type {
   ListMessagesRequest,
   MessagesResponse,
   ClearChannelResponse,
+  SchemaDefinition,
+  SchemaListResponse,
+  UpsertSchemaRequest,
+  DeleteSchemaResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -389,6 +393,7 @@ export async function getItems(
     params.append("offset", options.offset.toString())
   if (options.sort_order) params.append("sort_order", options.sort_order)
   if (options.path_prefix) params.append("path_prefix", options.path_prefix)
+  if (options.type) params.append("type", options.type)
 
   const queryString = params.toString() ? `?${params.toString()}` : ""
   const response = await request<ItemsResponse>(`/admin/items${queryString}`)
@@ -788,4 +793,41 @@ export const api = {
     create: createEdge,
     delete: deleteEdge,
   },
+  schemas: {
+    list: listSchemas,
+    get: getSchema,
+    upsert: upsertSchema,
+    delete: deleteSchema,
+  },
+}
+
+// Schemas (typed-entry definitions)
+export async function listSchemas(): Promise<SchemaDefinition[]> {
+  const response = await request<SchemaListResponse>("/api/schemas")
+  return ensureArray(response.schemas, "schemas")
+}
+
+export async function getSchema(typeName: string): Promise<SchemaDefinition> {
+  return request<SchemaDefinition>(`/api/schemas/${encodeURIComponent(typeName)}`)
+}
+
+export async function upsertSchema(
+  typeName: string,
+  payload: UpsertSchemaRequest
+): Promise<SchemaDefinition> {
+  return request<SchemaDefinition>(`/api/schemas/${encodeURIComponent(typeName)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteSchema(
+  typeName: string,
+  force = false
+): Promise<DeleteSchemaResponse> {
+  const qs = force ? "?force=true" : ""
+  return request<DeleteSchemaResponse>(
+    `/api/schemas/${encodeURIComponent(typeName)}${qs}`,
+    { method: "DELETE" }
+  )
 }

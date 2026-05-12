@@ -96,6 +96,13 @@ pub struct UpdateItemParams {
     /// the existing value, or a slash-separated path to set/replace.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional structured-data type name. References a registered schema.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Typed payload validated against the schema for `type`. Supply only
+    /// when updating; omit to leave existing payload unchanged.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -479,6 +486,7 @@ impl RustRagMcpServer {
             min_created_at: query.min_created_at,
             max_created_at: query.max_created_at,
             path_prefix,
+            type_name: query.type_name,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -500,12 +508,26 @@ impl RustRagMcpServer {
             Some(p) => Some(crate::db::normalize_path(p).map_err(|e| e.to_string())?),
             None => None,
         };
+        if let Some(ref type_name) = params.type_name {
+            if let Some(ref data) = params.data {
+                self.state
+                    .schema_cache
+                    .validate(type_name, data, self.state.store.as_ref())
+                    .map_err(|e| e.to_string())?;
+            }
+        } else if params.data.is_some() {
+            return Err("`data` is only valid when `type` is set".to_string());
+        }
         let request = UpdateItemRequest {
             text: params.text,
             metadata: params.metadata,
             source_id: params.source_id,
             path: params.path,
+            type_name: params.type_name.clone(),
+            data: params.data.clone(),
         };
+        let type_override = params.type_name;
+        let data_override = params.data;
         let embedder = self
             .state
             .embedder
@@ -528,6 +550,8 @@ impl RustRagMcpServer {
                 source_id: request.source_id,
                 created_at: existing.created_at,
                 path: new_path,
+                type_name: type_override.or(existing.type_name),
+                data: data_override.or(existing.data),
             };
             let embedding = embedder.embed(&item.text)?;
             store.upsert_item(item.clone(), &embedding)?;
@@ -1333,6 +1357,108 @@ impl RustRagMcpServer {
             note: None,
         }))
     }
+
+    #[tool(description = "List every registered typed-entry schema. Each row carries the type_name, the JSON Schema, optional title/description, and item_count (how many entries are currently typed). Use to discover what mini-app types are available before calling store_entry with a `type`.")]
+    async fn list_schemas(&self) -> Result<Json<crate::api::schemas::SchemaListResponse>, String> {
+        let store = self.state.store.clone();
+        let records = tokio::task::spawn_blocking(move || store.list_schemas())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let count = self.state.store.count_items_by_type(&record.type_name).ok();
+            out.push(crate::api::schemas::SchemaPayload::from_record_pub(record, count));
+        }
+        Ok(Json(crate::api::schemas::SchemaListResponse { schemas: out }))
+    }
+
+    #[tool(description = "Fetch one typed-entry schema by `type_name`. Returns the JSON Schema plus metadata. Returns an error when the type is not registered.")]
+    async fn get_schema(
+        &self,
+        Parameters(params): Parameters<SchemaTypeParams>,
+    ) -> Result<Json<crate::api::schemas::SchemaPayload>, String> {
+        let store = self.state.store.clone();
+        let tn = params.type_name.clone();
+        let record = tokio::task::spawn_blocking(move || store.get_schema(&tn))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("schema `{}` not found", params.type_name))?;
+        let count = self.state.store.count_items_by_type(&record.type_name).ok();
+        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(record, count)))
+    }
+
+    #[tool(description = "Register or update a typed-entry schema. Supply `type_name`, the `json_schema` (Draft 2020-12 / Draft-07 compatible), and optional `title` / `description`. The schema itself is validated as a JSON Schema before storage. The compiled validator cache for that type is invalidated; subsequent store_entry / update_item calls revalidate against the new schema.")]
+    async fn upsert_schema(
+        &self,
+        Parameters(params): Parameters<UpsertSchemaParams>,
+    ) -> Result<Json<crate::api::schemas::SchemaPayload>, String> {
+        crate::validation::validate_meta_schema(&params.json_schema)
+            .map_err(|e| e.to_string())?;
+        let record = crate::db::SchemaRecord {
+            type_name: params.type_name.clone(),
+            json_schema: params.json_schema,
+            title: params.title,
+            description: params.description,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let store = self.state.store.clone();
+        let to_store = record.clone();
+        tokio::task::spawn_blocking(move || store.upsert_schema(to_store))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        self.state.schema_cache.invalidate(&params.type_name);
+        let count = self.state.store.count_items_by_type(&params.type_name).ok();
+        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(record, count)))
+    }
+
+    #[tool(description = "Delete a typed-entry schema. Refuses (returns an error) when items still reference the type, unless `force=true` — in which case those items have their `type` and `data` cleared. Returns deleted=true and items_unset count.")]
+    async fn delete_schema(
+        &self,
+        Parameters(params): Parameters<DeleteSchemaParams>,
+    ) -> Result<Json<crate::api::schemas::DeleteSchemaResponse>, String> {
+        let force = params.force.unwrap_or(false);
+        let store = self.state.store.clone();
+        let tn = params.type_name.clone();
+        let (deleted, unset) = tokio::task::spawn_blocking(move || store.delete_schema(&tn, force))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if !deleted {
+            return Err(format!("schema `{}` not found", params.type_name));
+        }
+        self.state.schema_cache.invalidate(&params.type_name);
+        Ok(Json(crate::api::schemas::DeleteSchemaResponse {
+            type_name: params.type_name,
+            deleted,
+            items_unset: unset,
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SchemaTypeParams {
+    pub type_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpsertSchemaParams {
+    pub type_name: String,
+    pub json_schema: serde_json::Value,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DeleteSchemaParams {
+    pub type_name: String,
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 async fn require_acp(

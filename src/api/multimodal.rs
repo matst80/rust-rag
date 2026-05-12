@@ -132,6 +132,8 @@ pub async fn ingest_image(
         source_id,
         chunk: None,
         path: None,
+        type_name: None,
+        data: None,
     };
 
     tracing::info!("storing image metadata and extracted text in vector store");

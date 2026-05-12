@@ -6,6 +6,7 @@ target/
 *.tmp
 *.bak
 assets/
+!assets/schemas/
 data/
 *.sqlite
 .env

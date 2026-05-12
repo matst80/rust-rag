@@ -196,6 +196,11 @@ async fn main() -> Result<()> {
         Some(pg) => pg.clone(),
         None => store.clone(),
     };
+    match rust_rag::validation::seed_bundled_schemas(store_service.as_ref()) {
+        Ok(n) if n > 0 => info!("seeded {n} bundled schema(s)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(?e, "schema seeding failed"),
+    }
     let message_store: Arc<dyn MessageStore> = match &pg_store {
         Some(pg) => pg.clone(),
         None => store.clone(),

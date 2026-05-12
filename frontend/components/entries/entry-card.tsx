@@ -102,6 +102,12 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
             {formatRelativeTime(entry.created_at)}
           </div>
 
+          {"type" in entry && entry.type && (
+            <div className="flex items-center gap-1 px-1.5 py-0.5 border border-primary/40 bg-primary/10 text-primary font-mono text-[10px] font-bold uppercase tracking-wider">
+              {entry.type}
+            </div>
+          )}
+
           {showScore && retrieverChip && (
             <div
               title={`Matched by: ${retrievers.join(" + ")}`}

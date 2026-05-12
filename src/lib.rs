@@ -9,6 +9,7 @@ pub mod manager;
 pub mod mcp;
 pub mod ontology;
 pub mod reranker;
+pub mod validation;
 
 use axum::Router;
 

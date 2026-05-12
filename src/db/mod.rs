@@ -38,6 +38,23 @@ pub struct ItemRecord {
     /// which is derived from markdown headers by the chunker.
     /// Normalized via `normalize_path` before persistence.
     pub path: Option<String>,
+    /// Optional structured-data type name. References `schemas.type_name`
+    /// when set. NULL = untyped legacy entry.
+    pub type_name: Option<String>,
+    /// Typed payload validated against the schema for `type_name`.
+    pub data: Option<Value>,
+}
+
+/// Registered JSON Schema entry. Used to validate typed entries' `data`
+/// payloads on store/update.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SchemaRecord {
+    pub type_name: String,
+    pub json_schema: Value,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// Persisted LLM-on-store analysis for an entry.
@@ -382,6 +399,8 @@ pub struct ListItemsRequest {
     /// (`prefix` itself or `prefix/...`). Already-normalized when set; empty
     /// is treated as `None`. Comparison is case-insensitive.
     pub path_prefix: Option<String>,
+    /// Restrict to entries whose `type` equals this value.
+    pub type_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -677,6 +696,29 @@ pub trait VectorStore: Send + Sync {
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
     fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
     fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
+
+    /// Typed-entry schemas. CRUD on the `schemas` table holding JSON Schema
+    /// definitions referenced by `items.type`.
+    fn list_schemas(&self) -> Result<Vec<SchemaRecord>> {
+        anyhow::bail!("schemas not supported by this store")
+    }
+    fn get_schema(&self, _type_name: &str) -> Result<Option<SchemaRecord>> {
+        anyhow::bail!("schemas not supported by this store")
+    }
+    fn upsert_schema(&self, _record: SchemaRecord) -> Result<()> {
+        anyhow::bail!("schemas not supported by this store")
+    }
+    /// Returns `(deleted, items_unset)`. If items reference the type and
+    /// `force=false`, returns an error. With `force=true` the schema is
+    /// removed and referencing items have their `type` set to NULL.
+    fn delete_schema(&self, _type_name: &str, _force: bool) -> Result<(bool, usize)> {
+        anyhow::bail!("schemas not supported by this store")
+    }
+    /// Count of items whose `type` equals `type_name`. Used by delete to
+    /// detect references.
+    fn count_items_by_type(&self, _type_name: &str) -> Result<i64> {
+        Ok(0)
+    }
 }
 
 pub struct SqliteVectorStore {
@@ -790,6 +832,10 @@ impl VectorStore for SqliteVectorStore {
         }
 
         let metadata_json = serde_json::to_string(&item.metadata)?;
+        let data_json = match &item.data {
+            Some(value) => Some(serde_json::to_string(value)?),
+            None => None,
+        };
         let embedding_json = embedding_to_json(embedding);
 
         let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
@@ -800,14 +846,16 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.execute(
             "
-            INSERT INTO items (id, text, metadata, source_id, created_at, path)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO items (id, text, metadata, source_id, created_at, path, type, data)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(id) DO UPDATE
             SET text = excluded.text,
                 metadata = excluded.metadata,
                 source_id = excluded.source_id,
                 created_at = excluded.created_at,
                 path = excluded.path,
+                type = excluded.type,
+                data = excluded.data,
                 ontology_status = CASE WHEN excluded.text != text THEN 'pending' ELSE ontology_status END
             ",
             params![
@@ -816,7 +864,9 @@ impl VectorStore for SqliteVectorStore {
                 metadata_json,
                 item.source_id,
                 item.created_at,
-                item.path
+                item.path,
+                item.type_name,
+                data_json,
             ],
         )?;
 
@@ -1612,7 +1662,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at, path
+            "SELECT id, text, metadata, source_id, created_at, path, type, data
              FROM items
              WHERE ontology_status = 'pending'
              ORDER BY created_at ASC
@@ -1628,10 +1678,12 @@ impl VectorStore for SqliteVectorStore {
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at, path) = r?;
+                let (id, text, metadata_str, source_id, created_at, path, type_name, data_str) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -1640,6 +1692,8 @@ impl VectorStore for SqliteVectorStore {
                     source_id,
                     created_at,
                     path,
+                    type_name,
+                    data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1656,6 +1710,127 @@ impl VectorStore for SqliteVectorStore {
             params![status, id],
         )?;
         Ok(())
+    }
+
+    fn list_schemas(&self) -> Result<Vec<SchemaRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT type_name, json_schema, title, description, created_at, updated_at
+             FROM schemas ORDER BY type_name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let schema_str: String = row.get(1)?;
+            Ok(SchemaRecord {
+                type_name: row.get(0)?,
+                json_schema: serde_json::from_str(&schema_str)
+                    .unwrap_or(Value::Object(Default::default())),
+                title: row.get(2)?,
+                description: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn get_schema(&self, type_name: &str) -> Result<Option<SchemaRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut stmt = connection.prepare(
+            "SELECT type_name, json_schema, title, description, created_at, updated_at
+             FROM schemas WHERE type_name = ?1",
+        )?;
+        let mut rows = stmt.query(params![type_name])?;
+        if let Some(row) = rows.next()? {
+            let schema_str: String = row.get(1)?;
+            Ok(Some(SchemaRecord {
+                type_name: row.get(0)?,
+                json_schema: serde_json::from_str(&schema_str)
+                    .unwrap_or(Value::Object(Default::default())),
+                title: row.get(2)?,
+                description: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn upsert_schema(&self, record: SchemaRecord) -> Result<()> {
+        let schema_json = serde_json::to_string(&record.json_schema)?;
+        let now = current_timestamp_millis()?;
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "INSERT INTO schemas (type_name, json_schema, title, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(type_name) DO UPDATE SET
+                 json_schema = excluded.json_schema,
+                 title = excluded.title,
+                 description = excluded.description,
+                 updated_at = excluded.updated_at",
+            params![
+                record.type_name,
+                schema_json,
+                record.title,
+                record.description,
+                if record.created_at == 0 { now } else { record.created_at },
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn delete_schema(&self, type_name: &str, force: bool) -> Result<(bool, usize)> {
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM items WHERE type = ?1",
+            params![type_name],
+            |row| row.get(0),
+        )?;
+        if count > 0 && !force {
+            anyhow::bail!("schema {type_name} is referenced by {count} items");
+        }
+        let tx = connection.transaction()?;
+        let unset = if count > 0 {
+            tx.execute(
+                "UPDATE items SET type = NULL, data = NULL WHERE type = ?1",
+                params![type_name],
+            )?
+        } else {
+            0
+        };
+        let n = tx.execute("DELETE FROM schemas WHERE type_name = ?1", params![type_name])?;
+        tx.commit()?;
+        Ok((n > 0, unset))
+    }
+
+    fn count_items_by_type(&self, type_name: &str) -> Result<i64> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let n: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM items WHERE type = ?1",
+            params![type_name],
+            |row| row.get(0),
+        )?;
+        Ok(n)
     }
 }
 
@@ -2344,6 +2519,11 @@ fn list_items_internal(
         sql_params.push(Box::new(prefix.clone()));
     }
 
+    if let Some(type_name) = request.type_name.as_ref().filter(|t| !t.is_empty()) {
+        where_clauses.push("type = ?".to_string());
+        sql_params.push(Box::new(type_name.clone()));
+    }
+
     let where_sql = if where_clauses.is_empty() {
         "".to_string()
     } else {
@@ -2359,7 +2539,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at, path
+        SELECT id, text, metadata, source_id, created_at, path, type, data
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -2387,7 +2567,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at, path
+        SELECT id, text, metadata, source_id, created_at, path, type, data
         FROM items
         WHERE id = ?1
         ",
@@ -2415,6 +2595,7 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
 }
 
 fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
+    let data_str: Option<String> = row.get(7)?;
     Ok(ItemRecord {
         id: row.get(0)?,
         text: row.get(1)?,
@@ -2422,6 +2603,11 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
         source_id: row.get(3)?,
         created_at: row.get(4)?,
         path: row.get(5)?,
+        type_name: row.get(6)?,
+        data: match data_str {
+            Some(s) => Some(parse_json_column(s, 7)?),
+            None => None,
+        },
     })
 }
 
@@ -2495,6 +2681,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2508,6 +2696,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 2000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2536,6 +2726,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2549,6 +2741,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 2000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2574,6 +2768,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2587,6 +2783,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -2612,6 +2810,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2625,6 +2825,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2676,6 +2878,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2700,6 +2904,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2727,6 +2933,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2740,6 +2948,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 2000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.95, 0.05, 0.0],
             )
@@ -2753,6 +2963,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 3000,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -2806,6 +3018,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -2819,6 +3033,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 2,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -2832,6 +3048,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 3,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 &[0.0, 1.0, 0.0],
             )

@@ -216,6 +216,18 @@ ${(entry.text ?? "").slice(0, 6000)}`
               </div>
             </div>
 
+            {/* Typed data */}
+            {entry.type && entry.data && (
+              <div>
+                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
+                  Data ({entry.type})
+                </h2>
+                <pre className="border border-border bg-card p-4 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
+                  {JSON.stringify(entry.data, null, 2)}
+                </pre>
+              </div>
+            )}
+
             {/* Analysis */}
             <AnalysisPanel entry={entry} />
 
