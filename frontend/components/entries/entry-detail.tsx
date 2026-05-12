@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
 import { useItem, useDeleteItem, useEdgesForItem, useGraphStatus } from "@/lib/api"
+import { useSchema, useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
 import {
   ResizableHandle,
@@ -24,6 +25,10 @@ import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { toast } from "sonner"
+import { StructuredDataEditor } from "./structured-data-editor"
+import { StructuredDataView } from "./structured-data-view"
+import { EntryTag, EntryTagList } from "../ui/entry-tag"
+import { AiRefineButton } from "../ai/ai-refine-button"
 
 interface EntryDetailProps {
   id: string
@@ -41,7 +46,13 @@ export function EntryDetail({ id }: EntryDetailProps) {
 
   const [isEditing, setIsEditing] = useState(false)
   const [editedText, setEditedText] = useState("")
+  const [editedType, setEditedType] = useState<string>("")
+  const [editedData, setEditedData] = useState<any>(null)
+  const [isDataValid, setIsDataValid] = useState(true)
   const [idCopied, setIdCopied] = useState(false)
+
+  const { data: schemas } = useSchemas()
+  const { data: schema } = useSchema(editedType)
 
   const handleCopyId = async () => {
     try {
@@ -54,7 +65,11 @@ export function EntryDetail({ id }: EntryDetailProps) {
   }
 
   useEffect(() => {
-    if (entry) setEditedText(entry.text)
+    if (entry) {
+      setEditedText(entry.text)
+      setEditedType(entry.type ?? "")
+      setEditedData(entry.data)
+    }
   }, [entry])
 
   const handleDelete = async () => {
@@ -71,6 +86,8 @@ export function EntryDetail({ id }: EntryDetailProps) {
         source_id: entry?.source_id ?? "knowledge",
         metadata: entry?.metadata ?? {},
         path: entry?.path ?? undefined,
+        type: editedType || null,
+        data: editedType ? editedData : null,
       })
       mutate(["items", id])
       setIsEditing(false)
@@ -129,9 +146,7 @@ export function EntryDetail({ id }: EntryDetailProps) {
                 <Copy className="size-3 opacity-60" />
               )}
             </button>
-            <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">
-              {entry.source_id}
-            </span>
+            <EntryTag label={entry.source_id} icon={false} />
             <WikiPathPicker entry={entry} />
             {entry.path && (
               <Link
@@ -152,6 +167,7 @@ export function EntryDetail({ id }: EntryDetailProps) {
           size="sm"
           className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
           onClick={isEditing ? handleSave : () => setIsEditing(true)}
+          disabled={isEditing && !isDataValid}
         >
           {isEditing ? (
             <><Save className="size-3.5 mr-1.5" />Save</>
@@ -184,16 +200,53 @@ export function EntryDetail({ id }: EntryDetailProps) {
               <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
                 Editor
               </span>
-              <span className="font-mono text-[10px] px-2 py-0.5 border border-primary/30 text-primary bg-primary/5">
-                Drafting
-              </span>
+              <AiRefineButton content={editedText} onAccept={setEditedText} />
             </div>
             <Textarea
               value={editedText}
               onChange={(e) => setEditedText(e.target.value)}
-              className="min-h-[60vh] text-sm leading-relaxed p-4 border-border focus-visible:border-primary focus-visible:ring-0 resize-none bg-card font-mono"
+              className="min-h-[30vh] text-sm leading-relaxed p-4 border-border focus-visible:border-primary focus-visible:ring-0 resize-none bg-card font-mono"
               placeholder="Write your content here... (Markdown supported)"
             />
+
+            <div className="pt-4 border-t space-y-3">
+              <div className="flex flex-col gap-1.5">
+                <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                  Type
+                </span>
+                <select
+                  value={editedType}
+                  onChange={(e) => {
+                    setEditedType(e.target.value)
+                    if (e.target.value && !editedData) setEditedData({})
+                  }}
+                  className="flex h-9 w-full max-w-xs rounded-md border border-border bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <option value="">— Untyped —</option>
+                  {schemas?.map((s) => (
+                    <option key={s.type_name} value={s.type_name}>
+                      {s.type_name} {s.title ? `(${s.title})` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {editedType && schema && (
+                <div className="space-y-3 animate-in fade-in duration-300">
+                  <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                    Structured Data ({editedType})
+                  </span>
+                  <StructuredDataEditor
+                    schema={schema.json_schema}
+                    value={editedData}
+                    onChange={setEditedData}
+                    onValidityChange={setIsDataValid}
+                    typeName={editedType}
+                    content={editedText}
+                  />
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           <div className="space-y-8 animate-in fade-in duration-500">
@@ -239,13 +292,14 @@ ${(entry.text ?? "").slice(0, 6000)}`
 
             {/* Typed data */}
             {entry.type && entry.data && (
-              <div>
-                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4">
-                  Data ({entry.type})
-                </h2>
-                <pre className="border border-border bg-card p-4 text-xs font-mono overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(entry.data, null, 2)}
-                </pre>
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
+                <div className="flex items-center gap-2">
+                  <div className="size-1.5 rounded-full bg-primary shadow-[0_0_8px_rgba(var(--primary-rgb),0.8)]" />
+                  <span className="font-mono text-xs font-black uppercase tracking-[3px] text-primary/80">
+                    Data ({entry.type})
+                  </span>
+                </div>
+                <StructuredDataView type={entry.type} data={entry.data} />
               </div>
             )}
 
@@ -270,9 +324,13 @@ ${(entry.text ?? "").slice(0, 6000)}`
                       <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                         {key}
                       </span>
-                      <span className="text-sm font-medium truncate text-foreground">
-                        {String(value)}
-                      </span>
+                      <div className="text-sm font-medium truncate text-foreground">
+                        {key === "tags" && typeof value === "string" ? (
+                          <EntryTagList tags={value.split(",").map(t => t.trim()).filter(Boolean)} />
+                        ) : (
+                          String(value)
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

@@ -13,6 +13,8 @@ import { useCreateItem, useUpdateItem, type Entry, type EntryMetadata } from "@/
 import { useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
 import Link from "next/link"
+import { StructuredDataEditor } from "./structured-data-editor"
+import { AiRefineButton } from "../ai/ai-refine-button"
 
 interface EntryFormProps {
   entry?: Entry
@@ -33,13 +35,14 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
   const [newMetaKey, setNewMetaKey] = useState("")
   const [newMetaValue, setNewMetaValue] = useState("")
   const [error, setError] = useState<string | null>(null)
+  
   const [typeName, setTypeName] = useState<string>(entry?.type ?? "")
-  const [dataText, setDataText] = useState<string>(
-    entry?.data ? JSON.stringify(entry.data, null, 2) : ""
-  )
+  const [data, setData] = useState<any>(entry?.data ?? {})
+  
   const { data: schemas } = useSchemas()
-
   const isMutating = isCreating || isUpdating
+
+  const currentSchema = schemas?.find((s) => s.type_name === typeName)?.json_schema
 
   const handleAddMetadata = () => {
     if (!newMetaKey.trim()) return
@@ -68,25 +71,12 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
       return
     }
 
-    let parsedData: Record<string, unknown> | null = null
-    if (typeName) {
-      if (!dataText.trim()) {
-        setError(`Type "${typeName}" requires a data payload`)
-        return
-      }
-      try {
-        parsedData = JSON.parse(dataText)
-      } catch (err) {
-        setError(`Invalid JSON in data: ${(err as Error).message}`)
-        return
-      }
-    }
-
     try {
       const trimmedPath = path.trim()
       const typedFields = typeName
-        ? { type: typeName, data: parsedData }
+        ? { type: typeName, data: data }
         : { type: null, data: null }
+      
       if (mode === "create") {
         await createItem({
           ...(id.trim() && { id: id.trim() }),
@@ -173,7 +163,10 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="text">Content</Label>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="text">Content</Label>
+              <AiRefineButton content={text} onAccept={setText} />
+            </div>
             <Textarea
               id="text"
               value={text}
@@ -188,7 +181,11 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
             <select
               id="type"
               value={typeName}
-              onChange={(e) => setTypeName(e.target.value)}
+              onChange={(e) => {
+                setTypeName(e.target.value)
+                // Initialize with empty object if switching to a type
+                if (e.target.value && !data) setData({})
+              }}
               className="flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm"
             >
               <option value="">— Untyped —</option>
@@ -208,17 +205,15 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
             </p>
           </div>
 
-          {typeName && (
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="data">Data (JSON, validated against {typeName})</Label>
-              <Textarea
-                id="data"
-                value={dataText}
-                onChange={(e) => setDataText(e.target.value)}
-                rows={10}
-                className="font-mono text-xs"
-                spellCheck={false}
-                placeholder="{}"
+          {typeName && currentSchema && (
+            <div className="flex flex-col gap-2 pt-2 border-t mt-2">
+              <Label>Structured Data ({typeName})</Label>
+              <StructuredDataEditor
+                schema={currentSchema}
+                value={data}
+                onChange={setData}
+                typeName={typeName}
+                content={text}
               />
             </div>
           )}

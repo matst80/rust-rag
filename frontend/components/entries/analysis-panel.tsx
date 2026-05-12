@@ -2,7 +2,10 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { RefreshCw, Sparkles, Plus, X, Save } from "lucide-react"
+import { 
+  RefreshCw, Sparkles, Plus, X, Save, GitBranch, Terminal, AlertTriangle, 
+  CheckCircle2, Zap, ArrowUpCircle, AlertCircle, Copy, Ghost, Activity 
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -10,6 +13,9 @@ import { Textarea } from "@/components/ui/textarea"
 import { useReanalyzeItem, useUpdateItem, useCreateEdge } from "@/lib/api"
 import { useSWRConfig } from "swr"
 import { toast } from "sonner"
+import { Editor } from "@monaco-editor/react"
+import { EntryTagList } from "../ui/entry-tag"
+import { cn } from "@/lib/utils"
 import type {
   Entry,
   StoreAnalysis,
@@ -20,13 +26,13 @@ interface AnalysisPanelProps {
   entry: Entry
 }
 
-const RELATION_COLOR: Record<string, string> = {
-  agrees: "text-emerald-500 border-emerald-500/40",
-  refines: "text-sky-500 border-sky-500/40",
-  supersedes: "text-amber-500 border-amber-500/40",
-  contradicts: "text-red-500 border-red-500/40",
-  duplicates: "text-fuchsia-500 border-fuchsia-500/40",
-  unrelated: "text-muted-foreground border-border",
+const RELATION_CONFIG: Record<string, { color: string, icon: any, label: string }> = {
+  agrees: { color: "text-emerald-500 border-emerald-500/30 bg-emerald-500/5", icon: CheckCircle2, label: "Agrees" },
+  refines: { color: "text-sky-500 border-sky-500/30 bg-sky-500/5", icon: Zap, label: "Refines" },
+  supersedes: { color: "text-amber-500 border-amber-500/30 bg-amber-500/5", icon: ArrowUpCircle, label: "Supersedes" },
+  contradicts: { color: "text-red-500 border-red-500/30 bg-red-500/5", icon: AlertCircle, label: "Contradicts" },
+  duplicates: { color: "text-fuchsia-500 border-fuchsia-500/30 bg-fuchsia-500/5", icon: Copy, label: "Duplicate" },
+  unrelated: { color: "text-muted-foreground border-border bg-muted/5", icon: Ghost, label: "Unrelated" },
 }
 
 export function AnalysisPanel({ entry }: AnalysisPanelProps) {
@@ -142,23 +148,28 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
   const at = entry.analysis_at ? new Date(entry.analysis_at).toLocaleString() : "—"
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-          Analysis
-        </h2>
+        <div className="flex flex-col gap-1">
+          <h2 className="font-mono text-xs font-black uppercase tracking-[3px] text-primary/80">
+            Intelligence Report
+          </h2>
+          <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
+            <span className="text-primary/60">{entry.analysis_model || "unknown-model"}</span>
+            <span className="size-1 rounded-full bg-border" />
+            <span>{at}</span>
+          </div>
+        </div>
+        
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] text-muted-foreground">
-            {entry.analysis_model ?? "—"} · {at}
-          </span>
           <Button
             size="sm"
             variant={editing ? "default" : "outline"}
             onClick={editing ? handleSaveRefinements : () => setEditing(true)}
-            className="h-7 font-mono text-[10px] uppercase tracking-wider"
+            className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest font-black"
           >
             {editing ? (
-              <><Save className="size-3 mr-1" /> Save</>
+              <><Save className="size-3 mr-1.5" /> Save</>
             ) : (
               "Refine"
             )}
@@ -172,7 +183,7 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
                 setTags(initialTags)
                 setOverrides(initialOverrides)
               }}
-              className="h-7 font-mono text-[10px] uppercase tracking-wider"
+              className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest text-muted-foreground"
             >
               Cancel
             </Button>
@@ -182,18 +193,17 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
             variant="outline"
             onClick={handleReanalyze}
             disabled={reanalyzing}
-            className="h-7 font-mono text-[10px] uppercase tracking-wider"
+            className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest border-primary/30 text-primary hover:bg-primary/5"
           >
-            <RefreshCw className={`size-3 mr-1 ${reanalyzing ? "animate-spin" : ""}`} />
+            <RefreshCw className={`size-3 mr-1.5 ${reanalyzing ? "animate-spin" : ""}`} />
             Re-run
           </Button>
         </div>
       </div>
 
-      {/* Title / summary / facets */}
-      <div className="border border-border bg-card p-4 space-y-3">
+      <div className="relative overflow-hidden rounded-xl border border-border bg-card/50 dark:bg-black/40 backdrop-blur-md p-6 shadow-sm dark:shadow-[0_0_30px_rgba(var(--primary-rgb),0.02)]">
         {editing ? (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <LabeledInput
               label="Title"
               value={overrides.title}
@@ -204,191 +214,249 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
               value={overrides.summary}
               onChange={(v) => setOverrides({ ...overrides, summary: v })}
             />
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <LabeledInput
-                label="doc_type"
+                label="Type"
                 value={overrides.doc_type}
                 onChange={(v) => setOverrides({ ...overrides, doc_type: v })}
               />
               <LabeledInput
-                label="freshness"
+                label="Freshness"
                 value={overrides.freshness}
                 onChange={(v) => setOverrides({ ...overrides, freshness: v })}
               />
               <LabeledInput
-                label="cluster_hint"
+                label="Cluster"
                 value={overrides.cluster_hint}
                 onChange={(v) => setOverrides({ ...overrides, cluster_hint: v })}
               />
             </div>
           </div>
         ) : (
-          <>
-            {a.title && (
-              <div>
-                <FieldLabel>Title</FieldLabel>
-                <p className="text-sm font-medium">{a.title}</p>
-              </div>
-            )}
-            {a.summary && (
-              <div>
-                <FieldLabel>Summary</FieldLabel>
-                <p className="text-sm text-foreground/90">{a.summary}</p>
-              </div>
-            )}
-            <div className="flex flex-wrap gap-2">
-              {a.doc_type && <Badge variant="outline">type: {a.doc_type}</Badge>}
-              {a.freshness && <Badge variant="outline">freshness: {a.freshness}</Badge>}
-              {a.cluster_hint && <Badge variant="outline">cluster: {a.cluster_hint}</Badge>}
-              {a.quality && (
-                <Badge variant="outline">
-                  quality: {(a.quality.score * 100).toFixed(0)}%
-                </Badge>
-              )}
+          <div className="space-y-6">
+            <div className="space-y-2">
+              <FieldLabel>Executive Summary</FieldLabel>
+              <h3 className="text-lg font-bold text-foreground/90">{a.title || "No Title Extracted"}</h3>
+              <p className="text-sm leading-relaxed text-muted-foreground italic font-serif">
+                {a.summary || "No summary available."}
+              </p>
             </div>
-            {a.quality?.issues && a.quality.issues.length > 0 && (
-              <ul className="text-xs text-amber-500 list-disc pl-5">
-                {a.quality.issues.map((i, idx) => <li key={idx}>{i}</li>)}
-              </ul>
-            )}
-          </>
-        )}
-      </div>
 
-      {/* Tags */}
-      <div className="border border-border bg-card p-4 space-y-2">
-        <FieldLabel>Tags</FieldLabel>
-        <div className="flex flex-wrap gap-1.5">
-          {tags.map((t) => (
-            <span
-              key={t}
-              className="inline-flex items-center gap-1 px-2 py-0.5 border border-border text-xs font-mono"
-            >
-              {t}
-              {editing && (
-                <button onClick={() => removeTag(t)} className="hover:text-red-500">
-                  <X className="size-3" />
-                </button>
-              )}
-            </span>
-          ))}
-          {tags.length === 0 && (
-            <span className="text-xs text-muted-foreground font-mono">none</span>
-          )}
-        </div>
-        {editing && (
-          <div className="flex gap-2">
-            <Input
-              value={tagDraft}
-              onChange={(e) => setTagDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault()
-                  addTag()
-                }
-              }}
-              placeholder="add tag…"
-              className="h-7 text-xs font-mono"
-            />
-            <Button size="sm" variant="outline" onClick={addTag} className="h-7">
-              <Plus className="size-3" />
-            </Button>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t border-border/40">
+              <div className="space-y-1">
+                <FieldLabel>Doc Type</FieldLabel>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">{a.doc_type || "—"}</div>
+              </div>
+              <div className="space-y-1">
+                <FieldLabel>Freshness</FieldLabel>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">{a.freshness || "—"}</div>
+              </div>
+              <div className="space-y-1">
+                <FieldLabel>Cluster</FieldLabel>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase truncate">{a.cluster_hint || "—"}</div>
+              </div>
+              <div className="space-y-1">
+                <FieldLabel>Quality</FieldLabel>
+                <div className="flex flex-col gap-1">
+                  <div className="text-xs font-mono font-bold text-primary">
+                    {a.quality ? `${(a.quality.score * 100).toFixed(0)}%` : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {a.quality?.issues && a.quality.issues.length > 0 && (
+              <div className="mt-4 p-3 bg-red-500/5 border border-red-500/20 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="size-3 text-red-500" />
+                  <span className="font-mono text-[9px] font-black uppercase tracking-widest text-red-500">Quality Alerts</span>
+                </div>
+                <ul className="text-xs text-red-400 space-y-1 list-none">
+                  {a.quality.issues.map((i, idx) => (
+                    <li key={idx} className="flex gap-2">
+                      <span className="opacity-50">•</span>
+                      {i}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
 
+      {/* Tags */}
+      <div className="space-y-3">
+        <FieldLabel>Tags</FieldLabel>
+        <div className="flex flex-wrap gap-2">
+          <EntryTagList tags={tags} onRemoveTag={editing ? removeTag : undefined} />
+          {editing && (
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Input
+                value={tagDraft}
+                onChange={(e) => setTagDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    addTag()
+                  }
+                }}
+                placeholder="add tag…"
+                className="h-7 text-[10px] font-mono bg-muted/20 border-border/40 w-32"
+              />
+              <Button size="sm" variant="outline" onClick={addTag} className="h-7 w-7 p-0 border-primary/20 text-primary">
+                <Plus className="size-3" />
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Verdicts */}
       {a.verdicts && a.verdicts.length > 0 && (
-        <div className="border border-border bg-card p-4 space-y-2">
-          <FieldLabel>Verdicts vs neighbors</FieldLabel>
-          <div className="flex flex-col gap-1.5">
-            {a.verdicts.map((v, idx) => (
-              <div
-                key={`${v.target_id}-${idx}`}
-                className="flex items-start gap-2 border border-border p-2"
-              >
-                <span
-                  className={`font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border shrink-0 ${
-                    RELATION_COLOR[v.relation] ?? "text-muted-foreground border-border"
-                  }`}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Activity className="size-3.5 text-primary" />
+            <FieldLabel>Contextual Verdicts</FieldLabel>
+          </div>
+          <div className="grid grid-cols-1 gap-3">
+            {a.verdicts.map((v, idx) => {
+              const config = RELATION_CONFIG[v.relation] || RELATION_CONFIG.unrelated
+              const Icon = config.icon
+
+              return (
+                <div
+                  key={`${v.target_id}-${idx}`}
+                  className={cn(
+                    "relative group flex flex-col gap-3 rounded-xl border p-4 transition-all hover:shadow-lg dark:hover:shadow-primary/5",
+                    config.color
+                  )}
                 >
-                  {v.relation}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <Link
-                    href={`/entries/${encodeURIComponent(v.target_id)}`}
-                    className="font-mono text-xs hover:text-primary truncate block"
-                  >
-                    {v.target_id}
-                  </Link>
-                  <p className="text-xs text-muted-foreground mt-0.5">{v.reason}</p>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                      <div className="p-1.5 rounded-lg bg-background/50 border border-current/20">
+                        <Icon className="size-3.5" />
+                      </div>
+                      <span className="font-mono text-[10px] font-black uppercase tracking-[2px]">
+                        {config.label}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-20 h-1 bg-current/10 rounded-full overflow-hidden hidden sm:block">
+                        <div 
+                          className="h-full bg-current transition-all duration-1000" 
+                          style={{ width: `${v.confidence * 100}%` }}
+                        />
+                      </div>
+                      <span className="font-mono text-[9px] tabular-nums opacity-60">
+                        {(v.confidence * 100).toFixed(0)}% CONF
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 pl-9">
+                    <Link
+                      href={`/entries/${encodeURIComponent(v.target_id)}`}
+                      className="font-mono text-xs font-bold text-foreground/90 hover:text-primary transition-colors block truncate"
+                    >
+                      {v.target_id}
+                    </Link>
+                    <p className="text-xs leading-relaxed text-muted-foreground/80 italic">
+                      {v.reason}
+                    </p>
+                  </div>
+
+                  {/* Hover glow decoration */}
+                  <div className="absolute inset-0 bg-current/0 group-hover:bg-current/[0.02] rounded-xl pointer-events-none transition-colors" />
                 </div>
-                <span className="font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
-                  {(v.confidence * 100).toFixed(0)}%
-                </span>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Suggested edges */}
       {a.suggested_edges && a.suggested_edges.length > 0 && (
-        <div className="border border-border bg-card p-4 space-y-2">
-          <FieldLabel>Suggested edges</FieldLabel>
-          <div className="flex flex-col gap-1.5">
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <GitBranch className="size-3.5 text-primary" />
+            <FieldLabel>Suggested Edges</FieldLabel>
+          </div>
+          <div className="grid grid-cols-1 gap-2">
             {a.suggested_edges
               .filter((e) => !dismissedEdges.has(e.target_id))
               .map((edge, idx) => (
                 <div
                   key={`${edge.target_id}-${idx}`}
-                  className="flex items-center gap-2 border border-border p-2"
+                  className="flex items-center gap-4 rounded-lg border border-border bg-card/50 dark:bg-black/20 p-3 hover:border-primary/30 transition-all group"
                 >
-                  <span className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border border-primary/30 text-primary shrink-0">
-                    {edge.rel}
-                  </span>
+                  <div className="flex flex-col gap-1 min-w-[80px]">
+                    <span className="font-mono text-[9px] font-black uppercase tracking-widest text-primary/70">
+                      {edge.rel}
+                    </span>
+                    <span className="font-mono text-[9px] text-muted-foreground/60">
+                      w={edge.weight.toFixed(2)}
+                    </span>
+                  </div>
                   <Link
                     href={`/entries/${encodeURIComponent(edge.target_id)}`}
                     className="font-mono text-xs hover:text-primary truncate flex-1 min-w-0"
                   >
                     {edge.target_id}
                   </Link>
-                  <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
-                    w={edge.weight.toFixed(2)}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleApplyEdge(edge)}
-                    className="h-6 font-mono text-[10px] uppercase"
-                  >
-                    Apply
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      setDismissedEdges((s) => new Set(s).add(edge.target_id))
-                    }
-                    className="h-6 w-6 p-0"
-                  >
-                    <X className="size-3" />
-                  </Button>
+                  <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => handleApplyEdge(edge)}
+                      className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest border-primary/20 text-primary hover:bg-primary/10"
+                    >
+                      Apply
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setDismissedEdges((s) => new Set(s).add(edge.target_id))
+                      }
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500"
+                    >
+                      <X className="size-3.5" />
+                    </Button>
+                  </div>
                 </div>
               ))}
           </div>
         </div>
       )}
 
-      {/* Raw debug (collapsed) */}
+      {/* Raw Intelligence Data */}
       {a.raw && (
-        <details className="border border-border bg-card p-3">
-          <summary className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground cursor-pointer">
-            Raw model output
+        <details className="group space-y-3">
+          <summary className="flex items-center gap-2 font-mono text-[10px] font-black uppercase tracking-[2px] text-muted-foreground hover:text-primary cursor-pointer transition-colors list-none">
+            <Terminal className="size-3.5" />
+            Raw Model Output
+            <span className="ml-auto text-[8px] opacity-0 group-open:opacity-100">READONLY MONACO</span>
           </summary>
-          <pre className="text-[10px] font-mono mt-2 whitespace-pre-wrap break-all text-muted-foreground max-h-60 overflow-auto">
-            {a.raw}
-          </pre>
+          <div className="rounded-lg border border-border bg-muted/20 dark:bg-black/40 overflow-hidden shadow-inner">
+            <Editor
+              height="300px"
+              defaultLanguage="json"
+              theme="vs-dark"
+              value={a.raw}
+              options={{
+                readOnly: true,
+                minimap: { enabled: false },
+                fontSize: 11,
+                fontFamily: "var(--font-mono)",
+                lineNumbers: "on",
+                scrollBeyondLastLine: false,
+                padding: { top: 12, bottom: 12 },
+                backgroundColor: "#00000000",
+                domReadOnly: true,
+              }}
+            />
+          </div>
         </details>
       )}
     </div>
