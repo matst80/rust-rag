@@ -3,6 +3,25 @@
 import { FileText, Link2, Sparkles } from "lucide-react"
 import type { SearchResult, RelatedResult } from "@/lib/api"
 import { EntryCard } from "../entries/entry-card"
+import { AiAssistPanel } from "../ai/ai-assist-panel"
+
+function buildSearchPrompt(query: string, results: SearchResult[]): string {
+  const top = results.slice(0, 6)
+  const blocks = top
+    .map((r, i) => {
+      const text = (r.text ?? "").slice(0, 600).replace(/\s+/g, " ")
+      return `[${i + 1}] (${r.source_id} · ${r.id})\n${text}`
+    })
+    .join("\n\n")
+  return `You are a careful assistant summarizing search hits for a personal knowledge base.
+
+Query: "${query}"
+
+Top results:
+${blocks}
+
+Write a concise answer (3-6 sentences, markdown). Cite the hit numbers like [1], [3]. If the results don't actually answer the query, say so plainly.`
+}
 
 interface SearchResultsProps {
   results: SearchResult[]
@@ -47,6 +66,12 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
         </div>
         <div className="h-px flex-1 bg-border" />
       </div>
+
+      <AiAssistPanel
+        label="Summarize results"
+        hint={`${Math.min(results.length, 6)} top hits`}
+        buildPrompt={() => buildSearchPrompt(query, results)}
+      />
 
       <div className="flex flex-col divide-y divide-border border border-border">
         {results.map((result, index) => (

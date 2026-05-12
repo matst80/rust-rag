@@ -21,7 +21,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
   const [isAssisted, setIsAssisted] = useState(defaultAssisted)
   const [isHybrid, setIsHybrid] = useState(true)
-  const [isRerank, setIsRerank] = useState(false)
+  const [isRerank, setIsRerank] = useState(true)
 
   // Assisted mode state
   const [isStreaming, setIsStreaming] = useState(false)

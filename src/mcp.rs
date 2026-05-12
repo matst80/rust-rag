@@ -92,6 +92,10 @@ pub struct UpdateItemParams {
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: serde_json::Value,
     pub source_id: String,
+    /// Optional wiki path. Pass an empty string to clear, omit to keep
+    /// the existing value, or a slash-separated path to set/replace.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -189,11 +193,195 @@ pub struct ChannelSummaryPayload {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct WaitForMessageParams {
+    /// Channel to listen on. Required.
+    pub channel: String,
+    /// Optional sender filter (exact match).
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// Optional kind filter (exact match).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Substring match against message text. Case-sensitive.
+    #[serde(default)]
+    pub contains: Option<String>,
+    /// Subset match against metadata: every key/value pair in the supplied
+    /// object must appear (and equal) in the incoming message metadata.
+    #[serde(default)]
+    pub metadata_match: Option<serde_json::Value>,
+    /// Inclusive lower bound on `created_at` (ms). Buffered messages newer
+    /// than this that match filters are returned synchronously without
+    /// waiting. Defaults to "now" (only future messages match).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Seconds to block. Default 60, max 600.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WaitForMessageResponse {
+    pub matched: bool,
+    pub message: Option<MessagePayload>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GraphNeighborhoodParams {
     pub id: String,
     pub depth: Option<usize>,
     pub limit: Option<usize>,
     pub edge_type: Option<GraphEdgeType>,
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema)]
+pub struct AcpInstancesResponse {
+    pub instances: Vec<crate::acp_discovery::AcpInstance>,
+    pub active: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpSelectInstanceParams {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpSpawnParams {
+    pub project_path: String,
+    #[serde(default)]
+    pub agent_command: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpSendPromptParams {
+    pub session_id: String,
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpSessionIdParams {
+    pub session_id: String,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpEndSessionParams {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<i64>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpSetPermissionModeParams {
+    pub session_id: String,
+    /// "auto" | "manual"
+    pub mode: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpPermissionRespondParams {
+    pub request_id: String,
+    /// allow_once | allow_always | deny | deny_always
+    pub decision: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
+pub struct AcpRecentEventsParams {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub since_local_seq: Option<u64>,
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
+pub struct AcpInstanceParams {
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpDelegateTaskParams {
+    /// Human-readable name for the Telegram forum topic and metadata.title.
+    /// Used by the daemon when auto-creating the topic for this session.
+    pub name: String,
+    /// Absolute path the spawned ACP session should treat as its working dir.
+    pub project_path: String,
+    /// Prompt text sent once SessionStarted is observed.
+    pub text: String,
+    #[serde(default)]
+    pub agent_command: Option<String>,
+    /// Extra metadata merged into the spawn payload as-is. The Telegram topic
+    /// label is set via `bind_telegram_thread { name }` after SessionStarted —
+    /// metadata is no longer used for topic naming.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Seconds to wait for SessionStarted before giving up. Default 15.
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpEventsResponse {
+    pub events: Vec<crate::acp_ws::AcpEvent>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpSnapshotResponse {
+    pub snapshot: Option<crate::acp_ws::AcpEvent>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpCommandAck {
+    pub ok: bool,
+    /// Wire variant the daemon will see (e.g. "spawn_session").
+    pub sent: String,
+    /// Optional context (e.g. echoed `request_id` for permission_response).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpDelegateTaskResponse {
+    pub ok: bool,
+    pub session_id: Option<String>,
+    /// Topic name passed in. Echoed for caller convenience.
+    pub name: String,
+    /// True when a `bind_telegram_thread` command was issued after SessionStarted.
+    pub telegram_bound: bool,
+    /// Resolved Telegram forum topic id, populated from a
+    /// `telegram_thread_bound` ack event (telegram-acp ≥ v1.4). `None` when
+    /// the daemon hasn't shipped the ack event yet — caller can poll
+    /// `acp_recent_events { kinds: ["telegram_thread_bound"] }` instead.
+    pub thread_id: Option<i64>,
+    pub note: Option<String>,
 }
 
 #[tool_router(router = tool_router)]
@@ -204,7 +392,7 @@ impl RustRagMcpServer {
         Ok(Json(body.0))
     }
 
-    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability.")]
+    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability. Optional `path` (slash-separated, e.g. 'team/handbook') groups the entry in the wiki tree under its source_id.")]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
@@ -216,17 +404,34 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar)."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
-        Parameters(request): Parameters<SearchRequest>,
+        Parameters(mut request): Parameters<SearchRequest>,
     ) -> Result<CallToolResult, String> {
+        request.rerank = request.rerank.or(Some(true));
         let query = request.query.clone();
         let response = search_core(&self.state, request, None)
             .await
             .map_err(stringify_api_error)?;
         Ok(format_search_result(&response, &query))
+    }
+
+    #[tool(description = "Dry-run LLM analysis of a candidate entry: embeds it, retrieves top-K semantically similar neighbors, then asks an OpenAI-compatible chat backend to classify the candidate vs each neighbor (agrees/refines/supersedes/contradicts/duplicates/unrelated) and extract cluster_hint, tags, title, summary, doc_type, freshness, quality, suggested_edges. Returns the analysis JSON without writing anything. Useful for the entry-view re-run button or for previewing what `store_entry` would auto-tag. Server must be configured with RAG_ANALYSIS_ENABLED + model.")]
+    async fn analyze_entry(
+        &self,
+        Parameters(params): Parameters<crate::api::AnalyzeEntryParams>,
+    ) -> Result<Json<crate::api::StoreAnalysis>, String> {
+        crate::api::run_analysis(
+            &self.state,
+            &params.text,
+            params.source_id.as_deref(),
+            params.exclude_id.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
     }
 
     #[tool(description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or a hand-off message references a specific entry id.")]
@@ -255,12 +460,16 @@ impl RustRagMcpServer {
         }))
     }
 
-    #[tool(description = "List items, optionally filtered by source_id.")]
+    #[tool(description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing.")]
     async fn list_items(
         &self,
         Parameters(query): Parameters<ListItemsQuery>,
     ) -> Result<Json<AdminItemsResponse>, String> {
         let store = self.state.store.clone();
+        let path_prefix = match query.path_prefix.as_deref() {
+            Some(p) => crate::db::normalize_path(p).map_err(|e| e.to_string())?,
+            None => None,
+        };
         let request = ListItemsRequest {
             source_id: query.source_id,
             limit: query.limit,
@@ -269,6 +478,7 @@ impl RustRagMcpServer {
             metadata_filter: query.metadata,
             min_created_at: query.min_created_at,
             max_created_at: query.max_created_at,
+            path_prefix,
         };
         let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -280,16 +490,21 @@ impl RustRagMcpServer {
         }))
     }
 
-    #[tool(description = "Update an existing item by id.")]
+    #[tool(description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched.")]
     async fn update_item(
         &self,
         Parameters(params): Parameters<UpdateItemParams>,
     ) -> Result<Json<AdminItemPayload>, String> {
         let id = params.id.clone();
+        let path_override: Option<Option<String>> = match params.path.as_deref() {
+            Some(p) => Some(crate::db::normalize_path(p).map_err(|e| e.to_string())?),
+            None => None,
+        };
         let request = UpdateItemRequest {
             text: params.text,
             metadata: params.metadata,
             source_id: params.source_id,
+            path: params.path,
         };
         let embedder = self
             .state
@@ -302,12 +517,17 @@ impl RustRagMcpServer {
             let existing = store
                 .get_item(&id)?
                 .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
+            let new_path = match path_override {
+                Some(p) => p,
+                None => existing.path.clone(),
+            };
             let item = ItemRecord {
                 id: existing.id,
                 text: request.text,
                 metadata: request.metadata,
                 source_id: request.source_id,
                 created_at: existing.created_at,
+                path: new_path,
             };
             let embedding = embedder.embed(&item.text)?;
             store.upsert_item(item.clone(), &embedding)?;
@@ -388,8 +608,100 @@ impl RustRagMcpServer {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        self.state.message_notify.notify_waiters();
+        self.state.publish_message(&record);
         Ok(Json(record.into()))
+    }
+
+    #[tool(
+        description = "Block until a message arrives in `channel` matching the supplied filters (sender, kind, contains substring, metadata_match subset), then return it. Hands-off rendezvous: external systems post a message when an event happens (deploy completed, daemon ready, task finished) and the waiter wakes synchronously instead of polling. `since` (ms) lets the caller catch messages it might have missed between previous calls — buffered matches are returned immediately without waiting. Timeout default 60s, max 600s. When the timeout elapses with no match, returns `{ matched: false }`."
+    )]
+    async fn wait_for_message(
+        &self,
+        Parameters(params): Parameters<WaitForMessageParams>,
+    ) -> Result<Json<WaitForMessageResponse>, String> {
+        let channel = params.channel.trim().to_owned();
+        if channel.is_empty() {
+            return Err("channel cannot be empty".into());
+        }
+        let timeout = Duration::from_secs(params.timeout_secs.unwrap_or(60).clamp(1, 600));
+        let since = params.since.unwrap_or_else(now_ms);
+        let metadata_match = match params.metadata_match {
+            Some(serde_json::Value::Object(m)) => Some(m),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => return Err("metadata_match must be a JSON object".into()),
+        };
+
+        // Subscribe BEFORE the catch-up query to avoid a TOCTOU gap where a
+        // message lands between the query and the subscription.
+        let mut rx = self.state.message_broadcast.subscribe();
+
+        // Catch-up: any matching record already buffered with created_at > since.
+        let messages = self.state.messages.clone();
+        let query = MessageQuery {
+            channel: Some(channel.clone()),
+            sender: params.sender.clone(),
+            kind: params.kind.clone(),
+            min_created_at: Some(since),
+            max_created_at: None,
+            limit: Some(50),
+            offset: None,
+            sort_order: SortOrder::Asc,
+        };
+        let (existing, _) = tokio::task::spawn_blocking(move || messages.list_messages(query))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        for record in existing {
+            if message_matches(
+                &record,
+                &channel,
+                params.sender.as_deref(),
+                params.kind.as_deref(),
+                params.contains.as_deref(),
+                metadata_match.as_ref(),
+            ) {
+                return Ok(Json(WaitForMessageResponse {
+                    matched: true,
+                    message: Some(record.into()),
+                }));
+            }
+        }
+
+        // Block on broadcast until match or timeout.
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(Json(WaitForMessageResponse {
+                    matched: false,
+                    message: None,
+                }));
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(record)) => {
+                    if message_matches(
+                        &record,
+                        &channel,
+                        params.sender.as_deref(),
+                        params.kind.as_deref(),
+                        params.contains.as_deref(),
+                        metadata_match.as_ref(),
+                    ) {
+                        return Ok(Json(WaitForMessageResponse {
+                            matched: true,
+                            message: Some(record.into()),
+                        }));
+                    }
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) | Err(_) => {
+                    return Ok(Json(WaitForMessageResponse {
+                        matched: false,
+                        message: None,
+                    }));
+                }
+            }
+        }
     }
 
     #[tool(
@@ -692,6 +1004,479 @@ impl RustRagMcpServer {
         }
         Ok(Json(DeleteResponse { id, deleted }))
     }
+
+    #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
+    async fn attach_url(
+        &self,
+        Parameters(request): Parameters<crate::api::attachments::AttachUrlRequest>,
+    ) -> Result<Json<crate::api::attachments::AttachmentSummary>, String> {
+        crate::api::attachments::attach_from_url_core(&self.state, request)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
+    #[tool(description = "List every file attached to an entry, newest first.")]
+    async fn list_attachments(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<crate::api::attachments::AttachmentsResponse>, String> {
+        let store = self.state.store.clone();
+        let target = id.clone();
+        let records =
+            tokio::task::spawn_blocking(move || store.list_attachments_for_item(&target))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+        Ok(Json(crate::api::attachments::AttachmentsResponse {
+            attachments: records.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(description = "Delete an attachment by id. Removes both the database row and the on-disk file.")]
+    async fn delete_attachment(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<DeleteResponse>, String> {
+        crate::api::attachments::delete_attachment_core(&self.state, &id)
+            .await
+            .map_err(stringify_api_error)?;
+        Ok(Json(DeleteResponse { id, deleted: true }))
+    }
+
+    #[tool(description = "Browse entries hierarchically by wiki path. Returns direct child path segments under `prefix` (or top-level when omitted) plus any leaf entries whose path equals `prefix`. Always scoped by `source_id`.")]
+    async fn list_entry_tree(
+        &self,
+        Parameters(query): Parameters<crate::api::attachments::EntriesTreeQuery>,
+    ) -> Result<Json<crate::api::attachments::EntriesTreeResponse>, String> {
+        crate::api::attachments::entries_tree_core(&self.state, query)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
+    // --- ACP delegation surface ---
+
+    #[tool(description = "List discovered ACP daemon instances (mDNS + HTTP-registered) and the currently selected one. Use the returned `name` with `acp_select_instance` to switch the WS target.")]
+    async fn acp_list_instances(&self) -> Result<Json<AcpInstancesResponse>, String> {
+        let disc = self
+            .state
+            .acp_discovery
+            .as_ref()
+            .ok_or_else(|| "acp discovery not enabled".to_string())?;
+        let instances = disc.list().await;
+        let active = disc.active().await.map(|i| i.name);
+        Ok(Json(AcpInstancesResponse { instances, active }))
+    }
+
+    #[tool(description = "Select an ACP daemon instance by name. The WS client reconnects to the new target. Returns the resolved instance.")]
+    async fn acp_select_instance(
+        &self,
+        Parameters(AcpSelectInstanceParams { name }): Parameters<AcpSelectInstanceParams>,
+    ) -> Result<Json<crate::acp_discovery::AcpInstance>, String> {
+        let disc = self
+            .state
+            .acp_discovery
+            .as_ref()
+            .ok_or_else(|| "acp discovery not enabled".to_string())?;
+        disc.select(&name)
+            .await
+            .map(Json)
+            .ok_or_else(|| format!("unknown acp instance: {name}"))
+    }
+
+    #[tool(description = "Ask the target ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`. Pass `instance` to disambiguate when multiple are registered.")]
+    async fn acp_list_sessions(
+        &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command("list_sessions", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "list_sessions".into(), context: None }))
+    }
+
+    #[tool(description = "Spawn a headless ACP session on the target daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt. Pass `instance` when multiple are registered.")]
+    async fn acp_spawn_session(
+        &self,
+        Parameters(params): Parameters<AcpSpawnParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let mut payload = serde_json::Map::new();
+        payload.insert("project_path".into(), serde_json::Value::String(params.project_path));
+        if let Some(cmd) = params.agent_command {
+            payload.insert("agent_command".into(), serde_json::Value::String(cmd));
+        }
+        if let Some(meta) = params.metadata {
+            payload.insert("metadata".into(), meta);
+        }
+        h.command("spawn_session", serde_json::Value::Object(payload))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "spawn_session".into(), context: None }))
+    }
+
+    #[tool(description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`. Pass `instance` when multiple are registered.")]
+    async fn acp_send_prompt(
+        &self,
+        Parameters(params): Parameters<AcpSendPromptParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let mut payload = serde_json::Map::new();
+        payload.insert("session_id".into(), serde_json::Value::String(params.session_id));
+        payload.insert("text".into(), serde_json::Value::String(params.text));
+        if let Some(att) = params.attachments {
+            payload.insert(
+                "attachments".into(),
+                serde_json::Value::Array(att.into_iter().map(serde_json::Value::String).collect()),
+            );
+        }
+        h.command("send_prompt", serde_json::Value::Object(payload))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "send_prompt".into(), context: None }))
+    }
+
+    #[tool(description = "Cancel the currently running prompt on an ACP session.")]
+    async fn acp_cancel(
+        &self,
+        Parameters(params): Parameters<AcpSessionIdParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command("cancel", serde_json::json!({ "session_id": params.session_id }))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "cancel".into(), context: None }))
+    }
+
+    #[tool(description = "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback.")]
+    async fn acp_end_session(
+        &self,
+        Parameters(params): Parameters<AcpEndSessionParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let mut payload = serde_json::Map::new();
+        if let Some(s) = params.session_id {
+            payload.insert("session_id".into(), serde_json::Value::String(s));
+        }
+        if let Some(t) = params.thread_id {
+            payload.insert("thread_id".into(), serde_json::Value::Number(t.into()));
+        }
+        if payload.is_empty() {
+            return Err("session_id or thread_id required".into());
+        }
+        h.command("end_session", serde_json::Value::Object(payload))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "end_session".into(), context: None }))
+    }
+
+    #[tool(description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\").")]
+    async fn acp_set_permission_mode(
+        &self,
+        Parameters(params): Parameters<AcpSetPermissionModeParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "set_permission_mode",
+            serde_json::json!({ "session_id": params.session_id, "mode": params.mode }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "set_permission_mode".into(), context: None }))
+    }
+
+    #[tool(description = "Reply to an outstanding PermissionRequest. `decision` ∈ allow_once | allow_always | deny | deny_always.")]
+    async fn acp_permission_respond(
+        &self,
+        Parameters(params): Parameters<AcpPermissionRespondParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "permission_response",
+            serde_json::json!({ "request_id": params.request_id, "decision": params.decision }),
+        )
+        .map_err(|e| e.to_string())?;
+        h.mark_permission_resolved(&params.request_id).await;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "permission_response".into(),
+            context: Some(serde_json::json!({ "request_id": params.request_id })),
+        }))
+    }
+
+    #[tool(description = "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Buffers up to ~200 events per session.")]
+    async fn acp_recent_events(
+        &self,
+        Parameters(params): Parameters<AcpRecentEventsParams>,
+    ) -> Result<Json<AcpEventsResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let events = h
+            .recent_events(
+                params.session_id.as_deref(),
+                params.since_local_seq,
+                params.kinds.as_deref(),
+                params.limit,
+            )
+            .await;
+        Ok(Json(AcpEventsResponse { events }))
+    }
+
+    #[tool(description = "List outstanding PermissionRequest events awaiting a decision.")]
+    async fn acp_pending_permissions(
+        &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
+    ) -> Result<Json<AcpEventsResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        Ok(Json(AcpEventsResponse {
+            events: h.pending_permissions().await,
+        }))
+    }
+
+    #[tool(description = "Return the most recent Snapshot event (full session state) the WS client has seen, or null if none yet.")]
+    async fn acp_get_snapshot(
+        &self,
+        Parameters(params): Parameters<AcpInstanceParams>,
+    ) -> Result<Json<AcpSnapshotResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        Ok(Json(AcpSnapshotResponse {
+            snapshot: h.latest_snapshot().await,
+        }))
+    }
+
+    #[tool(description = "One-shot delegation: spawn a headless ACP session in `project_path`, wait for SessionStarted (default 15s), bind a fresh Telegram forum topic named `name`, then send `text` as a prompt. `name` becomes metadata.title/metadata.name on spawn so the daemon can label the auto-created topic. Returns the new session_id, or `ok=false` with a hint if SessionStarted didn't arrive in time.")]
+    async fn acp_delegate_task(
+        &self,
+        Parameters(params): Parameters<AcpDelegateTaskParams>,
+    ) -> Result<Json<AcpDelegateTaskResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let name = params.name.trim().to_string();
+        if name.is_empty() {
+            return Err("name must not be empty".into());
+        }
+        if name.chars().count() > 128 {
+            return Err("name exceeds Telegram forum-topic cap (128 chars)".into());
+        }
+        if name.chars().any(|c| c.is_control()) {
+            return Err("name must not contain control characters".into());
+        }
+        let mut rx = h.subscribe();
+
+        let mut spawn_payload = serde_json::Map::new();
+        spawn_payload.insert(
+            "project_path".into(),
+            serde_json::Value::String(params.project_path),
+        );
+        if let Some(cmd) = params.agent_command {
+            spawn_payload.insert("agent_command".into(), serde_json::Value::String(cmd));
+        }
+        if let Some(meta) = params.metadata {
+            spawn_payload.insert("metadata".into(), meta);
+        }
+
+        h.command("spawn_session", serde_json::Value::Object(spawn_payload))
+            .map_err(|e| e.to_string())?;
+
+        let wait = Duration::from_secs(params.wait_secs.unwrap_or(15).clamp(1, 120));
+        let deadline = tokio::time::Instant::now() + wait;
+
+        let session_id = wait_for_event(&mut rx, deadline, |frame| parse_session_started(frame))
+            .await;
+
+        let Some(sid) = session_id else {
+            return Ok(Json(AcpDelegateTaskResponse {
+                ok: false,
+                session_id: None,
+                name,
+                telegram_bound: false,
+                thread_id: None,
+                note: Some(
+                    "SessionStarted not observed within wait window; poll acp_recent_events for SessionStarted, then bind_telegram_thread + send_prompt manually".into(),
+                ),
+            }));
+        };
+
+        // bind_telegram_thread v1.4: { session_id, thread_id: null, name }.
+        // Daemon validates `name` (1..=128, no control chars) and emits a
+        // `telegram_thread_bound` ack carrying the resolved thread_id.
+        let bind_ok = h
+            .command(
+                "bind_telegram_thread",
+                serde_json::json!({
+                    "session_id": sid,
+                    "thread_id": serde_json::Value::Null,
+                    "name": name,
+                }),
+            )
+            .is_ok();
+
+        // Short window to capture the ack. v1.3 daemons won't emit it — fall
+        // through to send_prompt with thread_id = None.
+        let bind_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let target_sid = sid.clone();
+        let thread_id = if bind_ok {
+            wait_for_event(&mut rx, bind_deadline, |frame| {
+                parse_telegram_thread_bound(frame, &target_sid)
+            })
+            .await
+        } else {
+            None
+        };
+
+        h.command(
+            "send_prompt",
+            serde_json::json!({ "session_id": sid, "text": params.text }),
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(Json(AcpDelegateTaskResponse {
+            ok: true,
+            session_id: Some(sid),
+            name,
+            telegram_bound: bind_ok,
+            thread_id,
+            note: None,
+        }))
+    }
+}
+
+async fn require_acp(
+    state: &AppState,
+    instance: Option<&str>,
+) -> Result<std::sync::Arc<crate::acp_ws::AcpWsHandle>, String> {
+    let registry = state
+        .acp_ws
+        .as_ref()
+        .ok_or_else(|| "ACP WS registry not initialized".to_string())?;
+    if let Some(worker) = registry.resolve(instance).await {
+        return Ok(worker);
+    }
+    let n = registry.len().await;
+    if n == 0 {
+        Err("no ACP instances registered; start a daemon or POST /api/acp/register".to_string())
+    } else if instance.is_some() {
+        Err(format!("unknown ACP instance '{}'", instance.unwrap_or("?")))
+    } else {
+        Err(format!(
+            "multiple ACP instances registered ({n}); specify `instance` (see /api/acp/instances)"
+        ))
+    }
+}
+
+/// Filter predicate for `wait_for_message`. All supplied filters must match.
+fn message_matches(
+    record: &crate::db::MessageRecord,
+    channel: &str,
+    sender: Option<&str>,
+    kind: Option<&str>,
+    contains: Option<&str>,
+    metadata_match: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if record.channel != channel {
+        return false;
+    }
+    if let Some(s) = sender {
+        if record.sender != s {
+            return false;
+        }
+    }
+    if let Some(k) = kind {
+        if record.kind != k {
+            return false;
+        }
+    }
+    if let Some(needle) = contains {
+        if !record.text.contains(needle) {
+            return false;
+        }
+    }
+    if let Some(expected) = metadata_match {
+        let actual = match record.metadata.as_object() {
+            Some(m) => m,
+            None => return false,
+        };
+        for (k, v) in expected {
+            if actual.get(k) != Some(v) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Drain frames from a daemon broadcast subscriber until `extract` returns
+/// `Some(_)` or the deadline elapses. Handles `Lagged` by continuing.
+async fn wait_for_event<T, F>(
+    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    deadline: tokio::time::Instant,
+    mut extract: F,
+) -> Option<T>
+where
+    F: FnMut(&str) -> Option<T>,
+{
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(text)) => {
+                if let Some(v) = extract(&text) {
+                    return Some(v);
+                }
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(_)) | Err(_) => return None,
+        }
+    }
+}
+
+/// Pull `(kind, payload_object)` out of a daemon frame. Tolerates both
+/// `{ "Variant": {...} }` and `{ "type"|"kind": "variant", ... }` shapes.
+fn extract_kind_payload(text: &str) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let map = value.as_object()?;
+    if map.len() == 1 {
+        let (k, v) = map.iter().next()?;
+        let payload = v.as_object()?.clone();
+        return Some((k.clone(), payload));
+    }
+    let kind = map
+        .get("type")
+        .or_else(|| map.get("kind"))
+        .and_then(|v| v.as_str())?
+        .to_owned();
+    Some((kind, map.clone()))
+}
+
+fn kind_eq(actual: &str, snake: &str, camel: &str) -> bool {
+    actual.eq_ignore_ascii_case(camel) || actual == snake
+}
+
+/// Best-effort parse of a daemon WS frame to extract `acp_session_id` from a
+/// SessionStarted envelope.
+fn parse_session_started(text: &str) -> Option<String> {
+    let (kind, payload) = extract_kind_payload(text)?;
+    if !kind_eq(&kind, "session_started", "SessionStarted") {
+        return None;
+    }
+    payload
+        .get("acp_session_id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+/// Parse the v1.4 `telegram_thread_bound` ack. Returns the resolved thread_id
+/// only when the event references the session we just bound.
+fn parse_telegram_thread_bound(text: &str, expect_session: &str) -> Option<i64> {
+    let (kind, payload) = extract_kind_payload(text)?;
+    if !kind_eq(&kind, "telegram_thread_bound", "TelegramThreadBound") {
+        return None;
+    }
+    let sid = payload
+        .get("session_id")
+        .or_else(|| payload.get("acp_session_id"))
+        .and_then(|v| v.as_str())?;
+    if sid != expect_session {
+        return None;
+    }
+    payload.get("thread_id").and_then(|v| v.as_i64())
 }
 
 fn stringify_api_error(error: crate::api::ApiError) -> String {
@@ -750,6 +1535,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 chunk_context: None,
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
+                path: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -788,7 +1574,9 @@ pub fn streamable_http_service(
     let factory_state = state;
     let config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
-        .with_sse_keep_alive(Some(Duration::from_secs(15)));
+        .with_sse_keep_alive(Some(Duration::from_secs(15)))
+        .with_stateful_mode(false)
+        .with_json_response(true);
     StreamableHttpService::new(
         move || Ok(RustRagMcpServer::new(factory_state.clone())),
         Arc::new(LocalSessionManager::default()),

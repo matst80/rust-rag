@@ -1,7 +1,20 @@
 use anyhow::Result;
+use opentelemetry::{KeyValue, trace::TracerProvider as _};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{
+    Resource,
+    logs::LoggerProvider,
+    metrics::{PeriodicReader, SdkMeterProvider},
+    runtime,
+    trace::TracerProvider,
+};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::info;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use rust_rag::{
     api::{AppState, EmbedderHandle},
@@ -12,14 +25,116 @@ use rust_rag::{
     manager, ontology,
 };
 
+/// Bundle of OTel providers built from env. Caller shuts each down at exit.
+struct OtelProviders {
+    tracer: TracerProvider,
+    logger: LoggerProvider,
+    meter: SdkMeterProvider,
+}
+
+/// Build OTLP-gRPC trace + log + metric pipelines if `RAG_OTEL_ENABLED=true`.
+fn init_otel() -> Result<Option<OtelProviders>> {
+    let enabled = std::env::var("RAG_OTEL_ENABLED")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_owned());
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "rust-rag".to_owned());
+    let resource = Resource::new([KeyValue::new("service.name", service_name.clone())]);
+
+    let span_exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let tracer = TracerProvider::builder()
+        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
+        .build();
+
+    let log_exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let logger = LoggerProvider::builder()
+        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .with_resource(resource.clone())
+        .build();
+
+    let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+    let reader = PeriodicReader::builder(metric_exporter, runtime::Tokio)
+        .with_interval(std::time::Duration::from_secs(15))
+        .build();
+    let meter = SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(resource)
+        .build();
+
+    opentelemetry::global::set_meter_provider(meter.clone());
+
+    eprintln!("otel: traces+logs+metrics → {endpoint} (service={service_name})");
+    Ok(Some(OtelProviders { tracer, logger, meter }))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_rag=info,axum=info,tower_http=info".into()),
-        )
-        .init();
+    // fmt subscriber stays terse: drop tower_http's per-request DEBUG events
+    // and normal axum chatter from console output. OTel layer (below) gets
+    // its own filter that opens these up so request spans actually export.
+    let fmt_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "rust_rag=info,axum=info,tower_http=info".into());
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_filter(fmt_filter);
+
+    let otel_provider = init_otel()?;
+    if let Some(providers) = otel_provider.as_ref() {
+        // Request spans live at DEBUG inside tower_http; export them so
+        // every HTTP call shows up as a root span at the collector. Keep
+        // rust-rag at info to avoid drowning the trace stream.
+        let otel_filter = std::env::var("RAG_OTEL_FILTER")
+            .ok()
+            .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
+            .unwrap_or_else(|| {
+                tracing_subscriber::EnvFilter::new(
+                    "rust_rag=info,axum=info,tower_http=debug",
+                )
+            });
+        let log_filter = std::env::var("RAG_OTEL_LOG_FILTER")
+            .ok()
+            .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
+            .unwrap_or_else(|| {
+                tracing_subscriber::EnvFilter::new("rust_rag=info,axum=info,tower_http=info")
+            });
+        let tracer = providers.tracer.tracer("rust-rag");
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(otel_filter);
+        let log_layer = OpenTelemetryTracingBridge::new(&providers.logger).with_filter(log_filter);
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(otel_layer)
+            .with(log_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry().with(fmt_layer).init();
+    }
+
+    if otel_provider.is_some() {
+        let meter = opentelemetry::global::meter("rust-rag");
+        let started = std::time::Instant::now();
+        let uptime = meter
+            .u64_observable_gauge("rust_rag.uptime_seconds")
+            .with_description("Seconds since process start")
+            .with_callback(move |obs| obs.observe(started.elapsed().as_secs(), &[]))
+            .build();
+        // Leak so the callback registration outlives this scope.
+        Box::leak(Box::new(uptime));
+    }
 
     let config = AppConfig::from_env()?;
     println!("rust-rag booting");
@@ -106,7 +221,8 @@ async fn main() -> Result<()> {
         config.upload_path.clone(),
         config.chunking.clone(),
     )
-    .with_manager(config.manager.clone());
+    .with_manager(config.manager.clone())
+    .with_analysis(config.analysis.clone());
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
@@ -183,27 +299,52 @@ async fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(50_usize);
 
-    let acp_ws_handle = rust_rag::acp_ws::spawn(config.acp_ws.clone());
+    let acp_registry = rust_rag::acp_ws::AcpWsRegistry::new(&config.acp_ws);
     let mut state = state;
     state.md_chunker = md_chunker;
-    state.acp_ws = acp_ws_handle.clone();
+    state.acp_ws = Some(acp_registry.clone());
     if let Some(r) = reranker {
         state.reranker = Some(r);
         state.reranker_top_n = reranker_top_n.max(1);
     }
 
-    // mDNS browser for `_acp-ws._tcp`. When an instance is selected (auto on
-    // first sight or via API), point the existing acp_ws client at it.
+    // ACP instance discovery. Default: mDNS browse `_acp-ws._tcp` on the LAN.
+    // When the service runs in k8s on a subnet that can't see the user's
+    // network (multicast doesn't traverse), set RAG_ACP_DISCOVERY_MODE=http
+    // so clients register over HTTP instead.
+    //
+    // Every discovered/registered instance gets its own worker in the
+    // registry, so multiple daemons can be served concurrently to multiple
+    // browser tabs.
     let acp_token = config.acp_ws.token.clone();
-    let ws_for_disc = acp_ws_handle.clone();
-    let discovery = rust_rag::acp_discovery::spawn(move |instance| {
-        let Some(handle) = ws_for_disc.clone() else { return };
-        let url = instance.url.clone();
-        let token = acp_token.clone();
-        tokio::spawn(async move {
-            handle.set_target(url, token).await;
-        });
-    });
+    let registry_for_register = acp_registry.clone();
+    let registry_for_unregister = acp_registry.clone();
+    let hooks = rust_rag::acp_discovery::DiscoveryHooks {
+        on_register: std::sync::Arc::new(move |instance| {
+            let registry = registry_for_register.clone();
+            let name = instance.name.clone();
+            let url = instance.url.clone();
+            let token = acp_token.clone();
+            tokio::spawn(async move {
+                registry.register(name, url, token).await;
+            });
+        }),
+        on_unregister: std::sync::Arc::new(move |name| {
+            let registry = registry_for_unregister.clone();
+            let name = name.to_owned();
+            tokio::spawn(async move {
+                registry.unregister(&name).await;
+            });
+        }),
+        on_select: std::sync::Arc::new(|_| {}),
+    };
+    let discovery_mode = std::env::var("RAG_ACP_DISCOVERY_MODE")
+        .unwrap_or_else(|_| "mdns".to_owned())
+        .to_lowercase();
+    let discovery = match discovery_mode.as_str() {
+        "http" | "register" | "off" => Some(rust_rag::acp_discovery::spawn_http_only(hooks)),
+        _ => rust_rag::acp_discovery::spawn(hooks),
+    };
     state.acp_discovery = discovery;
 
     let app = build_app(state.clone());
@@ -286,6 +427,13 @@ async fn main() -> Result<()> {
 
     info!("closing sqlite store");
     store.close()?;
+
+    if let Some(providers) = otel_provider {
+        info!("flushing otel exporters");
+        let _ = providers.tracer.shutdown();
+        let _ = providers.logger.shutdown();
+        let _ = providers.meter.shutdown();
+    }
     Ok(())
 }
 

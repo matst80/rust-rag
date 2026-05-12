@@ -7,6 +7,10 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {
+      input: {
+        index: 'index.html',
+        sidepanel: 'sidepanel.html',
+      },
       output: {
         // Predictable filenames — Chrome extensions don't benefit from content hashing
         entryFileNames: '[name].js',

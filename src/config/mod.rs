@@ -109,9 +109,6 @@ pub struct ChunkingConfig {
     /// Characters of the previous chunk's tail to prepend to each chunk's embedding for context.
     /// Env: RAG_CHUNK_OVERLAP_CHARS (default 200)
     pub chunk_overlap_chars: usize,
-    /// Items longer than this are flagged as oversized in the admin panel.
-    /// Env: RAG_LARGE_ITEM_THRESHOLD (default = chunk_max_chars)
-    pub large_item_threshold: usize,
 }
 
 impl Default for ChunkingConfig {
@@ -119,7 +116,6 @@ impl Default for ChunkingConfig {
         Self {
             chunk_max_chars: 1536,
             chunk_overlap_chars: 200,
-            large_item_threshold: 1536,
         }
     }
 }
@@ -211,6 +207,37 @@ pub const fn default_manager_system_prompt() -> &'static str {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnalysisConfig {
+    pub enabled: bool,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub timeout_secs: u64,
+    pub max_neighbors: usize,
+    pub neighbor_threshold: f32,
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: None,
+            api_key: None,
+            model: None,
+            timeout_secs: 30,
+            max_neighbors: 8,
+            neighbor_threshold: 0.65,
+        }
+    }
+}
+
+impl AnalysisConfig {
+    pub fn is_configured(&self) -> bool {
+        self.enabled && self.base_url.is_some() && self.model.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
@@ -237,6 +264,7 @@ pub struct AppConfig {
     pub ontology: OntologyConfig,
     pub manager: ManagerConfig,
     pub acp_ws: AcpWsConfig,
+    pub analysis: AnalysisConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,11 +366,7 @@ impl AppConfig {
             chunking: {
                 let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;
                 let chunk_overlap_chars: usize = parse_env("RAG_CHUNK_OVERLAP_CHARS", "200")?;
-                let large_item_threshold: usize = parse_env(
-                    "RAG_LARGE_ITEM_THRESHOLD",
-                    &chunk_max_chars.to_string(),
-                )?;
-                ChunkingConfig { chunk_max_chars, chunk_overlap_chars, large_item_threshold }
+                ChunkingConfig { chunk_max_chars, chunk_overlap_chars }
             },
             manager: ManagerConfig {
                 enabled: parse_env("RAG_MANAGER_ENABLED", "false")?,
@@ -373,6 +397,19 @@ impl AppConfig {
                 ring_buffer_per_session: parse_env("RAG_ACP_WS_BUFFER", "200")?,
                 reconnect_initial_secs: parse_env("RAG_ACP_WS_RECONNECT_INITIAL_SECS", "1")?,
                 reconnect_max_secs: parse_env("RAG_ACP_WS_RECONNECT_MAX_SECS", "30")?,
+            },
+            analysis: AnalysisConfig {
+                enabled: parse_env("RAG_ANALYSIS_ENABLED", "false")?,
+                base_url: non_empty_var("RAG_ANALYSIS_BASE_URL")
+                    .or_else(|| non_empty_var("RAG_OPENAI_API_BASE_URL"))
+                    .map(|v| v.trim_end_matches('/').to_owned()),
+                api_key: non_empty_var("RAG_ANALYSIS_API_KEY")
+                    .or_else(|| non_empty_var("RAG_OPENAI_API_KEY")),
+                model: non_empty_var("RAG_ANALYSIS_MODEL")
+                    .or_else(|| non_empty_var("RAG_OPENAI_MODEL")),
+                timeout_secs: parse_env("RAG_ANALYSIS_TIMEOUT_SECS", "30")?,
+                max_neighbors: parse_env("RAG_ANALYSIS_MAX_NEIGHBORS", "8")?,
+                neighbor_threshold: parse_env("RAG_ANALYSIS_NEIGHBOR_THRESHOLD", "0.65")?,
             },
             ontology: OntologyConfig {
                 enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,

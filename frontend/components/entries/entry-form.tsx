@@ -27,6 +27,7 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
   const [id, setId] = useState(entry?.id ?? "")
   const [text, setText] = useState(entry?.text ?? "")
   const [sourceId, setSourceId] = useState(entry?.source_id ?? "knowledge")
+  const [path, setPath] = useState(entry?.path ?? "")
   const [metadata, setMetadata] = useState<EntryMetadata>(entry?.metadata ?? {})
   const [newMetaKey, setNewMetaKey] = useState("")
   const [newMetaValue, setNewMetaValue] = useState("")
@@ -62,18 +63,21 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
     }
 
     try {
+      const trimmedPath = path.trim()
       if (mode === "create") {
         await createItem({
           ...(id.trim() && { id: id.trim() }),
           text: text.trim(),
           source_id: sourceId.trim(),
           metadata,
+          ...(trimmedPath && { path: trimmedPath }),
         })
       } else {
         await updateItem({
           text: text.trim(),
           source_id: sourceId.trim(),
           metadata,
+          path: trimmedPath,
         })
       }
       mutate("items")
@@ -127,6 +131,20 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
               onChange={(e) => setSourceId(e.target.value)}
               placeholder="knowledge"
             />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="path">Wiki path (optional)</Label>
+            <Input
+              id="path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="team/handbook"
+            />
+            <p className="text-xs text-muted-foreground">
+              Slash-separated, e.g. <code>engineering/runbooks/db</code>. Used for tree
+              navigation under the source.
+            </p>
           </div>
 
           <div className="flex flex-col gap-2">

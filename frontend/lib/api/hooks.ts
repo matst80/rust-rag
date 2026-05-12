@@ -12,11 +12,13 @@ import type {
   GraphNeighborhood,
   GraphStatus,
   ListItemsRequest,
-  LargeItemsRequest,
   RechunkRequest,
   LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
+  Attachment,
+  EntriesTreeResponse,
+  EntriesPathsResponse,
 } from "./types"
 
 // Categories hooks
@@ -60,13 +62,6 @@ export function useDeleteItem() {
   )
 }
 
-export function useLargeItems(options: LargeItemsRequest = {}) {
-  return useSWR<PagedItems>(
-    ["large-items", options],
-    () => api.items.listLarge(options)
-  )
-}
-
 export function useRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, RechunkRequest>(
     `rechunk-${id}`,
@@ -78,6 +73,54 @@ export function useLlmRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, LlmRechunkRequest>(
     `llm-rechunk-${id}`,
     (_, { arg }) => api.items.llmRechunk(id, arg)
+  )
+}
+
+// Attachments
+export function useAttachments(itemId: string | null) {
+  return useSWR<Attachment[]>(
+    itemId ? ["attachments", itemId] : null,
+    ([, id]) => api.attachments.list(id as string)
+  )
+}
+
+export function useUploadAttachment(itemId: string) {
+  return useSWRMutation<Attachment, Error, unknown[], File>(
+    ["attachments", itemId],
+    (_, { arg }) => api.attachments.upload(itemId, arg)
+  )
+}
+
+export function useAttachUrl(itemId: string) {
+  return useSWRMutation<
+    Attachment,
+    Error,
+    unknown[],
+    { url: string; filename?: string }
+  >(["attachments", itemId], (_, { arg }) =>
+    api.attachments.fromUrl(itemId, arg.url, arg.filename)
+  )
+}
+
+export function useDeleteAttachment(itemId: string) {
+  return useSWRMutation<void, Error, unknown[], string>(
+    ["attachments", itemId],
+    (_, { arg }) => api.attachments.delete(arg)
+  )
+}
+
+// Wiki tree
+export function useEntriesTree(sourceId: string | null, prefix?: string) {
+  return useSWR<EntriesTreeResponse>(
+    sourceId ? ["entries-tree", sourceId, prefix ?? ""] : null,
+    ([, src, p]) => api.tree.get(src as string, (p as string) || undefined)
+  )
+}
+
+export function useEntriesPaths(sourceId?: string) {
+  return useSWR<EntriesPathsResponse>(
+    ["entries-paths", sourceId ?? ""],
+    ([, src]) => api.tree.paths((src as string) || undefined)
   )
 }
 

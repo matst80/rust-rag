@@ -5,6 +5,10 @@ metadata:
   namespace: home
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Long-lived ACP WebSocket at /api/acp/ws needs the default 60s read
+    # timeout bumped so idle-but-alive connections aren't reaped.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx
   rules:

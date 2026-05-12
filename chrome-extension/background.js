@@ -1,6 +1,15 @@
 // background.js
 
 chrome.runtime.onInstalled.addListener(() => {
+  // Open the sidepanel when the action icon is clicked alongside the popup.
+  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+  }
+  chrome.contextMenus.create({
+    id: "open-rag-sidepanel",
+    title: "Open RAG side panel",
+    contexts: ["page", "selection"]
+  });
   chrome.contextMenus.create({
     id: "store-in-rag",
     title: "Store in RAG",
@@ -19,6 +28,12 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "open-rag-sidepanel") {
+    if (chrome.sidePanel && tab && tab.windowId !== undefined) {
+      chrome.sidePanel.open({ windowId: tab.windowId }).catch((err) => console.warn("sidePanel.open failed", err));
+    }
+    return;
+  }
   // info.selectionText is truncated by Chrome for large selections;
   // use executeScript to get the full selection from the page instead.
   if (info.menuItemId === "store-in-rag" || info.menuItemId === "smart-store-in-rag") {

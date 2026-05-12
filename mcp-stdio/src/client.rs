@@ -10,6 +10,10 @@ use rust_rag::api::{
     ListGraphEdgesQuery, ListItemsQuery, ListMessagesQuery, MessagePayload, MessagesResponse,
     SearchRequest, SearchResponse, SendMessageRequest, SmartStoreRequest, SmartStoreResponse,
     StoreRequest, StoreResponse, UpdateItemRequest,
+    attachments::{
+        AttachUrlRequest, AttachmentSummary, AttachmentsResponse, EntriesTreeQuery,
+        EntriesTreeResponse,
+    },
 };
 use serde::de::DeserializeOwned;
 use std::time::Duration;
@@ -94,6 +98,14 @@ impl RustRagHttpClient {
 
     pub async fn search(&self, request: &SearchRequest) -> Result<SearchResponse> {
         self.send_json(Method::POST, "api/search", Some(request), None::<&()>)
+            .await
+    }
+
+    pub async fn analyze_entry(
+        &self,
+        request: &rust_rag::api::AnalyzeEntryParams,
+    ) -> Result<serde_json::Value> {
+        self.send_json(Method::POST, "api/store/analyze", Some(request), None::<&()>)
             .await
     }
 
@@ -221,6 +233,39 @@ impl RustRagHttpClient {
         .await
     }
 
+    pub async fn attach_url(&self, request: &AttachUrlRequest) -> Result<AttachmentSummary> {
+        self.send_json::<_, (), _>(Method::POST, "api/attachments/from-url", Some(request), None)
+            .await
+    }
+
+    pub async fn list_attachments(&self, item_id: &str) -> Result<AttachmentsResponse> {
+        self.send_json::<(), (), _>(
+            Method::GET,
+            &format!("api/items/{item_id}/attachments"),
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn delete_attachment(&self, id: &str) -> Result<()> {
+        let response = self
+            .http
+            .delete(self.url(&format!("api/attachments/{id}"))?)
+            .send()
+            .await
+            .with_context(|| format!("delete attachment {id} failed"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response).await);
+        }
+        Ok(())
+    }
+
+    pub async fn list_entry_tree(&self, query: &EntriesTreeQuery) -> Result<EntriesTreeResponse> {
+        self.send_json::<(), _, _>(Method::GET, "api/entries/tree", None, Some(query))
+            .await
+    }
+
     async fn send_json<Body, Query, Response>(
         &self,
         method: Method,
@@ -338,6 +383,7 @@ mod tests {
                                 id: request.id.unwrap_or_else(|| "generated".to_owned()),
                                 source_id: request.source_id,
                                 created_at: 123,
+                                chunk_ids: None,
                             }),
                         )
                     }
@@ -353,6 +399,8 @@ mod tests {
                 text: "hello".to_owned(),
                 metadata: json!({"kind": "note"}),
                 source_id: "docs".to_owned(),
+                chunk: None,
+                path: None,
             })
             .await
             .unwrap();
@@ -382,6 +430,7 @@ mod tests {
                     text: "hello".to_owned(),
                     metadata: json!({}),
                     source_id: "docs".to_owned(),
+                    path: None,
                 },
             )
             .await

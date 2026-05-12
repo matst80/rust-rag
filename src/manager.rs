@@ -268,9 +268,24 @@ async fn run_iteration(
             }
         }
 
-        let stream_result =
-            stream_chat(state, model, &chat_messages, thinking_id.as_deref(), &mut accumulated)
-                .await?;
+        let stream_result = match stream_chat(
+            state,
+            model,
+            &chat_messages,
+            thinking_id.as_deref(),
+            &mut accumulated,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                if let Some(id) = thinking_id.as_deref() {
+                    let body = format!("⚠️ manager LLM call failed: {err:#}");
+                    let _ = update_thinking(state, id, &body, false).await;
+                }
+                return Err(err);
+            }
+        };
 
         chat_messages.push(serde_json::to_value(&stream_result.assistant_message)?);
 
@@ -373,6 +388,7 @@ struct StreamResult {
     tool_calls: Vec<ToolCall>,
 }
 
+#[tracing::instrument(skip_all, fields(model = %model, msg_count = messages.len()))]
 async fn stream_chat(
     state: &AppState,
     model: &str,
@@ -393,6 +409,13 @@ async fn stream_chat(
         .and_then(|c| c.api_key.clone())
         .or_else(|| openai.api_key.clone());
 
+    debug!(
+        base_url = %base_url,
+        has_api_key = api_key.is_some(),
+        api_key_len = api_key.as_deref().map(str::len).unwrap_or(0),
+        "manager: stream_chat request"
+    );
+
     let payload = json!({
         "model": model,
         "messages": messages,
@@ -410,7 +433,21 @@ async fn stream_chat(
         req = req.bearer_auth(key);
     }
 
-    let response = req.send().await?.error_for_status()?;
+    let response = req.send().await?;
+    let status = response.status();
+    debug!(status = %status, "manager: stream_chat response status");
+    let response = match response.error_for_status_ref() {
+        Ok(_) => response,
+        Err(err) => {
+            let body = response.text().await.unwrap_or_default();
+            warn!(
+                status = %status,
+                body = %truncate(&body, 800),
+                "manager: stream_chat upstream error"
+            );
+            return Err(anyhow!("upstream {status}: {}", truncate(&body, 400)).context(err));
+        }
+    };
     let mut stream = response.bytes_stream();
 
     let mut buffer = SseBuffer::default();
@@ -1010,12 +1047,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_bind_telegram_thread",
-                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to use an existing topic, or null to let the daemon create a new topic named after the project.",
+                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to bind to an existing topic (name ignored), or thread_id=null to let the daemon create a new topic — in that case `name` is REQUIRED (1-128 chars, no control chars) and used verbatim as the topic label. Daemon emits a `telegram_thread_bound` ack with the resolved thread_id; observe via `acp_recent_events { kinds: [\"telegram_thread_bound\"] }`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
-                        "thread_id": {"type": ["integer", "null"]}
+                        "thread_id": {"type": ["integer", "null"]},
+                        "name": {"type": "string", "description": "Forum topic label. Required when thread_id is null."}
                     },
                     "required": ["session_id"],
                     "additionalProperties": false
@@ -1073,21 +1111,57 @@ async fn execute_tool(
     }
 }
 
-fn require_acp(state: &AppState) -> Result<&crate::acp_ws::AcpWsHandle> {
-    state
+async fn require_acp(
+    state: &AppState,
+    instance: Option<&str>,
+) -> Result<std::sync::Arc<crate::acp_ws::AcpWsHandle>> {
+    let registry = state
         .acp_ws
         .as_ref()
-        .ok_or_else(|| anyhow!("ACP WS client not configured (set RAG_ACP_WS_URL)"))
+        .ok_or_else(|| anyhow!("ACP WS registry not initialized"))?;
+    if let Some(worker) = registry.resolve(instance).await {
+        return Ok(worker);
+    }
+    let n = registry.len().await;
+    if n == 0 {
+        Err(anyhow!(
+            "no ACP instances registered; start a daemon or POST /api/acp/register"
+        ))
+    } else if instance.is_some() {
+        Err(anyhow!(
+            "unknown ACP instance '{}'",
+            instance.unwrap_or("?")
+        ))
+    } else {
+        Err(anyhow!(
+            "multiple ACP instances registered ({n}); specify `instance` (see /api/acp/instances)"
+        ))
+    }
+}
+
+fn parse_instance(args: &str) -> Option<String> {
+    if args.trim().is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(args).ok()?;
+    v.get("instance")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 async fn tool_acp_simple(state: &AppState, variant: &str, payload: Value) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = payload
+        .get("instance")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let handle = require_acp(state, instance.as_deref()).await?;
     handle.command(variant, payload)?;
     Ok(json!({"ok": true, "sent": variant}).to_string())
 }
 
 async fn tool_acp_passthrough(state: &AppState, variant: &str, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let payload: Value = if args.trim().is_empty() {
         Value::Object(Default::default())
     } else {
@@ -1099,7 +1173,8 @@ async fn tool_acp_passthrough(state: &AppState, variant: &str, args: &str) -> Re
 }
 
 async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let payload: Value = serde_json::from_str(args)
         .map_err(|err| anyhow!("invalid JSON args for PermissionResponse: {err}"))?;
     let request_id = payload
@@ -1108,7 +1183,7 @@ async fn tool_acp_permission_respond(state: &AppState, args: &str) -> Result<Str
         .ok_or_else(|| anyhow!("request_id required"))?
         .to_owned();
     handle.command("permission_response", payload.clone())?;
-    crate::acp_ws::mark_permission_resolved(handle, &request_id).await;
+    handle.mark_permission_resolved(&request_id).await;
     Ok(json!({"ok": true, "request_id": request_id}).to_string())
 }
 
@@ -1125,7 +1200,8 @@ struct AcpRecentEventsArgs {
 }
 
 async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> {
-    let handle = require_acp(state)?;
+    let instance = parse_instance(args);
+    let handle = require_acp(state, instance.as_deref()).await?;
     let parsed: AcpRecentEventsArgs = if args.trim().is_empty() {
         AcpRecentEventsArgs::default()
     } else {
@@ -1144,13 +1220,13 @@ async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> 
 }
 
 async fn tool_acp_pending_permissions(state: &AppState) -> Result<String> {
-    let handle = require_acp(state)?;
+    let handle = require_acp(state, None).await?;
     let events = handle.pending_permissions().await;
     Ok(serde_json::to_string(&events)?)
 }
 
 async fn tool_acp_get_snapshot(state: &AppState) -> Result<String> {
-    let handle = require_acp(state)?;
+    let handle = require_acp(state, None).await?;
     let snap = handle.latest_snapshot().await;
     Ok(serde_json::to_string(&snap)?)
 }
@@ -1268,6 +1344,7 @@ async fn tool_assign_task(
         metadata,
         source_id: cfg.memory_source_id.clone(),
         created_at: current_millis(),
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1300,7 +1377,7 @@ async fn tool_assign_task(
     let messages = state.messages.clone();
     let posted =
         tokio::task::spawn_blocking(move || messages.send_message(new_msg)).await??;
-    state.message_notify.notify_waiters();
+    state.publish_message(&posted);
     if posted.created_at > *last_seen {
         *last_seen = posted.created_at;
     }
@@ -1350,6 +1427,7 @@ async fn tool_list_tasks(state: &AppState, cfg: &ManagerConfig, args: &str) -> R
         metadata_filter,
         min_created_at: None,
         max_created_at: None,
+        path_prefix: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     let tasks: Vec<Value> = items
@@ -1404,6 +1482,7 @@ async fn tool_update_task(state: &AppState, args: &str) -> Result<String> {
         metadata,
         source_id: existing.source_id.clone(),
         created_at: existing.created_at,
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1533,6 +1612,7 @@ async fn tool_remember(state: &AppState, cfg: &ManagerConfig, args: &str) -> Res
         metadata,
         source_id: source_id.clone(),
         created_at: current_millis(),
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1595,6 +1675,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
         metadata: existing.metadata.clone(),
         source_id: args.source_id.clone(),
         created_at: existing.created_at,
+        path: None,
     };
     let embedder = state
         .embedder
@@ -1751,6 +1832,7 @@ async fn recall_items(
         metadata_filter,
         min_created_at: None,
         max_created_at: None,
+        path_prefix: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     Ok(items)

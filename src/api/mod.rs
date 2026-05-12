@@ -1,5 +1,8 @@
 use crate::{
-    config::{AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig, OpenAiChatConfig},
+    config::{
+        AnalysisConfig, AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig,
+        OpenAiChatConfig,
+    },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
@@ -29,9 +32,15 @@ use std::{
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::ServeDir,
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
+pub mod attachments;
+mod analysis;
 mod auth;
 mod chunking;
 mod multimodal;
@@ -40,6 +49,7 @@ mod presence;
 mod query;
 mod tombstones;
 
+pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -77,11 +87,16 @@ pub struct AppState {
     pub user_memory: Arc<dyn UserMemoryStore>,
     pub messages: Arc<dyn MessageStore>,
     pub manager_runtime: Option<Arc<ManagerConfig>>,
-    pub acp_ws: Option<crate::acp_ws::AcpWsHandle>,
+    pub acp_ws: Option<Arc<crate::acp_ws::AcpWsRegistry>>,
     pub acp_discovery: Option<crate::acp_discovery::AcpDiscoveryHandle>,
     pub presence: Arc<PresenceTracker>,
     pub tombstones: Arc<TombstoneTracker>,
     pub message_notify: Arc<tokio::sync::Notify>,
+    /// Fan-out of every successfully persisted message. `wait_for_message`
+    /// (MCP) and any future per-message subscribers can filter without
+    /// re-querying the DB. Capacity is generous; lagging consumers see
+    /// `RecvError::Lagged` and should keep recv-ing.
+    pub message_broadcast: Arc<tokio::sync::broadcast::Sender<MessageRecord>>,
     pub auth: Arc<AuthConfig>,
     pub openai_chat: Arc<OpenAiChatConfig>,
     pub multimodal: Arc<MultimodalConfig>,
@@ -99,6 +114,7 @@ pub struct AppState {
     pub reranker_top_n: usize,
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
+    pub analysis: Arc<AnalysisConfig>,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
@@ -129,6 +145,7 @@ impl AppState {
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(auth),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(multimodal),
@@ -145,8 +162,14 @@ impl AppState {
                 .timeout(Duration::from_secs(multimodal_timeout))
                 .build()
                 .expect("multimodal http client should build"),
+            analysis: Arc::new(AnalysisConfig::default()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
+    }
+
+    pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
+        self.analysis = Arc::new(analysis);
+        self
     }
 
     pub fn with_manager(mut self, manager: ManagerConfig) -> Self {
@@ -162,6 +185,14 @@ impl AppState {
         self.reranker = Some(reranker);
         self.reranker_top_n = top_n.max(1);
         self
+    }
+
+    /// Publish a freshly-inserted message: wake long-poll listeners on
+    /// `message_notify` and broadcast the record on `message_broadcast` for
+    /// per-message subscribers. Call exactly once per persisted message.
+    pub fn publish_message(&self, record: &MessageRecord) {
+        let _ = self.message_broadcast.send(record.clone());
+        self.message_notify.notify_waiters();
     }
 
     pub fn mcp_allowed_hosts(&self) -> Vec<String> {
@@ -190,6 +221,7 @@ impl AppState {
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(AuthConfig::default()),
             openai_chat: Arc::new(openai_chat),
             multimodal: Arc::new(MultimodalConfig::default()),
@@ -206,6 +238,7 @@ impl AppState {
                 .timeout(Duration::from_secs(120))
                 .build()
                 .expect("multimodal http client should build"),
+            analysis: Arc::new(AnalysisConfig::default()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -326,6 +359,13 @@ pub struct StoreRequest {
     /// Each chunk is stored as a separate item keyed `{id}:c:{index}`.
     /// Omit for short texts or when you want the entry treated as a single unit.
     pub chunk: Option<ChunkConfig>,
+    /// Optional wiki-style hierarchical path for this entry (slash-separated,
+    /// e.g. `engineering/runbooks/db`). User-asserted, normalized server-side.
+    /// Used by tree navigation (`GET /api/entries/tree`) and is independent of
+    /// `source_id` (the namespace) — paths group entries within a namespace.
+    /// Distinct from chunk-level `section_path` which is chunker-derived.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -374,6 +414,10 @@ pub struct UpdateItemRequest {
     pub metadata: Value,
     /// Namespace/category the entry belongs to. See StoreRequest.source_id.
     pub source_id: String,
+    /// Optional wiki path. See StoreRequest.path. Pass an empty string to
+    /// clear it; omit to leave it unchanged from the existing entry.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -385,6 +429,10 @@ pub struct ListItemsQuery {
     pub sort_order: Option<SortOrder>,
     pub min_created_at: Option<i64>,
     pub max_created_at: Option<i64>,
+    /// Restrict to entries whose `path` equals this value or sits under it
+    /// (e.g. `team` matches `team` itself and `team/handbook`). Normalized
+    /// server-side. Comparison is case-insensitive.
+    pub path_prefix: Option<String>,
     /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
     #[serde(flatten)]
     pub metadata: HashMap<String, String>,
@@ -455,6 +503,10 @@ pub struct SearchResultPayload {
     /// sides, `["sparse"]` when only sparse matched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retrievers: Vec<String>,
+    /// User-asserted wiki path (e.g. `team/handbook`). `None` when the entry
+    /// has no path set. Distinct from chunk-level `section_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -495,10 +547,13 @@ pub struct AdminItemPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
-    /// Token count under the embedding tokenizer, untruncated. Populated by
-    /// endpoints that opt in (currently `/admin/items/oversized`).
+    /// Token count under the embedding tokenizer, untruncated. Populated only
+    /// by endpoints that opt in.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub token_count: Option<usize>,
+    /// User-asserted wiki path (e.g. `team/handbook`). `None` when unset.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -818,6 +873,7 @@ pub fn router(state: AppState) -> Router {
         .route("/store", post(store))
         .route("/api/store", post(store))
         .route("/api/store/smart", post(smart_store))
+        .route("/api/store/analyze", post(analysis::analyze_endpoint))
         .route("/search", post(search))
         .route("/api/search", post(search))
         .route(
@@ -833,7 +889,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
-        .route("/admin/items/oversized", get(list_large_items))
         .route("/admin/tokens/count", post(count_tokens))
         .route(
             "/admin/items/{id}",
@@ -845,10 +900,35 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
         .route("/api/ingest/image", post(multimodal::ingest_image))
+        .route(
+            "/api/attachments",
+            post(attachments::upload_multipart),
+        )
+        .route(
+            "/api/attachments/from-url",
+            post(attachments::attach_from_url),
+        )
+        .route(
+            "/api/attachments/{id}",
+            delete(attachments::delete_attachment),
+        )
+        .route(
+            "/api/items/{id}/attachments",
+            get(attachments::list_for_item),
+        )
+        .route("/api/entries/tree", get(attachments::entries_tree))
+        .route("/api/entries/paths", get(attachments::entries_paths))
         .route("/api/messages", post(send_message).get(list_messages))
         .route("/api/messages/channels", get(list_message_channels))
         .route("/api/acp/instances", get(list_acp_instances))
         .route("/api/acp/select", post(select_acp_instance))
+        .route("/api/acp/register", post(register_acp_instance))
+        .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
+        .route("/api/acp/ws", get(acp_ws_proxy))
+        .route(
+            "/api/acp/register/{name}",
+            delete(unregister_acp_instance),
+        )
         .route(
             "/api/messages/channels/{channel}",
             delete(clear_message_channel),
@@ -857,11 +937,26 @@ pub fn router(state: AppState) -> Router {
             "/api/messages/{id}",
             axum::routing::patch(update_message).delete(delete_message),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ))
+        .with_state(state.clone());
+
+    let mcp_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers([
+            axum::http::HeaderName::from_static("mcp-session-id"),
+        ]);
+    let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
         ))
+        .layer(mcp_cors)
         .with_state(state.clone());
 
     let upload_path = state.upload_path.as_str().to_owned();
@@ -871,6 +966,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))
         .merge(protected_routes)
+        .merge(mcp_router)
         .fallback_service(ServeDir::new("static-frontend/dist"))
         .with_state(state)
         .layer(TraceLayer::new_for_http())
@@ -981,7 +1077,7 @@ async fn require_api_key(
                             &validation,
                         ) {
                             Ok(token_data) => {
-                                tracing::info!("authorized via session cookie");
+                                tracing::debug!("authorized via session cookie");
                                 let subject = token_data.claims.sub;
                                 request
                                     .extensions_mut()
@@ -993,14 +1089,14 @@ async fn require_api_key(
                                 return Ok(next.run(request).await);
                             }
                             Err(err) => {
-                                tracing::warn!(error = %err, "failed to decode session cookie");
+                                tracing::debug!(error = %err, "failed to decode session cookie");
                             }
                         }
                     }
                 }
             }
         } else {
-            tracing::info!("no cookie header found in request");
+            tracing::debug!("no cookie header found in request");
         }
     } else {
         tracing::warn!(
@@ -1008,7 +1104,9 @@ async fn require_api_key(
         );
     }
 
-    tracing::warn!(
+    tracing::debug!(
+        method = %request.method(),
+        path = %request.uri().path(),
         has_x_api_key = provided.is_some(),
         has_cookies = request.headers().contains_key(axum::http::header::COOKIE),
         "unauthorized request: no valid credential found"
@@ -1086,6 +1184,10 @@ pub(crate) async fn store_entry_core(
     validate_non_empty("text", &request.text)?;
     validate_metadata(&request.metadata)?;
     validate_source_id(&request.source_id)?;
+    let path = match request.path.as_deref() {
+        Some(p) => crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        None => None,
+    };
 
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
@@ -1106,6 +1208,7 @@ pub(crate) async fn store_entry_core(
                 metadata: request.metadata.clone(),
                 source_id: source_id.clone(),
                 created_at,
+                path: path.clone(),
             };
             let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
             tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1139,6 +1242,7 @@ pub(crate) async fn store_entry_core(
                     metadata: meta,
                     source_id: source_id.clone(),
                     created_at,
+                    path: path.clone(),
                 };
                 let embed_text = slice.embed_text;
                 let emb = embedder.clone();
@@ -1163,6 +1267,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            path: path.clone(),
         };
         let text = request.text.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1197,6 +1302,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            path: path.clone(),
         };
         tokio::task::spawn_blocking(move || -> Result<()> {
             let embedding = embedder.embed(&item.text)?;
@@ -1213,6 +1319,18 @@ pub(crate) async fn store_entry_core(
         .as_deref()
         .unwrap_or(&[id.clone()])
         .to_vec();
+
+    // Best-effort async LLM analysis: contradictions, edges, cluster hint,
+    // tags, freshness. Only fires when RAG_ANALYSIS_ENABLED + model are set.
+    // Skipped for legacy multi-chunk paths since the parent has no row.
+    if chunk_ids.is_none() {
+        analysis::spawn_analysis(
+            state.clone(),
+            id.clone(),
+            request.text.clone(),
+            source_id.clone(),
+        );
+    }
 
     if let Some(sub) = subject {
         let memory = state.user_memory.clone();
@@ -1329,22 +1447,56 @@ pub(crate) async fn search_core(
             // (lower=better; reranker score 1.0 → distance 0.0).
             if do_rerank {
                 if let Some(reranker) = reranker.as_ref() {
-                    let passages: Vec<&str> =
-                        filtered.iter().map(|h| h.text.as_str()).collect();
+                    // Score the matched chunk text when the store
+                    // surfaced it (postgres dense/hybrid). Falls back to
+                    // the document text for stores that don't chunk so
+                    // sqlite-only deployments still rerank.
+                    let passages: Vec<&str> = filtered
+                        .iter()
+                        .map(|h| h.chunk_text.as_deref().unwrap_or(h.text.as_str()))
+                        .collect();
                     if !passages.is_empty() {
-                        let scores = reranker.rerank(&query, &passages)?;
-                        for (hit, score) in filtered.iter_mut().zip(scores.into_iter()) {
-                            hit.distance = 1.0 - score;
-                            if !hit.retrievers.iter().any(|r| r == "rerank") {
-                                hit.retrievers.push("rerank".to_owned());
+                        // Rerank can fail under GPU pressure (CUDA OOM in
+                        // BiasGelu/MatMul) or model load issues. Falling
+                        // back to dense ordering keeps search usable
+                        // instead of 500-ing the whole request.
+                        let rerank_started = std::time::Instant::now();
+                        let max_chars = passages.iter().map(|p| p.len()).max().unwrap_or(0);
+                        let total_chars: usize = passages.iter().map(|p| p.len()).sum();
+                        match reranker.rerank(&query, &passages) {
+                            Ok(scores) => {
+                                tracing::info!(
+                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                    candidates = passages.len(),
+                                    max_chars,
+                                    total_chars,
+                                    "reranker ok"
+                                );
+                                for (hit, score) in
+                                    filtered.iter_mut().zip(scores.into_iter())
+                                {
+                                    hit.distance = 1.0 - score;
+                                    if !hit.retrievers.iter().any(|r| r == "rerank") {
+                                        hit.retrievers.push("rerank".to_owned());
+                                    }
+                                }
+                                filtered.sort_by(|a, b| {
+                                    a.distance
+                                        .partial_cmp(&b.distance)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                    candidates = passages.len(),
+                                    max_chars,
+                                    "reranker failed; falling back to dense ordering"
+                                );
                             }
                         }
                     }
-                    filtered.sort_by(|a, b| {
-                        a.distance
-                            .partial_cmp(&b.distance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
                     filtered.truncate(top_k);
                 }
             }
@@ -1664,6 +1816,10 @@ async fn list_items(
         validate_source_id(source_id)?;
     }
 
+    let path_prefix = match query.path_prefix.as_deref() {
+        Some(p) => crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        None => None,
+    };
     let store = state.store.clone();
     let request = ListItemsRequest {
         source_id: query.source_id,
@@ -1673,6 +1829,7 @@ async fn list_items(
         metadata_filter: query.metadata,
         min_created_at: query.min_created_at,
         max_created_at: query.max_created_at,
+        path_prefix,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1707,6 +1864,12 @@ async fn update_item(
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     validate_metadata(&request.metadata)?;
     validate_source_id(&request.source_id)?;
+    let path_override = match request.path.as_deref() {
+        Some(p) => Some(
+            crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        ),
+        None => None,
+    };
 
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
@@ -1715,12 +1878,17 @@ async fn update_item(
         let existing = store
             .get_item(&id)?
             .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
+        let new_path = match path_override {
+            Some(p) => p,
+            None => existing.path.clone(),
+        };
         let item = ItemRecord {
             id: existing.id,
             text: request.text,
             metadata: request.metadata,
             source_id: request.source_id,
             created_at: existing.created_at,
+            path: new_path,
         };
         let embedding = embedder.embed(&item.text)?;
         store.upsert_item(item.clone(), &embedding)?;
@@ -1751,63 +1919,6 @@ async fn delete_item(
     }
 
     Ok(Json(DeleteResponse { id, deleted }))
-}
-
-#[derive(Debug, Deserialize)]
-struct LargeItemsQuery {
-    min_chars: Option<usize>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-async fn list_large_items(
-    State(state): State<AppState>,
-    Query(query): Query<LargeItemsQuery>,
-) -> Result<Json<AdminItemsResponse>, ApiError> {
-    let min_chars = query.min_chars.unwrap_or(state.chunking.large_item_threshold);
-    let limit = query.limit.unwrap_or(50);
-    let offset = query.offset.unwrap_or(0);
-    let store = state.store.clone();
-    let (items, total_count) =
-        tokio::task::spawn_blocking(move || store.list_large_items(min_chars, limit, offset))
-            .await
-            .map_err(ApiError::TaskJoin)?
-            .map_err(ApiError::Internal)?;
-
-    // Annotate with real token counts. Skip silently if embedder isn't ready
-    // (e.g. boot) — char-only response is still useful.
-    let token_counts: Option<Vec<Option<usize>>> = if let Ok(embedder) = state.embedder.get_ready()
-    {
-        let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
-        let counts = tokio::task::spawn_blocking(move || {
-            texts
-                .into_iter()
-                .map(|t| embedder.count_tokens(&t).ok())
-                .collect::<Vec<_>>()
-        })
-        .await
-        .map_err(ApiError::TaskJoin)?;
-        Some(counts)
-    } else {
-        None
-    };
-
-    let payloads = items
-        .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let mut p: AdminItemPayload = item.into();
-            if let Some(ref counts) = token_counts {
-                p.token_count = counts.get(i).copied().flatten();
-            }
-            p
-        })
-        .collect();
-
-    Ok(Json(AdminItemsResponse {
-        items: payloads,
-        total_count,
-    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1871,6 +1982,7 @@ async fn rechunk_item(
         metadata: item.metadata,
         source_id: item.source_id,
         chunk: Some(ChunkConfig { max_chars, overlap_chars }),
+        path: None,
     };
     let response = store_entry_core(&state, request, subject.0).await?;
 
@@ -2005,6 +2117,7 @@ async fn llm_rechunk_item(
     let parent_id = item.id.clone();
     let source_id = item.source_id.clone();
     let base_metadata = item.metadata.clone();
+    let parent_path = item.path.clone();
     let now = current_timestamp_millis()?;
     let store = state.store.clone();
     let total = texts.len();
@@ -2026,6 +2139,7 @@ async fn llm_rechunk_item(
                 metadata,
                 source_id: source_id.clone(),
                 created_at: now,
+                path: parent_path.clone(),
             };
             let embedding = embedder.embed(&text)?;
             store.upsert_item(record, &embedding)?;
@@ -2204,6 +2318,7 @@ async fn smart_store(
             metadata: item.metadata,
             source_id: item.source_id,
             chunk: None,
+            path: None,
         };
         let resp = store_entry_core(&state, store_req, session.0.clone()).await?;
         responses.push(resp);
@@ -2361,7 +2476,7 @@ async fn send_message(
         }
     }
 
-    state.message_notify.notify_waiters();
+    state.publish_message(&record);
 
     Ok((StatusCode::CREATED, Json(record.into())))
 }
@@ -2585,20 +2700,35 @@ async fn clear_message_channel(
 struct AcpInstancesResponse {
     instances: Vec<crate::acp_discovery::AcpInstance>,
     active: Option<String>,
+    /// Per-instance WS worker status, sorted by `instance_id`. Mirrors the
+    /// `instances` list but adds runtime fields (`connected`, `session_count`,
+    /// `pending_permissions`) so the frontend can pick a default and surface
+    /// liveness without polling each worker individually.
+    workers: Vec<crate::acp_ws::InstanceStatus>,
 }
 
 async fn list_acp_instances(
     State(state): State<AppState>,
 ) -> Result<Json<AcpInstancesResponse>, ApiError> {
-    let Some(disc) = state.acp_discovery.clone() else {
-        return Ok(Json(AcpInstancesResponse {
-            instances: vec![],
-            active: None,
-        }));
+    let instances = if let Some(disc) = state.acp_discovery.as_ref() {
+        disc.list().await
+    } else {
+        Vec::new()
     };
-    let instances = disc.list().await;
-    let active = disc.active().await.map(|i| i.name);
-    Ok(Json(AcpInstancesResponse { instances, active }))
+    let active = match state.acp_discovery.as_ref() {
+        Some(disc) => disc.active().await.map(|i| i.name),
+        None => None,
+    };
+    let workers = if let Some(reg) = state.acp_ws.as_ref() {
+        reg.statuses().await
+    } else {
+        Vec::new()
+    };
+    Ok(Json(AcpInstancesResponse {
+        instances,
+        active,
+        workers,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2619,6 +2749,191 @@ async fn select_acp_instance(
         .await
         .ok_or_else(|| ApiError::BadRequest(format!("unknown acp instance: {}", req.name)))?;
     Ok(Json(inst))
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterAcpInstanceRequest {
+    name: String,
+    host: String,
+    port: u16,
+    /// Optional fully-qualified URL. When omitted, server builds
+    /// `ws://host:port/`. Use this to register a `wss://...` endpoint or
+    /// any non-default path.
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    txt: Option<HashMap<String, String>>,
+}
+
+async fn register_acp_instance(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterAcpInstanceRequest>,
+) -> Result<Json<crate::acp_discovery::AcpInstance>, ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name cannot be empty".to_owned()));
+    }
+    if req.host.trim().is_empty() {
+        return Err(ApiError::BadRequest("host cannot be empty".to_owned()));
+    }
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let instance = crate::acp_discovery::AcpInstance {
+        name: req.name,
+        host: req.host,
+        port: req.port,
+        url: req.url.unwrap_or_default(),
+        txt: req.txt.unwrap_or_default(),
+        source: crate::acp_discovery::AcpInstanceSource::Registered,
+    };
+    let stored = disc.register(instance).await;
+    Ok(Json(stored))
+}
+
+#[derive(Debug, Deserialize)]
+struct HeartbeatAcpInstanceRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct HeartbeatAcpResponse {
+    refreshed: bool,
+}
+
+async fn heartbeat_acp_instance(
+    State(state): State<AppState>,
+    Json(req): Json<HeartbeatAcpInstanceRequest>,
+) -> Result<Json<HeartbeatAcpResponse>, ApiError> {
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let refreshed = disc.heartbeat(&req.name).await;
+    Ok(Json(HeartbeatAcpResponse { refreshed }))
+}
+
+async fn unregister_acp_instance(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<DeleteResponse>, ApiError> {
+    let disc = state
+        .acp_discovery
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("acp discovery not enabled".to_owned()))?;
+    let removed = disc.unregister(&name).await;
+    Ok(Json(DeleteResponse {
+        id: name,
+        deleted: removed,
+    }))
+}
+
+/// Browser-facing WebSocket proxy. Bridges a same-origin `wss://…/api/acp/ws`
+/// upgrade onto a per-instance AcpWsHandle so multiple browser tabs can each
+/// subscribe to the daemon of their choice. `?instance=<id>` selects the
+/// target; omit when only one instance is registered. Auth inherited from
+/// `require_api_key`.
+async fn acp_ws_proxy(
+    ws: axum::extract::WebSocketUpgrade,
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, ApiError> {
+    let registry = state
+        .acp_ws
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("acp_ws not enabled".to_owned()))?;
+    let requested = params.get("instance").map(String::as_str);
+    let handle = match registry.resolve(requested).await {
+        Some(h) => h,
+        None => {
+            let n = registry.len().await;
+            let msg = if n == 0 {
+                "no ACP instances registered".to_owned()
+            } else if requested.is_some() {
+                format!("unknown ACP instance '{}'", requested.unwrap_or("?"))
+            } else {
+                format!("multiple ACP instances registered ({n}); specify ?instance=")
+            };
+            return Err(ApiError::BadRequest(msg));
+        }
+    };
+    Ok(ws.on_upgrade(move |socket| acp_ws_proxy_task(socket, handle)))
+}
+
+async fn acp_ws_proxy_task(
+    socket: axum::extract::ws::WebSocket,
+    handle: std::sync::Arc<crate::acp_ws::AcpWsHandle>,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let (mut sink, mut stream) = socket.split();
+    let mut rx = handle.subscribe();
+
+    // Kick the upstream to emit a fresh snapshot — closes the late-joiner
+    // race where SessionStarted events landed after the cached snapshot.
+    let _ = handle.request_list_sessions();
+
+    if let Some(snap) = handle.subscriber_snapshot().await {
+        if sink.send(AxumMessage::Text(snap.into())).await.is_err() {
+            return;
+        }
+    }
+
+    let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            recv = rx.recv() => match recv {
+                Ok(text) => {
+                    if sink.send(AxumMessage::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "acp_ws_proxy: subscriber lagged");
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            },
+            msg = stream.next() => match msg {
+                Some(Ok(AxumMessage::Text(text))) => {
+                    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            tracing::debug!(error = %err, "acp_ws_proxy: client sent non-JSON");
+                            continue;
+                        }
+                    };
+                    if let Err(err) = handle.send_raw(value) {
+                        tracing::warn!(error = %err, "acp_ws_proxy: forward failed");
+                        break;
+                    }
+                }
+                Some(Ok(AxumMessage::Binary(_))) => {
+                    tracing::debug!("acp_ws_proxy: dropping binary frame from client");
+                }
+                Some(Ok(AxumMessage::Ping(p))) => {
+                    if sink.send(AxumMessage::Pong(p)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(AxumMessage::Pong(_))) => {}
+                Some(Ok(AxumMessage::Close(_))) | None => break,
+                Some(Err(err)) => {
+                    tracing::debug!(error = %err, "acp_ws_proxy: client read error");
+                    break;
+                }
+            },
+            _ = ping_tick.tick() => {
+                if sink.send(AxumMessage::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 const MESSAGE_AUTH_METADATA_KEY: &str = "__auth";
@@ -2865,6 +3180,7 @@ impl From<SearchHit> for SearchResultPayload {
             chunk_context: None,
             section_path: value.section_path,
             retrievers: value.retrievers,
+            path: value.path,
         }
     }
 }
@@ -2887,6 +3203,7 @@ impl From<ItemRecord> for AdminItemPayload {
             source_id: value.source_id,
             created_at: value.created_at,
             token_count: None,
+            path: value.path,
         }
     }
 }
@@ -3088,6 +3405,7 @@ mod tests {
         mcp_tokens: Mutex<Vec<crate::db::McpTokenRecord>>,
         mcp_token_hashes: Mutex<HashMap<String, String>>,
         device_auths: Mutex<Vec<crate::db::DeviceAuthRecord>>,
+        auth_codes: Mutex<Vec<crate::db::OAuthAuthCodeRecord>>,
     }
 
     impl Default for MockStore {
@@ -3103,6 +3421,7 @@ mod tests {
                 mcp_tokens: Mutex::new(Vec::new()),
                 mcp_token_hashes: Mutex::new(HashMap::new()),
                 device_auths: Mutex::new(Vec::new()),
+                auth_codes: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3202,6 +3521,10 @@ mod tests {
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
                         distance: 0.0,
+                        section_path: Vec::new(),
+                        retrievers: Vec::new(),
+                        chunk_text: None,
+                        path: None,
                     });
                 }
             }
@@ -3221,20 +3544,6 @@ mod tests {
                     item_count,
                 })
                 .collect())
-        }
-
-        fn list_large_items(&self, min_chars: usize, _limit: usize, _offset: usize) -> Result<(Vec<ItemRecord>, i64)> {
-            let stored = self.stored.lock().expect("store mutex poisoned");
-            let items: Vec<_> = stored
-                .iter()
-                .filter(|(item, _)| {
-                    item.text.len() > min_chars
-                        && item.metadata.get("_chunk").is_none()
-                })
-                .map(|(item, _)| item.clone())
-                .collect();
-            let total = items.len() as i64;
-            Ok((items, total))
         }
 
         fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)> {
@@ -3801,6 +4110,59 @@ mod tests {
             }
             Ok(expired)
         }
+
+        fn create_auth_code(
+            &self,
+            code: crate::db::NewOAuthAuthCode,
+        ) -> Result<crate::db::OAuthAuthCodeRecord> {
+            let record = crate::db::OAuthAuthCodeRecord {
+                code: code.code,
+                client_id: code.client_id,
+                redirect_uri: code.redirect_uri,
+                code_challenge: code.code_challenge,
+                challenge_method: code.challenge_method,
+                scope: code.scope,
+                subject: code.subject,
+                token_id: None,
+                created_at: code.created_at,
+                expires_at: code.expires_at,
+                consumed_at: None,
+            };
+            self.auth_codes
+                .lock()
+                .expect("store mutex poisoned")
+                .push(record.clone());
+            Ok(record)
+        }
+
+        fn find_auth_code(&self, code: &str) -> Result<Option<crate::db::OAuthAuthCodeRecord>> {
+            Ok(self
+                .auth_codes
+                .lock()
+                .expect("store mutex poisoned")
+                .iter()
+                .find(|record| record.code == code)
+                .cloned())
+        }
+
+        fn consume_auth_code(&self, code: &str, token_id: &str, now: i64) -> Result<bool> {
+            let mut codes = self.auth_codes.lock().expect("store mutex poisoned");
+            for record in codes.iter_mut() {
+                if record.code == code && record.consumed_at.is_none() && record.expires_at > now {
+                    record.consumed_at = Some(now);
+                    record.token_id = Some(token_id.to_owned());
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        fn expire_auth_codes(&self, now: i64) -> Result<usize> {
+            let mut codes = self.auth_codes.lock().expect("store mutex poisoned");
+            let before = codes.len();
+            codes.retain(|record| record.expires_at > now);
+            Ok(before - codes.len())
+        }
     }
 
     fn manual_edge(id: &str, from: &str, to: &str) -> GraphEdgeRecord {
@@ -3936,6 +4298,10 @@ mod tests {
             source_id: "memory".to_owned(),
             created_at: 1234,
             distance: 0.0125,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -3983,6 +4349,10 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 1,
                 distance: 0.3,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                chunk_text: None,
+                path: None,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -3991,6 +4361,10 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 2,
                 distance: 1.5,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                chunk_text: None,
+                path: None,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4018,6 +4392,7 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        path: None,
                     },
                     Vec::new(),
                 ),
@@ -4028,6 +4403,7 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        path: None,
                     },
                     Vec::new(),
                 ),
@@ -4038,6 +4414,7 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 3,
+                        path: None,
                     },
                     Vec::new(),
                 ),
@@ -4050,6 +4427,10 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 1,
                 distance: 0.2,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                chunk_text: None,
+                path: None,
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -4061,6 +4442,7 @@ mod tests {
             mcp_tokens: Mutex::new(Vec::new()),
             mcp_token_hashes: Mutex::new(HashMap::new()),
             device_auths: Mutex::new(Vec::new()),
+            auth_codes: Mutex::new(Vec::new()),
         });
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -4088,6 +4470,10 @@ mod tests {
             source_id: "memory".to_owned(),
             created_at: 1,
             distance: 0.1,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -4113,6 +4499,7 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        path: None,
                     },
                     Vec::new(),
                 ),
@@ -4123,6 +4510,7 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        path: None,
                     },
                     Vec::new(),
                 ),
@@ -4136,6 +4524,10 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 1,
                     distance: 0.1,
+                    section_path: Vec::new(),
+                    retrievers: Vec::new(),
+                    chunk_text: None,
+                    path: None,
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -4144,6 +4536,10 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 2,
                     distance: 0.4,
+                    section_path: Vec::new(),
+                    retrievers: Vec::new(),
+                    chunk_text: None,
+                    path: None,
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -4153,6 +4549,7 @@ mod tests {
             mcp_tokens: Mutex::new(Vec::new()),
             mcp_token_hashes: Mutex::new(HashMap::new()),
             device_auths: Mutex::new(Vec::new()),
+            auth_codes: Mutex::new(Vec::new()),
         });
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -4178,6 +4575,10 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 1,
                 distance: 0.3,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                chunk_text: None,
+                path: None,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4186,6 +4587,10 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 2,
                 distance: 1.5,
+                section_path: Vec::new(),
+                retrievers: Vec::new(),
+                chunk_text: None,
+                path: None,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4232,6 +4637,7 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    path: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -4239,6 +4645,7 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    path: None,
                 },
                 ItemRecord {
                     id: "doc-3".to_owned(),
@@ -4246,6 +4653,7 @@ mod tests {
                     metadata: json!({"kind":"c"}),
                     source_id: "memory".to_owned(),
                     created_at: 300,
+                    path: None,
                 },
             ],
             vec![
@@ -4326,6 +4734,7 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    path: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -4333,6 +4742,7 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    path: None,
                 },
             ],
             vec![],
@@ -4385,6 +4795,7 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                path: None,
             }],
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
@@ -4416,6 +4827,7 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                path: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -4423,6 +4835,7 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                path: None,
             },
             ItemRecord {
                 id: "doc-3".to_owned(),
@@ -4430,6 +4843,7 @@ mod tests {
                 metadata: json!({"kind":"c"}),
                 source_id: "memory".to_owned(),
                 created_at: 300,
+                path: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -4455,6 +4869,7 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                path: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -4462,6 +4877,7 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                path: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -4490,6 +4906,7 @@ mod tests {
             metadata: json!({ "kind": "reference" }),
             source_id: "knowledge".to_owned(),
             created_at: 42,
+            path: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4523,6 +4940,7 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            path: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -4563,6 +4981,7 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            path: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -5086,5 +5505,237 @@ mod tests {
             .expect("store mutex poisoned")
             .iter()
             .any(|message| message.id == "msg-1"));
+    }
+
+    fn pkce_pair() -> (String, String) {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use sha2::{Digest, Sha256};
+        let verifier = "test-verifier-with-enough-entropy-1234567890".to_owned();
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        (verifier, challenge)
+    }
+
+    async fn run_consent(
+        server: &TestServer,
+        cookie: &str,
+        challenge: &str,
+        redirect_uri: &str,
+    ) -> String {
+        let resp = server
+            .post("/oauth/authorize/consent")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .form(&[
+                ("client_id", "test-client"),
+                ("redirect_uri", redirect_uri),
+                ("code_challenge", challenge),
+                ("code_challenge_method", "S256"),
+                ("state", "xyz"),
+                ("scope", "mcp"),
+            ])
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::SEE_OTHER);
+        let location = resp
+            .header("location")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // location is like "http://127.0.0.1:9999/cb?code=...&state=xyz"
+        let qs = location.split_once('?').unwrap().1;
+        let pairs: HashMap<String, String> = url::form_urlencoded::parse(qs.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(pairs.get("state").map(String::as_str), Some("xyz"));
+        pairs.get("code").cloned().expect("code in redirect")
+    }
+
+    #[tokio::test]
+    async fn pkce_flow_happy_path_mints_token() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let cookie = mint_session_cookie(&secret, "alice");
+        let (verifier, challenge) = pkce_pair();
+
+        let code = run_consent(&server, &cookie, &challenge, "http://127.0.0.1:9999/cb").await;
+
+        let token_resp = server
+            .post("/oauth/token")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://127.0.0.1:9999/cb"),
+                ("code_verifier", &verifier),
+                ("client_id", "test-client"),
+            ])
+            .await;
+        token_resp.assert_status_ok();
+        let body = token_resp.json::<Value>();
+        assert_eq!(body["token_type"], json!("Bearer"));
+        let access = body["access_token"].as_str().unwrap();
+        assert!(access.starts_with("rag_mcp_"));
+
+        let search = server
+            .post("/search")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {access}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .json(&json!({"query": "x"}))
+            .await;
+        assert_ne!(search.status_code(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn pkce_flow_rejects_mismatched_verifier() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let cookie = mint_session_cookie(&secret, "alice");
+        let (_verifier, challenge) = pkce_pair();
+
+        let code = run_consent(&server, &cookie, &challenge, "http://127.0.0.1:9999/cb").await;
+
+        let token_resp = server
+            .post("/oauth/token")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://127.0.0.1:9999/cb"),
+                ("code_verifier", "wrong-verifier-zzzzzzzzzzzzzzzzzzzzz"),
+                ("client_id", "test-client"),
+            ])
+            .await;
+        assert_eq!(token_resp.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(token_resp.json::<Value>()["error"], json!("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn pkce_flow_rejects_replayed_code() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let cookie = mint_session_cookie(&secret, "alice");
+        let (verifier, challenge) = pkce_pair();
+
+        let code = run_consent(&server, &cookie, &challenge, "http://127.0.0.1:9999/cb").await;
+
+        let first = server
+            .post("/oauth/token")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://127.0.0.1:9999/cb"),
+                ("code_verifier", &verifier),
+            ])
+            .await;
+        first.assert_status_ok();
+
+        let second = server
+            .post("/oauth/token")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://127.0.0.1:9999/cb"),
+                ("code_verifier", &verifier),
+            ])
+            .await;
+        assert_eq!(second.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(second.json::<Value>()["error"], json!("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn pkce_flow_rejects_redirect_uri_mismatch() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let cookie = mint_session_cookie(&secret, "alice");
+        let (verifier, challenge) = pkce_pair();
+
+        let code = run_consent(&server, &cookie, &challenge, "http://127.0.0.1:9999/cb").await;
+
+        let token_resp = server
+            .post("/oauth/token")
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", "http://127.0.0.1:9999/different"),
+                ("code_verifier", &verifier),
+            ])
+            .await;
+        assert_eq!(token_resp.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(token_resp.json::<Value>()["error"], json!("invalid_grant"));
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_non_loopback_redirect_uri() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let cookie = mint_session_cookie(&secret, "alice");
+        let (_verifier, challenge) = pkce_pair();
+
+        let resp = server
+            .post("/oauth/authorize/consent")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .form(&[
+                ("client_id", "evil"),
+                ("redirect_uri", "https://evil.example.com/cb"),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("state", "x"),
+                ("scope", "mcp"),
+            ])
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn authorize_redirects_to_login_when_no_session() {
+        let (state, _store) = auth_test_state();
+        let server = TestServer::new(router(state));
+        let (_verifier, challenge) = pkce_pair();
+
+        let resp = server
+            .get("/oauth/authorize")
+            .add_query_params(&[
+                ("response_type", "code"),
+                ("client_id", "vscode"),
+                ("redirect_uri", "http://127.0.0.1:9999/cb"),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("state", "abc"),
+            ])
+            .await;
+        assert_eq!(resp.status_code(), StatusCode::SEE_OTHER);
+        let location = resp.header("location").to_str().unwrap().to_owned();
+        assert!(location.starts_with("/auth/login?"));
+        assert!(location.contains("returnTo="));
+    }
+
+    #[tokio::test]
+    async fn authorize_server_metadata_omits_device_code_grant() {
+        let (state, _store) = auth_test_state();
+        let server = TestServer::new(router(state));
+        let resp = server.get("/.well-known/oauth-authorization-server").await;
+        resp.assert_status_ok();
+        let body = resp.json::<Value>();
+        let grants = body["grant_types_supported"].as_array().unwrap();
+        assert!(grants
+            .iter()
+            .all(|g| g.as_str() != Some("urn:ietf:params:oauth:grant-type:device_code")));
+        assert!(grants.iter().any(|g| g.as_str() == Some("authorization_code")));
+        assert_eq!(body["response_types_supported"], json!(["code"]));
+        assert_eq!(body["code_challenge_methods_supported"], json!(["S256"]));
+        assert!(body["authorization_endpoint"].is_string());
     }
 }

@@ -511,11 +511,30 @@ docker-build:
 docker-push:
 	docker buildx build --platform linux/amd64,linux/arm64 -t "$(IMAGE_NAME)" --push .
 
+## CUDA image is amd64-only. On an amd64 host: plain `docker build` —
+## no buildx container, no QEMU, hits the local layer cache directly.
+## On non-amd64 hosts: fall back to buildx multiarch builder + registry
+## cache so cross-builds stay reasonably fast.
+HOST_ARCH := $(shell uname -m)
 docker-build-cuda:
-	docker buildx build --platform linux/amd64 -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
+else
+	docker buildx build --builder multiarch --platform linux/amd64 \
+		-f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" \
+		--cache-from type=registry,ref=$(CUDA_IMAGE_NAME)-cache .
+endif
 
 docker-push-cuda:
-	docker buildx build --platform linux/amd64 -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" --push .
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" .
+	docker push "$(CUDA_IMAGE_NAME)"
+else
+	docker buildx build --builder multiarch --platform linux/amd64 \
+		-f Dockerfile.cuda -t "$(CUDA_IMAGE_NAME)" --push \
+		--cache-from type=registry,ref=$(CUDA_IMAGE_NAME)-cache \
+		--cache-to   type=registry,ref=$(CUDA_IMAGE_NAME)-cache,mode=max .
+endif
 
 docker-run:
 	mkdir -p "$(CURDIR)/data"

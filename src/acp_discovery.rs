@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use tokio::sync::RwLock;
@@ -14,29 +14,73 @@ use tracing::{info, warn};
 
 const SERVICE_TYPE: &str = "_acp-ws._tcp.local.";
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// How long an HTTP-registered instance is kept without a heartbeat before
+/// being pruned. Long enough to forgive transient client outages, short
+/// enough that stale URLs vanish quickly. Tunable via `RAG_ACP_REGISTER_TTL_SECS`.
+const DEFAULT_REGISTER_TTL: Duration = Duration::from_secs(120);
+/// How often the janitor wakes to prune expired registrations.
+const REGISTER_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AcpInstanceSource {
+    /// Discovered via mDNS browse on the LAN.
+    Mdns,
+    /// Registered explicitly over HTTP (typically used when the rust-rag
+    /// service runs in k8s and clients live outside the cluster subnet).
+    Registered,
+}
+
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct AcpInstance {
-    /// Friendly mDNS instance name (e.g. `acp-ws-9001`).
+    /// Friendly instance name (e.g. `acp-ws-9001`). Unique per source map.
     pub name: String,
-    /// First IPv4/IPv6 address resolved.
+    /// Resolved IP / hostname.
     pub host: String,
     pub port: u16,
-    /// Computed `ws://host:port/`.
+    /// Connection URL. Defaults to `ws://host:port/` when omitted by the
+    /// caller; HTTP registration may pass a fully-qualified `wss://…` URL.
     pub url: String,
     /// Subset of TXT key/value pairs (`version`, `protocol`, `auth`, ...).
     pub txt: HashMap<String, String>,
+    /// Where this entry came from. Lets the UI distinguish auto-discovered
+    /// instances from ones that registered via the HTTP API.
+    pub source: AcpInstanceSource,
 }
 
 #[derive(Default)]
 struct Inner {
     instances: HashMap<String, AcpInstance>,
+    /// `last_seen` for HTTP-registered instances only. mDNS entries are
+    /// pruned by `ServiceRemoved` events instead. Absent → not registered
+    /// (i.e. mDNS).
+    last_seen: HashMap<String, Instant>,
     active: Option<String>,
+}
+
+/// Callbacks the discovery layer fires on instance lifecycle. The registry
+/// in `acp_ws` subscribes to these to spawn / drop per-instance workers.
+#[derive(Clone)]
+pub struct DiscoveryHooks {
+    pub on_register: Arc<dyn Fn(&AcpInstance) + Send + Sync>,
+    pub on_unregister: Arc<dyn Fn(&str) + Send + Sync>,
+    pub on_select: Arc<dyn Fn(&AcpInstance) + Send + Sync>,
+}
+
+impl Default for DiscoveryHooks {
+    fn default() -> Self {
+        Self {
+            on_register: Arc::new(|_| {}),
+            on_unregister: Arc::new(|_| {}),
+            on_select: Arc::new(|_| {}),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct AcpDiscoveryHandle {
     inner: Arc<RwLock<Inner>>,
-    on_select: Arc<dyn Fn(&AcpInstance) + Send + Sync>,
+    hooks: DiscoveryHooks,
 }
 
 impl AcpDiscoveryHandle {
@@ -52,8 +96,9 @@ impl AcpDiscoveryHandle {
         g.active.as_ref().and_then(|n| g.instances.get(n).cloned())
     }
 
-    /// Mark `name` active and notify subscribers (acp_ws reconnect).
-    /// Returns the resolved instance, or `None` if unknown.
+    /// Mark `name` active. Now informational only — the active flag is a
+    /// hint for the frontend default selection; per-instance WS workers
+    /// stay registered regardless. Returns the resolved instance.
     pub async fn select(&self, name: &str) -> Option<AcpInstance> {
         let resolved = {
             let mut g = self.inner.write().await;
@@ -61,29 +106,134 @@ impl AcpDiscoveryHandle {
             g.active = Some(inst.name.clone());
             inst
         };
-        (self.on_select)(&resolved);
+        (self.hooks.on_select)(&resolved);
         Some(resolved)
     }
 
-    /// Re-select the same instance (used to nudge acp_ws after a fresh
-    /// resolution updates the host).
-    async fn refresh_active_if_changed(&self, updated: &AcpInstance) {
-        let should_notify = {
-            let g = self.inner.read().await;
-            matches!(&g.active, Some(n) if n == &updated.name)
-        };
-        if should_notify {
-            (self.on_select)(updated);
+    /// Fire on_register for a (possibly updated) instance. The registry
+    /// idempotently reuses the existing worker when url is unchanged.
+    fn notify_register(&self, inst: &AcpInstance) {
+        (self.hooks.on_register)(inst);
+    }
+
+    fn notify_unregister(&self, name: &str) {
+        (self.hooks.on_unregister)(name);
+    }
+
+    /// Register an instance via HTTP. If `name` already exists from mDNS,
+    /// it's overwritten (registered entries take precedence — they were
+    /// asserted by an explicit caller). Returns the stored instance after
+    /// normalization (URL filled in if absent).
+    pub async fn register(&self, mut instance: AcpInstance) -> AcpInstance {
+        instance.source = AcpInstanceSource::Registered;
+        if instance.url.is_empty() {
+            instance.url = format!("ws://{}:{}/", instance.host, instance.port);
         }
+        let key = instance.name.clone();
+        let (stored, became_active) = {
+            let mut g = self.inner.write().await;
+            g.last_seen.insert(key.clone(), Instant::now());
+            let was_none = g.active.is_none();
+            if was_none {
+                g.active = Some(key.clone());
+            }
+            g.instances.insert(key.clone(), instance.clone());
+            (instance, was_none)
+        };
+        self.notify_register(&stored);
+        if became_active {
+            (self.hooks.on_select)(&stored);
+        }
+        stored
+    }
+
+    /// Bump `last_seen` for an existing registered instance. Returns `true`
+    /// when the heartbeat hit a known registered entry.
+    pub async fn heartbeat(&self, name: &str) -> bool {
+        let mut g = self.inner.write().await;
+        if !g.last_seen.contains_key(name) {
+            return false;
+        }
+        g.last_seen.insert(name.to_owned(), Instant::now());
+        true
+    }
+
+    /// Remove an HTTP-registered instance. Returns `true` if removed.
+    /// mDNS-discovered instances are not affected — they only leave when
+    /// the service goes away on the network.
+    pub async fn unregister(&self, name: &str) -> bool {
+        let removed = {
+            let mut g = self.inner.write().await;
+            if g.last_seen.remove(name).is_none() {
+                return false;
+            }
+            g.instances.remove(name);
+            if matches!(&g.active, Some(n) if n == name) {
+                g.active = g.instances.keys().next().cloned();
+            }
+            true
+        };
+        if removed {
+            self.notify_unregister(name);
+        }
+        removed
     }
 }
 
-/// Spawn the discovery daemon. `on_select` fires whenever the active
-/// instance is set or its address changes.
-pub fn spawn<F>(on_select: F) -> Option<AcpDiscoveryHandle>
-where
-    F: Fn(&AcpInstance) + Send + Sync + 'static,
-{
+fn register_ttl() -> Duration {
+    std::env::var("RAG_ACP_REGISTER_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_REGISTER_TTL)
+}
+
+/// Build a discovery handle without mDNS. Useful when the service runs in
+/// an environment where multicast can't reach clients (e.g. inside a k8s
+/// pod whose subnet is isolated from the user's LAN). Clients register
+/// themselves over HTTP via `POST /api/acp/register`.
+pub fn spawn_http_only(hooks: DiscoveryHooks) -> AcpDiscoveryHandle {
+    let inner: Arc<RwLock<Inner>> = Arc::new(RwLock::new(Inner::default()));
+    let handle = AcpDiscoveryHandle {
+        inner: inner.clone(),
+        hooks,
+    };
+    spawn_register_janitor(inner, handle.clone());
+    info!("acp_discovery: HTTP-only mode (no mDNS)");
+    handle
+}
+
+/// Background task that prunes HTTP-registered instances whose heartbeat
+/// has gone silent. mDNS entries are untouched — they have their own
+/// `ServiceRemoved` lifecycle.
+fn spawn_register_janitor(inner: Arc<RwLock<Inner>>, handle: AcpDiscoveryHandle) {
+    tokio::spawn(async move {
+        let ttl = register_ttl();
+        loop {
+            tokio::time::sleep(REGISTER_PRUNE_INTERVAL).await;
+            let now = Instant::now();
+            let mut expired = Vec::new();
+            {
+                let g = inner.read().await;
+                for (name, seen) in g.last_seen.iter() {
+                    if now.duration_since(*seen) > ttl {
+                        expired.push(name.clone());
+                    }
+                }
+            }
+            for name in expired {
+                if handle.unregister(&name).await {
+                    info!("acp_discovery: pruned stale registration {name}");
+                }
+            }
+        }
+    });
+}
+
+/// Spawn the discovery daemon. Hooks fire on every register/unregister so
+/// the `acp_ws` registry can spawn/drop per-instance workers. `on_select`
+/// remains for UI hints.
+pub fn spawn(hooks: DiscoveryHooks) -> Option<AcpDiscoveryHandle> {
     let daemon = match ServiceDaemon::new() {
         Ok(d) => d,
         Err(err) => {
@@ -102,8 +252,9 @@ where
     let inner: Arc<RwLock<Inner>> = Arc::new(RwLock::new(Inner::default()));
     let handle = AcpDiscoveryHandle {
         inner: inner.clone(),
-        on_select: Arc::new(on_select),
+        hooks,
     };
+    spawn_register_janitor(inner.clone(), handle.clone());
 
     let bg_handle = handle.clone();
     tokio::spawn(async move {
@@ -141,33 +292,51 @@ where
                             port,
                             url,
                             txt,
+                            source: AcpInstanceSource::Mdns,
                         };
                         info!(
                             "acp_discovery: resolved {} → {}",
                             instance.name, instance.url
                         );
                         let key = instance.name.clone();
-                        {
+                        let became_active = {
                             let mut g = inner.write().await;
-                            // Auto-select the first instance we see.
-                            if g.active.is_none() {
+                            let was_none = g.active.is_none();
+                            if was_none {
                                 g.active = Some(key.clone());
                             }
                             g.instances.insert(key, instance.clone());
+                            was_none
+                        };
+                        bg_handle.notify_register(&instance);
+                        if became_active {
+                            (bg_handle.hooks.on_select)(&instance);
                         }
-                        bg_handle.refresh_active_if_changed(&instance).await;
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
                         let short = fullname
                             .strip_suffix(SERVICE_TYPE)
                             .map(|s| s.trim_end_matches('.').to_string())
                             .unwrap_or(fullname);
-                        let mut g = inner.write().await;
-                        g.instances.remove(&short);
-                        if matches!(&g.active, Some(n) if n == &short) {
-                            g.active = g.instances.keys().next().cloned();
+                        let removed = {
+                            let mut g = inner.write().await;
+                            // Don't yank an HTTP-registered entry just because a
+                            // (different) mDNS service with the same name went
+                            // away. Registered ones outlive mDNS volatility.
+                            if g.last_seen.contains_key(&short) {
+                                false
+                            } else {
+                                let had = g.instances.remove(&short).is_some();
+                                if matches!(&g.active, Some(n) if n == &short) {
+                                    g.active = g.instances.keys().next().cloned();
+                                }
+                                had
+                            }
+                        };
+                        if removed {
+                            info!("acp_discovery: removed {short}");
+                            bg_handle.notify_unregister(&short);
                         }
-                        info!("acp_discovery: removed {short}");
                     }
                     _ => {}
                 },

@@ -9,6 +9,7 @@ import {
   BookOpen,
   Brain,
   FolderOpen,
+  FolderTree,
   GitBranch,
   Github,
   Hash,
@@ -33,6 +34,7 @@ const navigation = [
   { name: "Swarm", href: "/messages", icon: Hash },
   { name: "Agents", href: "/acp", icon: Terminal },
   { name: "Entries", href: "/entries", icon: FolderOpen },
+  { name: "Wiki", href: "/wiki", icon: FolderTree },
   { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
@@ -90,6 +92,8 @@ export function AppHeader() {
                 <Link
                   key={item.name}
                   href={item.href}
+                  prefetch={false}
+                  aria-label={item.name}
                   className={cn(
                     "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
                     isActive
@@ -97,7 +101,7 @@ export function AppHeader() {
                       : "text-muted-foreground border-transparent hover:text-foreground hover:border-border"
                   )}
                 >
-                  <item.icon className="size-3.5" />
+                  <item.icon className="size-3.5" aria-hidden="true" />
                   <span className="hidden sm:inline">{item.name}</span>
                 </Link>
               )
@@ -113,6 +117,8 @@ export function AppHeader() {
               <Link
                 key={item.name}
                 href={item.href}
+                prefetch={false}
+                aria-label={item.name}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
                   isActive
@@ -120,7 +126,7 @@ export function AppHeader() {
                     : "text-muted-foreground border-transparent hover:text-foreground hover:border-border"
                 )}
               >
-                <item.icon className="size-3.5" />
+                <item.icon className="size-3.5" aria-hidden="true" />
                 <span className="hidden sm:inline">{item.name}</span>
               </Link>
             )
@@ -129,6 +135,8 @@ export function AppHeader() {
             <>
               <Link
                 href="/auth/tokens"
+                prefetch={false}
+                aria-label="MCP tokens"
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors",
                   pathname.startsWith("/auth/tokens") || pathname.startsWith("/auth/device")
@@ -137,7 +145,7 @@ export function AppHeader() {
                 )}
                 title="MCP tokens"
               >
-                <KeyRound className="size-3.5" />
+                <KeyRound className="size-3.5" aria-hidden="true" />
                 <span className="hidden sm:inline">Tokens</span>
               </Link>
               <span className="hidden items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground md:flex">
@@ -146,18 +154,20 @@ export function AppHeader() {
               </span>
               <a
                 href="/auth/logout"
+                aria-label="Sign out"
                 className="flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground transition-colors hover:text-foreground"
               >
-                <LogOut className="size-3.5" />
+                <LogOut className="size-3.5" aria-hidden="true" />
                 <span className="hidden sm:inline">Sign out</span>
               </a>
             </>
           ) : session?.auth_enabled ? (
             <a
               href="/auth/login"
+              aria-label="Sign in"
               className="flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground transition-colors hover:text-foreground"
             >
-              <LogIn className="size-3.5" />
+              <LogIn className="size-3.5" aria-hidden="true" />
               <span className="hidden sm:inline">Sign in</span>
             </a>
           ) : null}

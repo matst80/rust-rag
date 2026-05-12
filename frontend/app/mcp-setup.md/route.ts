@@ -1,5 +1,7 @@
 import { MCP_SETUP_MARKDOWN } from "@/lib/start-page"
 
+// Public endpoint — no auth check. MCP clients fetch this during setup
+// before they have a token.
 export function GET() {
   return new Response(MCP_SETUP_MARKDOWN, {
     headers: {

@@ -38,27 +38,38 @@ data:
   RAG_CHUNK_OVERLAP_TOKENS: "50"
   RAG_INTRA_THREADS: "2"
   RAG_CUDA_DEVICE_ID: "0"
-  ## GPU is shared with the reranker arena; total budget on a 6 GB card
-  ## (1660 SUPER on sunk) is ~5500 MB usable. Embedder gets the bulk.
-  RAG_CUDA_MEM_LIMIT_MB: "3000"
+  ## RTX 2080 (serber) — 8 GB total, ~7500 MB usable. Tensor cores
+  ## present, so fp16 actually accelerates here unlike on the 1660 SUPER.
+  ## Embedder bge-m3 + reranker bge-reranker-base both fit comfortably.
+  RAG_CUDA_MEM_LIMIT_MB: "4000"
   ## Hard-fail at session creation if CUDA EP doesn't register (instead of
   ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
   RAG_CUDA_STRICT: "true"
   ## Verbose ORT log during cutover — drop back to "warning" once stable.
   RAG_ORT_LOG_LEVEL: "info"
-  ## Phase 3 cross-encoder reranker. Toggle "true" once the bge-reranker-v2-m3
-  ## ONNX export has been fetched (initContainer below) and the image carries
-  ## the matching binary. ~1.1 GB additional VRAM, ~50–150 ms / batch.
+  ## Phase 3 cross-encoder reranker. Switched from bge-reranker-v2-m3
+  ## (568M params, XLM-RoBERTa-large) to bge-reranker-base (~135M, ~4×
+  ## smaller) — v2-m3 hit ~4s / batch on the 1660 SUPER (Turing, no
+  ## fp16 tensor cores). Tradeoff: base is English-leaning, v2-m3 was
+  ## multilingual. Revert by flipping paths back.
   RAG_RERANKER_ENABLED: "true"
-  RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-v2-m3/model_fp16.onnx"
-  RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-v2-m3/tokenizer.json"
+  RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-base/model_fp16.onnx"
+  RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-base/tokenizer.json"
   RAG_RERANKER_TOP_N: "15"
-  RAG_RERANKER_MAX_TOKENS: "512"
+  ## Lowered from 512 → 256: cross-encoder attention is O(seq_len²), so
+  ## halving the cap is a 4× speedup. Chunks are 500 bge-m3 tokens; the
+  ## reranker tokenizer is XLM-R, similar count. With chunk_text fed to
+  ## the reranker (instead of full doc text), most pairs fit comfortably.
+  RAG_RERANKER_MAX_TOKENS: "256"
   RAG_RERANKER_INTRA_THREADS: "2"
-  RAG_RERANKER_CUDA_MEM_LIMIT_MB: "1500"
+  RAG_RERANKER_CUDA_MEM_LIMIT_MB: "2000"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_AUTH_ENABLED: "true"
+  ## DNS rebinding guard for /mcp. Default allowlist is localhost only;
+  ## must include the public hostname so VSCode/Cursor over the ingress
+  ## are not rejected with 403 "Host header is not allowed".
+  RAG_MCP_ALLOWED_HOSTS: "rag.k6n.net,localhost,127.0.0.1,::1"
   ## Comma-separated list of Zitadel subject IDs (the JWT `sub` claim)
   ## that bypass per-message ownership checks for channel clear and
   ## individual message delete/update. ApiKey + Disabled auth paths are
@@ -66,6 +77,41 @@ data:
   RAG_ADMIN_SUBJECTS: "369527412653951321"
   RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
   RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
+  ## LLM-on-store analysis pass. Probe-verified config: bare-metal
+  ## llama.cpp at 10.10.11.135:8082 serving unsloth/Qwen3.5-4B-GGUF
+  ## with thinking disabled via chat_template_kwargs (llama.cpp build
+  ## ignores reasoning_effort + thinking_budget — must be hard-off).
+  ## Falls back to RAG_OPENAI_* if any of these are unset.
+  RAG_ANALYSIS_ENABLED: "true"
+  RAG_ANALYSIS_BASE_URL: "http://10.10.11.135:8082/v1"
+  RAG_ANALYSIS_MODEL: "unsloth/Qwen3.5-4B-GGUF"
+  RAG_ANALYSIS_TIMEOUT_SECS: "30"
+  RAG_ANALYSIS_MAX_NEIGHBORS: "8"
+  RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.65"
+  ## Manager loop. Drives the cron + mention-triggered orchestrator that
+  ## reads `manager` channel + tool-calls into ACP / RAG / message tools.
+  ## Uses xAI Grok Fast Reasoning over the public API; api key lands via
+  ## RAG_MANAGER_API_KEY in the rust-rag-frontend-auth Secret.
+  RAG_MANAGER_ENABLED: "true"
+  RAG_MANAGER_API_BASE_URL: "https://api.x.ai/v1"
+  RAG_MANAGER_MODEL: "grok-4-1-fast-reasoning"
+  RAG_MANAGER_CHANNEL: "manager"
+  RAG_MANAGER_MENTION: "@manager"
+  RAG_MANAGER_INTERVAL_SECS: "300"
+  RAG_MANAGER_TIMEOUT_SECS: "120"
+  RAG_MANAGER_MAX_ITERATIONS: "8"
+  RAG_MANAGER_MEMORY_SOURCE_ID: "manager_memory"
+  ## Pod runs in a k8s subnet that user LAN can't multicast into, so the
+  ## mDNS browse for `_acp-ws._tcp` would never resolve anyone. Switch to
+  ## HTTP-only mode: clients call POST /api/acp/register from the LAN side.
+  RAG_ACP_DISCOVERY_MODE: "http"
+  RAG_ACP_REGISTER_TTL_SECS: "120"
+  ## OpenTelemetry traces. otel-debug-service in monitoring exposes OTLP
+  ## gRPC on :4317; tracing-opentelemetry layers on top of the existing
+  ## tracing fmt subscriber so every #[instrument] span ships through.
+  RAG_OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-debug-service.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "rust-rag"
   ZITADEL_ISSUER: "https://auth.k6n.net"
   ZITADEL_CLIENT_ID: "369530153681881434@rag"
   ZITADEL_SCOPES: "openid profile email"
@@ -124,7 +170,7 @@ spec:
     spec:
       runtimeClassName: nvidia
       nodeSelector:
-        kubernetes.io/hostname: sunk
+        kubernetes.io/hostname: serber
       ## Init container fetches the bge-m3 ONNX export from HuggingFace into
       ## the models PVC on first boot. Subsequent restarts skip the download
       ## (idempotent: no-op if model.onnx_data is already present at full
@@ -177,17 +223,18 @@ spec:
         - name: fetch-bge-reranker
           image: curlimages/curl:8.10.1
           env:
-            ## BAAI's own bge-reranker-v2-m3 repo ships only safetensors —
-            ## use onnx-community's pre-converted mirror, which carries fp16
-            ## (~1.1 GB) under onnx/.
+            ## bge-reranker-base ONNX (XLM-RoBERTa-base ~135M, fp16 ~270 MB).
+            ## onnx-community mirrors BAAI/bge-reranker-base with fp16 +
+            ## tokenizer.json. Smaller than v2-m3 — sub-second batches on
+            ## consumer Turing without tensor cores.
             - name: HF_REPO
-              value: "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main"
+              value: "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main"
           command:
             - /bin/sh
             - -ec
             - |
               cd /models
-              mkdir -p bge-reranker-v2-m3 && cd bge-reranker-v2-m3
+              mkdir -p bge-reranker-base && cd bge-reranker-base
               fetch() {
                 local name=$1
                 local url=$2
@@ -201,12 +248,12 @@ spec:
                   --output "$name.tmp" "$url"
                 mv "$name.tmp" "$name"
               }
-              # fp16 single-file (~1.1 GB resident). int8 was tried but ORT's
-              # CUDA EP lacks accelerated int8 kernels for QDQ ops — falls
-              # back to CPU partial and runs ~5× slower than fp16. Stick to
-              # fp16 unless we move to TensorRT EP.
-              fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 800000000
-              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        5000000
+              # ~270 MB fp16. Smaller variants (int8/q4) were skipped — ORT
+              # CUDA EP lacks accelerated int8 kernels for QDQ ops, so they
+              # actually run slower than fp16 here. TensorRT EP would change
+              # that calculus.
+              fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 100000000
+              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        1000000
               echo "reranker cache ready:"
               ls -lh
           volumeMounts:
@@ -231,6 +278,9 @@ spec:
                 name: rust-rag-cuda-config
             - secretRef:
                 name: rust-rag-frontend-auth
+            ## RAG_MANAGER_API_KEY (xAI bearer for the Grok manager loop)
+            - secretRef:
+                name: common-secret
             ## RAG_DATABASE_URL = postgres://user:pass@host:5432/db
             ## Create out-of-band:
             ##   kubectl -n home create secret generic rust-rag-postgres \
@@ -245,8 +295,8 @@ spec:
               subPath: bge-m3
               readOnly: true
             - name: models
-              mountPath: /app/assets/bge-reranker-v2-m3
-              subPath: bge-reranker-v2-m3
+              mountPath: /app/assets/bge-reranker-base
+              subPath: bge-reranker-base
               readOnly: true
           startupProbe:
             httpGet:

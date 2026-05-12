@@ -9,11 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-genai": "^0.10.27",
+    "@rust-rag/llm": "file:../shared/llm",
+    "@rust-rag/ui": "file:../shared/ui",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
-    "@rust-rag/ui": "file:../shared/ui"
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.301",

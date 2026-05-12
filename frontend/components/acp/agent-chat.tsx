@@ -25,12 +25,27 @@ interface SessionInfo {
 	history?: unknown[]
 }
 
+interface ProjectInfo {
+	name: string
+	path: string
+}
+
 interface AcpInstance {
 	name: string
 	host: string
 	port: number
 	url: string
 	txt: Record<string, string>
+}
+
+interface WorkerStatus {
+	instance_id: string
+	url: string
+	connected: boolean
+	last_error: string | null
+	session_count: number
+	pending_permissions: number
+	buffered_events: number
 }
 
 interface ConnectionState {
@@ -79,20 +94,48 @@ export function AgentChat() {
 	const [eventsBySession, setEventsBySession] = useState<Record<string, AcpEvent[]>>({})
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
-	const [draft, setDraft] = useState("")
+	// Per-session draft buffer. Each session keeps its in-progress prompt in
+	// localStorage under `acp:draft:<session_id>` so switching tabs/sessions
+	// before pressing Send doesn't lose the text.
+	const [drafts, setDrafts] = useState<Record<string, string>>({})
 	const [instances, setInstances] = useState<AcpInstance[]>([])
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
+	const [workers, setWorkers] = useState<WorkerStatus[]>([])
+	const [projects, setProjects] = useState<ProjectInfo[]>([])
+	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
+	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+	const [projectPickerHighlight, setProjectPickerHighlight] = useState(0)
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
+	// Read the current desired instance synchronously from connect()/reconnect
+	// without re-creating the callback on every change.
+	const activeInstanceRef = useRef<string | null>(null)
+	useEffect(() => {
+		activeInstanceRef.current = activeInstance
+	}, [activeInstance])
 
 	const refreshInstances = useCallback(async () => {
 		try {
 			const res = await fetch("/bff/acp/instances", { credentials: "include" })
 			if (!res.ok) return
-			const data = (await res.json()) as { instances: AcpInstance[]; active: string | null }
+			const data = (await res.json()) as {
+				instances: AcpInstance[]
+				active: string | null
+				workers?: WorkerStatus[]
+			}
 			setInstances(data.instances)
-			setActiveInstance(data.active)
+			setWorkers(data.workers ?? [])
+			setActiveInstance((prev) => {
+				// Preserve a user-chosen instance even if backend "active" hint
+				// changes; only auto-pick when nothing selected yet.
+				if (prev && (data.workers ?? []).some((w) => w.instance_id === prev)) {
+					return prev
+				}
+				if (data.active) return data.active
+				if ((data.workers ?? []).length === 1) return data.workers![0].instance_id
+				return null
+			})
 		} catch (err) {
 			console.warn("acp instances fetch failed", err)
 		}
@@ -108,10 +151,27 @@ export function AgentChat() {
 		return true
 	}, [])
 
+	const workersRef = useRef<WorkerStatus[]>([])
+	useEffect(() => {
+		workersRef.current = workers
+	}, [workers])
+
 	const connect = useCallback(async () => {
+		// Backend rejects WS upgrades when no workers are registered or when
+		// multiple are registered and ?instance= is missing. Avoid the
+		// failed-handshake noise by reading worker state first.
+		const target = activeInstanceRef.current
+		const ws_count = workersRef.current.length
+		if (ws_count === 0) {
+			setConn({ status: "disabled", error: "no ACP instances registered" })
+			return
+		}
+		if (!target && ws_count > 1) {
+			setConn({ status: "disabled", error: "pick an instance" })
+			return
+		}
 		setConn({ status: "connecting" })
 		let url: string
-		let token: string
 		try {
 			const res = await fetch("/bff/acp/config", { credentials: "include" })
 			if (res.status === 503) {
@@ -122,20 +182,33 @@ export function AgentChat() {
 				setConn({ status: "error", error: `config fetch ${res.status}` })
 				return
 			}
-			const data = (await res.json()) as { url?: string; token?: string }
-			if (!data.url || !data.token) {
-				setConn({ status: "disabled", error: "missing url/token" })
+			const data = (await res.json()) as { url?: string }
+			if (!data.url) {
+				setConn({ status: "disabled", error: "missing url" })
 				return
 			}
 			url = data.url
-			token = data.token
 		} catch (err) {
 			setConn({ status: "error", error: String(err) })
 			return
 		}
 
-		const sep = url.includes("?") ? "&" : "?"
-		const wsUrl = `${url}${sep}token=${encodeURIComponent(token)}`
+		// Same-origin relative paths get promoted to ws(s):// against the current
+		// host. Absolute URLs (legacy LAN daemon endpoints) pass through unchanged.
+		let wsUrl: string
+		if (url.startsWith("/")) {
+			const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+			wsUrl = `${proto}//${window.location.host}${url}`
+		} else {
+			wsUrl = url
+		}
+		// Backend resolves per-instance worker from ?instance=. Skip the param
+		// when no selection yet — backend auto-picks the sole worker if exactly
+		// one is registered.
+		if (target) {
+			const sep = wsUrl.includes("?") ? "&" : "?"
+			wsUrl = `${wsUrl}${sep}instance=${encodeURIComponent(target)}`
+		}
 		const ws = new WebSocket(wsUrl)
 		wsRef.current = ws
 
@@ -168,6 +241,16 @@ export function AgentChat() {
 				const list = Array.isArray((payload as { sessions?: unknown }).sessions)
 					? (payload as { sessions: SessionInfo[] }).sessions
 					: []
+				const projectList = Array.isArray((payload as { projects?: unknown }).projects)
+					? ((payload as { projects: unknown[] }).projects.filter(
+						(p): p is ProjectInfo =>
+							typeof p === "object" &&
+							p !== null &&
+							typeof (p as ProjectInfo).name === "string" &&
+							typeof (p as ProjectInfo).path === "string",
+					))
+					: []
+				setProjects(projectList)
 				const map: Record<string, SessionInfo> = {}
 				const ingestedBySession: Record<string, AcpEvent[]> = {}
 				for (const s of list) {
@@ -231,6 +314,17 @@ export function AgentChat() {
 						}
 						return next
 					})
+					setDrafts((prev) => {
+						if (prev[sid] === undefined) return prev
+						const next = { ...prev }
+						delete next[sid]
+						return next
+					})
+					try {
+						window.localStorage.removeItem(`acp:draft:${sid}`)
+					} catch {
+						// ignore
+					}
 				}
 			}
 
@@ -266,9 +360,26 @@ export function AgentChat() {
 		}
 	}, [activeSessionId])
 
+	// Auto-(re)connect when a viable target appears. Covers the "first
+	// daemon registers mid-session" case without forcing the user to
+	// refresh the page.
 	useEffect(() => {
+		if (wsRef.current) return
+		if (conn.status === "open" || conn.status === "connecting") return
+		const resolvable = workers.length === 1 || !!activeInstance
+		if (!resolvable) return
 		connect()
-		void refreshInstances()
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [workers, activeInstance])
+
+	useEffect(() => {
+		// Fetch instances first so the initial WS connect can carry
+		// ?instance=. With one worker the backend auto-resolves, so this
+		// only matters once multiple are registered.
+		;(async () => {
+			await refreshInstances()
+			connect()
+		})()
 		const t = window.setInterval(() => void refreshInstances(), 10_000)
 		return () => {
 			window.clearInterval(t)
@@ -282,34 +393,32 @@ export function AgentChat() {
 	const selectInstance = useCallback(
 		async (name: string) => {
 			if (name === activeInstance) return
+			activeInstanceRef.current = name
+			setActiveInstance(name)
+			// Best-effort: tell the backend our default-instance preference.
+			// Failure is non-fatal — the WS reconnect below uses ?instance=
+			// directly so the UI works even if the select endpoint is gone.
 			try {
-				const res = await fetch("/bff/acp/select", {
+				await fetch("/bff/acp/select", {
 					method: "POST",
 					credentials: "include",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify({ name }),
 				})
-				if (!res.ok) {
-					console.error("acp select failed", await res.text())
-					return
-				}
-				setActiveInstance(name)
-				// Backend swapped its client; force browser reconnect to new URL.
-				// Detach handlers before close so any in-flight messages from the
-				// old socket don't double-dispatch into the new state.
-				const ws = wsRef.current
-				wsRef.current = null
-				reconnectAttemptRef.current = 0
-				if (ws) detachAndClose(ws)
-				// Reset session view; new instance has its own state.
-				setSessions({})
-				setEventsBySession({})
-				setActiveSessionId(null)
-				setPendingPermissions({})
-				connect()
 			} catch (err) {
-				console.error("acp select error", err)
+				console.warn("acp select hint failed", err)
 			}
+			// Each instance has its own worker + sessions; reset view, then
+			// reconnect against the new instance via ?instance=.
+			const ws = wsRef.current
+			wsRef.current = null
+			reconnectAttemptRef.current = 0
+			if (ws) detachAndClose(ws)
+			setSessions({})
+			setEventsBySession({})
+			setActiveSessionId(null)
+			setPendingPermissions({})
+			connect()
 		},
 		[activeInstance, connect],
 	)
@@ -327,6 +436,38 @@ export function AgentChat() {
 				: [],
 		[activeSessionId, pendingPermissions],
 	)
+
+	const draftKey = (sid: string) => `acp:draft:${sid}`
+	const draft = activeSessionId ? drafts[activeSessionId] ?? "" : ""
+
+	// Hydrate the active session's draft from localStorage on first switch.
+	useEffect(() => {
+		if (!activeSessionId) return
+		if (drafts[activeSessionId] !== undefined) return
+		try {
+			const stored = window.localStorage.getItem(draftKey(activeSessionId))
+			if (stored) {
+				setDrafts((prev) => ({ ...prev, [activeSessionId]: stored }))
+			}
+		} catch {
+			// Ignore quota / privacy-mode errors.
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [activeSessionId])
+
+	const setDraft = (value: string) => {
+		if (!activeSessionId) return
+		setDrafts((prev) => ({ ...prev, [activeSessionId]: value }))
+		try {
+			if (value) {
+				window.localStorage.setItem(draftKey(activeSessionId), value)
+			} else {
+				window.localStorage.removeItem(draftKey(activeSessionId))
+			}
+		} catch {
+			// Ignore.
+		}
+	}
 
 	const sendPrompt = () => {
 		if (!activeSessionId || !draft.trim()) return
@@ -354,9 +495,21 @@ export function AgentChat() {
 	}
 
 	const spawn = () => {
-		const projectPath = window.prompt("project_path")
-		if (!projectPath) return
-		send({ type: "spawn_session", project_path: projectPath })
+		const initial = projects.length === 1 ? projects[0].path : ""
+		setSpawnDialog({ projectPath: initial, agentCommand: "" })
+		setProjectPickerOpen(projects.length > 1)
+		setProjectPickerHighlight(0)
+	}
+
+	const submitSpawn = () => {
+		if (!spawnDialog) return
+		const path = spawnDialog.projectPath.trim()
+		if (!path) return
+		const envelope: AcpEnvelope = { type: "spawn_session", project_path: path }
+		const cmd = spawnDialog.agentCommand.trim()
+		if (cmd) envelope.agent_command = cmd
+		send(envelope)
+		setSpawnDialog(null)
 	}
 
 	const bindTelegramThread = () => {
@@ -444,20 +597,30 @@ export function AgentChat() {
 				</div>
 				{instances.length > 0 && (
 					<div className="border-b border-border px-3 py-2">
-						<label className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1">
+						<label
+							htmlFor="acp-instance-select"
+							className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1"
+						>
 							ACP instance
 						</label>
 						<select
+							id="acp-instance-select"
+							aria-label="ACP instance"
 							value={activeInstance ?? ""}
 							onChange={(e) => void selectInstance(e.target.value)}
 							className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
 						>
 							{!activeInstance && <option value="">— pick instance —</option>}
-							{instances.map((inst) => (
-								<option key={inst.name} value={inst.name}>
-									{inst.name} ({inst.host}:{inst.port})
-								</option>
-							))}
+							{instances.map((inst) => {
+								const w = workers.find((w) => w.instance_id === inst.name)
+								const dot = w ? (w.connected ? "●" : "○") : "·"
+								const count = w ? ` · ${w.session_count}s` : ""
+								return (
+									<option key={inst.name} value={inst.name}>
+										{dot} {inst.name} ({inst.host}:{inst.port}){count}
+									</option>
+								)
+							})}
 						</select>
 					</div>
 				)}
@@ -637,6 +800,167 @@ export function AgentChat() {
 					</>
 				)}
 			</section>
+
+			{spawnDialog && (
+				<div
+					className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
+					onClick={(e) => {
+						if (e.target === e.currentTarget) setSpawnDialog(null)
+					}}
+				>
+					<div className="w-full max-w-md border border-border bg-background p-5">
+						<div className="flex items-center justify-between mb-4">
+							<h3 className="font-mono text-xs font-bold uppercase tracking-[2px]">
+								Spawn session
+							</h3>
+							<button
+								type="button"
+								className="text-muted-foreground hover:text-foreground"
+								onClick={() => setSpawnDialog(null)}
+								aria-label="Close"
+							>
+								<X className="size-4" />
+							</button>
+						</div>
+
+						<div className="mb-3 relative">
+							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
+								project_path
+							</label>
+							{(() => {
+								const q = spawnDialog.projectPath.trim().toLowerCase()
+								const filtered = q
+									? projects.filter(
+										(p) =>
+											p.name.toLowerCase().includes(q) ||
+											p.path.toLowerCase().includes(q),
+									)
+									: projects
+								const max = filtered.length
+								return (
+									<>
+										<input
+											type="text"
+											value={spawnDialog.projectPath}
+											onChange={(e) => {
+												setSpawnDialog((d) =>
+													d ? { ...d, projectPath: e.target.value } : d,
+												)
+												setProjectPickerOpen(true)
+												setProjectPickerHighlight(0)
+											}}
+											onFocus={() => {
+												if (projects.length > 0) setProjectPickerOpen(true)
+											}}
+											onBlur={() => {
+												// Delay so click on dropdown registers first.
+												window.setTimeout(() => setProjectPickerOpen(false), 120)
+											}}
+											onKeyDown={(e) => {
+												if (!projectPickerOpen || max === 0) return
+												if (e.key === "ArrowDown") {
+													e.preventDefault()
+													setProjectPickerHighlight((i) => (i + 1) % max)
+												} else if (e.key === "ArrowUp") {
+													e.preventDefault()
+													setProjectPickerHighlight((i) => (i - 1 + max) % max)
+												} else if (e.key === "Enter") {
+													const pick = filtered[projectPickerHighlight]
+													if (pick) {
+														e.preventDefault()
+														setSpawnDialog((d) =>
+															d ? { ...d, projectPath: pick.path } : d,
+														)
+														setProjectPickerOpen(false)
+													}
+												} else if (e.key === "Escape") {
+													setProjectPickerOpen(false)
+												}
+											}}
+											placeholder="/abs/path or filter projects…"
+											className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+											autoComplete="off"
+										/>
+										{projectPickerOpen && filtered.length > 0 && (
+											<ul
+												className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto border border-border bg-background shadow-lg"
+												role="listbox"
+											>
+												{filtered.map((p, i) => (
+													<li
+														key={p.path}
+														role="option"
+														aria-selected={i === projectPickerHighlight}
+														onMouseDown={(e) => {
+															e.preventDefault()
+															setSpawnDialog((d) =>
+																d ? { ...d, projectPath: p.path } : d,
+															)
+															setProjectPickerOpen(false)
+														}}
+														onMouseEnter={() => setProjectPickerHighlight(i)}
+														className={cn(
+															"cursor-pointer px-2 py-1.5 font-mono text-xs",
+															i === projectPickerHighlight
+																? "bg-primary/10 text-primary"
+																: "hover:bg-muted/40",
+														)}
+													>
+														<div className="truncate font-medium">{p.name}</div>
+														<div className="truncate text-[10px] text-muted-foreground">
+															{p.path}
+														</div>
+													</li>
+												))}
+											</ul>
+										)}
+										{projects.length === 0 && (
+											<p className="mt-1 font-mono text-[10px] text-muted-foreground">
+												No project templates from the daemon. Enter a path manually.
+											</p>
+										)}
+									</>
+								)
+							})()}
+						</div>
+
+						<div className="mb-4">
+							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
+								agent_command (optional)
+							</label>
+							<input
+								type="text"
+								value={spawnDialog.agentCommand}
+								onChange={(e) =>
+									setSpawnDialog((d) =>
+										d ? { ...d, agentCommand: e.target.value } : d,
+									)
+								}
+								placeholder="claude / gemini / amp / …"
+								className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
+							/>
+						</div>
+
+						<div className="flex justify-end gap-2">
+							<button
+								type="button"
+								onClick={() => setSpawnDialog(null)}
+								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-border hover:bg-card"
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								onClick={submitSpawn}
+								disabled={!spawnDialog.projectPath.trim()}
+								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-primary bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-40"
+							>
+								Spawn
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	)
 }

@@ -33,7 +33,7 @@ RUN mkdir -p assets
 
 # `--no-default-features` strips ort/download-binaries (mutually exclusive
 # with load-dynamic). `--features cuda` brings in ort/cuda + ort/load-dynamic.
-RUN CARGO_BUILD_JOBS=2 cargo build --release \
+RUN cargo build --release \
 	--no-default-features --features cuda --bin rust-rag
 
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
