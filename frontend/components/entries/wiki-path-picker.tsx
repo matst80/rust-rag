@@ -87,7 +87,7 @@ export function WikiPathPicker({ entry }: WikiPathPickerProps) {
           variant="outline"
           size="sm"
           className={cn(
-            "font-mono text-[10px] uppercase tracking-[1.5px] h-7 px-2 gap-1.5",
+            "font-mono text-[10px] uppercase tracking-[1.5px] h-6 px-2 gap-1.5",
             currentPath ? "text-primary border-primary/40 hover:bg-primary/10" : "text-muted-foreground"
           )}
         >

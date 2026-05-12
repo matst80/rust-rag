@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Pencil, Trash2, GitBranch, Save, Copy, Check } from "lucide-react"
+import { ArrowLeft, Pencil, Trash2, GitBranch, Save, Copy, Check, Terminal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
@@ -132,26 +132,32 @@ export function EntryDetail({ id }: EntryDetailProps) {
           <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground leading-none">
             Fragment
           </h1>
-          <div className="flex items-center gap-2 mt-0.5">
+          <div className="flex items-center gap-2 mt-1">
             <button
               type="button"
               onClick={handleCopyId}
               title={`Copy id: ${entry.id}`}
-              className="font-mono text-[10px] text-muted-foreground tabular-nums inline-flex items-center gap-1 hover:text-primary transition-colors"
+              className="h-6 px-2 font-mono text-[10px] text-muted-foreground tabular-nums inline-flex items-center gap-1.5 hover:text-primary border border-border bg-muted/5 rounded transition-colors"
             >
-              <span>{entry.id.substring(0, 12)}…</span>
+              <span>{entry.id.substring(0, 8)}…</span>
               {idCopied ? (
                 <Check className="size-3 text-emerald-500" />
               ) : (
                 <Copy className="size-3 opacity-60" />
               )}
             </button>
-            <EntryTag label={entry.source_id} icon={false} />
+            <EntryTag label={entry.source_id} icon={false} className="h-6" />
+            {entry.type && (
+              <div className="h-6 px-2 font-mono text-[10px] uppercase tracking-wider flex items-center gap-1.5 rounded border border-primary/20 bg-primary/5 text-primary shadow-[0_0_10px_rgba(var(--primary-rgb),0.05)]">
+                <Terminal className="size-3" />
+                {entry.type}
+              </div>
+            )}
             <WikiPathPicker entry={entry} />
             {entry.path && (
               <Link
                 href={`/wiki?source_id=${encodeURIComponent(entry.source_id)}&path=${encodeURIComponent(entry.path)}`}
-                className="font-mono text-[10px] uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground hover:text-primary hover:border-primary/40 transition-colors"
+                className="h-6 px-2 font-mono text-[10px] uppercase tracking-wider flex items-center border border-border text-muted-foreground hover:text-primary hover:border-primary/40 rounded transition-colors"
                 title="Open this wiki folder"
               >
                 ↗
