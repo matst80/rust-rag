@@ -7,6 +7,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { atomDark } from "react-syntax-highlighter/dist/esm/styles/prism"
 import { useState } from "react"
 import { Check, Copy } from "lucide-react"
+import { MermaidBlock } from "./mermaid-block"
 
 interface MarkdownViewProps {
   content: string
@@ -45,18 +46,28 @@ function CopyButton({ text }: { text: string }) {
 
 export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (
-    <div className={cn("prose prose-sm dark:prose-invert max-w-none", className)}>
+    <div
+      className={cn(
+        "prose prose-sm dark:prose-invert max-w-none",
+        "prose-code:before:content-none prose-code:after:content-none",
+        className
+      )}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           pre({ children }) {
             return <>{children}</>
           },
-          code({ node, inline, className, children, ...props }: any) {
+          code({ node, className, children, ...props }: any) {
             const match = /language-(\w+)/.exec(className || "")
             const language = match ? match[1] : ""
-            const isBlock = !inline && (language || String(children).includes("\n"))
             const value = String(children).replace(/\n$/, "")
+            const isBlock = Boolean(language) || value.includes("\n")
+
+            if (isBlock && language === "mermaid") {
+              return <MermaidBlock code={value} />
+            }
 
             if (isBlock) {
               return (

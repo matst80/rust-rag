@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Pencil, Trash2, GitBranch, Save } from "lucide-react"
+import { ArrowLeft, Pencil, Trash2, GitBranch, Save, Copy, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
@@ -41,6 +41,17 @@ export function EntryDetail({ id }: EntryDetailProps) {
 
   const [isEditing, setIsEditing] = useState(false)
   const [editedText, setEditedText] = useState("")
+  const [idCopied, setIdCopied] = useState(false)
+
+  const handleCopyId = async () => {
+    try {
+      await navigator.clipboard.writeText(entry?.id ?? "")
+      setIdCopied(true)
+      setTimeout(() => setIdCopied(false), 1500)
+    } catch {
+      toast.error("Copy failed")
+    }
+  }
 
   useEffect(() => {
     if (entry) setEditedText(entry.text)
@@ -105,9 +116,19 @@ export function EntryDetail({ id }: EntryDetailProps) {
             Fragment
           </h1>
           <div className="flex items-center gap-2 mt-0.5">
-            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
-              {entry.id.substring(0, 12)}…
-            </span>
+            <button
+              type="button"
+              onClick={handleCopyId}
+              title={`Copy id: ${entry.id}`}
+              className="font-mono text-[10px] text-muted-foreground tabular-nums inline-flex items-center gap-1 hover:text-primary transition-colors"
+            >
+              <span>{entry.id.substring(0, 12)}…</span>
+              {idCopied ? (
+                <Check className="size-3 text-emerald-500" />
+              ) : (
+                <Copy className="size-3 opacity-60" />
+              )}
+            </button>
             <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground">
               {entry.source_id}
             </span>

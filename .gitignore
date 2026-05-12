@@ -17,3 +17,4 @@ eval/runs/
 eval/candidates.json
 .venv-export/
 .venv-export-sparse/
+helix-setup/

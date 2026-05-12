@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useRef } from "react"
+import { useSessionState } from "@/hooks/use-session-state"
 import Link from "next/link"
 import {
   FileText,
@@ -37,14 +38,28 @@ interface EntriesListProps {
 }
 
 export function EntriesList({ selectedCategory }: EntriesListProps) {
-  const [localSearch, setLocalSearch] = useState("")
-  const [page, setPage] = useState(1)
-  const [sortOrder, setSortOrder] = useState<SortOrder>("desc")
+  const [localSearch, setLocalSearch] = useSessionState<string>(
+    "entries-list:search",
+    ""
+  )
+  const [page, setPage] = useSessionState<number>("entries-list:page", 1)
+  const [sortOrder, setSortOrder] = useSessionState<SortOrder>(
+    "entries-list:sort",
+    "desc"
+  )
   const PAGE_SIZE = 20
 
+  const lastFilters = useRef<{ category: string | null; sort: SortOrder }>({
+    category: selectedCategory,
+    sort: sortOrder,
+  })
   useEffect(() => {
-    setPage(1)
-  }, [selectedCategory, sortOrder])
+    const prev = lastFilters.current
+    if (prev.category !== selectedCategory || prev.sort !== sortOrder) {
+      lastFilters.current = { category: selectedCategory, sort: sortOrder }
+      setPage(1)
+    }
+  }, [selectedCategory, sortOrder, setPage])
 
   const { data: pagedData, isLoading } = useItems({
     source_id: selectedCategory ?? undefined,

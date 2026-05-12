@@ -1,11 +1,24 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { CategorySidebar } from "./category-sidebar"
 import { EntriesList } from "./entries-list"
+import { useSessionState } from "@/hooks/use-session-state"
 
 export function EntriesBrowser() {
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
+
+  const [selectedCategory, setSelectedCategory] = useSessionState<string | null>(
+    "entries-browser:category",
+    null
+  )
+
+  if (!mounted) {
+    return (
+      <div className="relative flex min-h-[calc(100vh-3.5rem)] flex-col bg-background md:flex-row overflow-hidden" />
+    )
+  }
 
   return (
     <div className="relative flex min-h-[calc(100vh-3.5rem)] flex-col bg-background md:flex-row overflow-hidden">
