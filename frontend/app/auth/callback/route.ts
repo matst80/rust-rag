@@ -14,7 +14,6 @@ export async function GET(request: NextRequest) {
 	const error = searchParams.get("error")
 
 	if (error) {
-		console.error("auth callback error from provider", error)
 		return NextResponse.json({ error }, { status: 400 })
 	}
 
@@ -67,7 +66,6 @@ export async function GET(request: NextRequest) {
 
 		return response
 	} catch (error) {
-		console.error("auth callback failed", error)
 		const message = error instanceof Error ? error.message : "Internal Server Error"
 		return NextResponse.json(
 			{
