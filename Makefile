@@ -93,14 +93,11 @@ ZITADEL_CLIENT_ID ?= 369530153681881434@rag
 ZITADEL_CLIENT_SECRET ?= U8opCVRn3hrFNcyXDJpb7DLQAa5aHEikjuQn2Rr5KwG7RiofvzKifxdTB3yEO0ID
 ZITADEL_REDIRECT_URI ?= https://rag.k6n.net/auth/callback
 ZITADEL_SCOPES ?= openid profile email
-IMAGE_NAME ?= matst80/rust-rag:latest
 CUDA_IMAGE_NAME ?= matst80/rust-rag:cuda
 FRONTEND_IMAGE_NAME ?= matst80/rust-rag-frontend:latest
 FRONTEND_DIR ?= $(CURDIR)/frontend
 APP_BASE_URL ?= http://localhost:3000
-K8S_MANIFEST ?= deploy/kubernetes/rust-rag.yaml
 K8S_FRONTEND_MANIFEST ?= deploy/kubernetes/rust-rag-frontend.yaml
-K8S_FRONTEND_HOST_MANIFEST ?= deploy/kubernetes/rust-rag-frontend-host.yaml
 K8S_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-ingress.yaml
 K8S_MCP_INGRESS_MANIFEST ?= deploy/kubernetes/rust-rag-mcp-ingress.yaml
 K8S_CUDA_MANIFEST ?= deploy/kubernetes/rust-rag-cuda.yaml
@@ -110,9 +107,11 @@ FRONTEND_DEV_PORT ?= 3000
 FRONTEND_DEV_HOST ?= 0.0.0.0
 K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
+K8S_CUDA_DEPLOYMENT ?= rust-rag-cuda
+K8S_FRONTEND_DEPLOYMENT ?= rust-rag-frontend
 MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build docker-push docker-run frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-build-all docker-push-all k8s-namespace k8s-apply k8s-delete k8s-apply-frontend k8s-delete-frontend k8s-apply-frontend-host k8s-delete-frontend-host k8s-apply-ingress k8s-delete-ingress k8s-apply-all k8s-delete-all tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -137,29 +136,33 @@ help:
 		'  make migrate-prod     Re-embed $(PROD_SNAPSHOT_DB) with bge-m3 and write to Postgres' \
 		'  make e2e-local        Print the two-command recipe for backend + frontend e2e' \
 		'  make run-mcp          Start the stdio MCP bridge locally' \
-		'  make docker-build     Build the server container image' \
-		'  make docker-push      Push the server container image' \
-		'  make docker-run       Run the server container with the local data directory mounted' \
+		'  make docker-build-cuda    Build the CUDA server container image (amd64)' \
+		'  make docker-push-cuda     Build + push the CUDA server container image' \
+		'  make docker-run-cuda      Run the CUDA server container with the local data directory mounted' \
 		'  make frontend-install      Install frontend npm dependencies' \
-		'  make frontend-dev          Run Next.js dev on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT) (host-shim mode)' \
+		'  make frontend-dev          Run Next.js dev on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT)' \
 		'  make frontend-prod         Build and start Next.js on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT)' \
 		'  make frontend-docker-build Build the Next.js frontend container image' \
 		'  make frontend-docker-push  Push the Next.js frontend container image' \
 		'  make frontend-docker-run   Run the frontend container (override RAG_API_URL as needed)' \
-		'  make docker-build-all Build both server and frontend images' \
-		'  make docker-push-all  Push both server and frontend images' \
-		'  make k8s-apply        Apply the Kubernetes manifest in deploy/kubernetes' \
-		'  make k8s-delete       Delete the Kubernetes manifest in deploy/kubernetes' \
-		'  make k8s-apply-frontend       Apply the in-cluster frontend Deployment' \
-		'  make k8s-delete-frontend      Delete the in-cluster frontend Deployment' \
-		'  make k8s-apply-frontend-host  Apply the host-shim Service `rag-frontend` -> 10.10.11.135:3000' \
-		'  make k8s-delete-frontend-host Delete the host-shim Service' \
-		'  make k8s-apply-ingress        Apply the Ingress (routes / to rag-frontend)' \
-		'  make k8s-delete-ingress       Delete the Ingress' \
-		'  make k8s-apply-all    Apply both server and frontend manifests' \
-		'  make k8s-delete-all   Delete both server and frontend manifests' \
-		'  make k8s-namespace    Create K8S_NAMESPACE (currently: $(K8S_NAMESPACE)) if it does not exist' \
+		'  make docker-push-all       Push CUDA backend + frontend images' \
+		'  make k8s-apply-cuda            Apply the CUDA backend Deployment' \
+		'  make k8s-delete-cuda           Delete the CUDA backend Deployment' \
+		'  make k8s-apply-frontend        Apply the in-cluster frontend Deployment' \
+		'  make k8s-delete-frontend       Delete the in-cluster frontend Deployment' \
+		'  make k8s-apply-ingress         Apply Ingress (frontend + MCP)' \
+		'  make k8s-delete-ingress        Delete Ingress (frontend + MCP)' \
+		'  make k8s-apply-runtimeclass    Apply the nvidia RuntimeClass (cluster-scoped)' \
+		'  make k8s-apply-nvidia-plugin   Apply the NVIDIA device plugin DaemonSet' \
+		'  make k8s-apply-all             Apply CUDA backend + frontend manifests' \
+		'  make k8s-delete-all            Delete CUDA backend + frontend manifests' \
+		'  make k8s-namespace             Create K8S_NAMESPACE (currently: $(K8S_NAMESPACE)) if it does not exist' \
 		'  (override target namespace with K8S_NAMESPACE=<name>)' \
+		'  make rollout              Restart CUDA backend + frontend Deployments + wait for ready' \
+		'  make rollout-cuda         Restart only the CUDA backend Deployment' \
+		'  make rollout-frontend     Restart only the frontend Deployment' \
+		'  make rollout-status       Show rollout status for both Deployments' \
+		'  make push-and-rollout     docker-push-all → rollout' \
 		'  make tag-mcp-stdio    Create an annotated release tag (set VERSION=0.1.0)' \
 		'  make store-knowledge  POST a sample knowledge document' \
 		'  make store-memory     POST a sample memory document' \
@@ -505,12 +508,6 @@ ontology-edges:
 		 WHERE json_extract(metadata, '$$.source') = 'ontology_worker' \
 		 GROUP BY relation ORDER BY count DESC;"
 
-docker-build:
-	docker buildx build --platform linux/amd64,linux/arm64 -t "$(IMAGE_NAME)" .
-
-docker-push:
-	docker buildx build --platform linux/amd64,linux/arm64 -t "$(IMAGE_NAME)" --push .
-
 ## CUDA image is amd64-only. On an amd64 host: plain `docker build` —
 ## no buildx container, no QEMU, hits the local layer cache directly.
 ## On non-amd64 hosts: fall back to buildx multiarch builder + registry
@@ -536,9 +533,10 @@ else
 		--cache-to   type=registry,ref=$(CUDA_IMAGE_NAME)-cache,mode=max .
 endif
 
-docker-run:
+docker-run-cuda:
 	mkdir -p "$(CURDIR)/data"
 	docker run --rm \
+		--gpus all \
 		-p "$(RAG_PORT):4001" \
 		-v "$(CURDIR)/data:/app/data" \
 		-e RAG_AUTH_ENABLED="$(RAG_AUTH_ENABLED)" \
@@ -549,7 +547,7 @@ docker-run:
 		-e ZITADEL_CLIENT_SECRET="$(ZITADEL_CLIENT_SECRET)" \
 		-e ZITADEL_REDIRECT_URI="$(ZITADEL_REDIRECT_URI)" \
 		-e ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
-		"$(IMAGE_NAME)"
+		"$(CUDA_IMAGE_NAME)"
 
 frontend-docker-build:
 	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
@@ -620,19 +618,17 @@ frontend-prod:
 		ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
 		npx next start -H "$(FRONTEND_DEV_HOST)" -p "$(FRONTEND_DEV_PORT)"
 
-docker-build-all: docker-build frontend-docker-build
-
-docker-push-all: docker-push frontend-docker-push
+docker-push-all: docker-push-cuda frontend-docker-push
 
 k8s-namespace:
 	@test -n "$(strip $(K8S_NAMESPACE))" || { echo "K8S_NAMESPACE is empty"; exit 1; }
 	kubectl get namespace "$(K8S_NAMESPACE)" >/dev/null 2>&1 || kubectl create namespace "$(K8S_NAMESPACE)"
 
-k8s-apply:
-	kubectl $(KUBECTL_NS) apply -f "$(K8S_MANIFEST)"
+k8s-apply-cuda:
+	kubectl $(KUBECTL_NS) apply -f "$(K8S_CUDA_MANIFEST)"
 
-k8s-delete:
-	kubectl $(KUBECTL_NS) delete -f "$(K8S_MANIFEST)"
+k8s-delete-cuda:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_CUDA_MANIFEST)"
 
 k8s-apply-frontend:
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_FRONTEND_MANIFEST)"
@@ -640,18 +636,13 @@ k8s-apply-frontend:
 k8s-delete-frontend:
 	kubectl $(KUBECTL_NS) delete -f "$(K8S_FRONTEND_MANIFEST)"
 
-# Host-shim: selector-less Service `rag-frontend` + Endpoints -> 10.10.11.135:3000.
-# Co-exists with the in-cluster Deployment (Service `rust-rag-frontend`). The
-# Ingress routes `/` to `rag-frontend`; in-cluster Deployment stays as fallback.
-k8s-apply-frontend-host:
-	kubectl $(KUBECTL_NS) apply -f "$(K8S_FRONTEND_HOST_MANIFEST)"
-
-k8s-delete-frontend-host:
-	kubectl $(KUBECTL_NS) delete -f "$(K8S_FRONTEND_HOST_MANIFEST)"
-
 k8s-apply-ingress:
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_INGRESS_MANIFEST)"
 	kubectl $(KUBECTL_NS) apply -f "$(K8S_MCP_INGRESS_MANIFEST)"
+
+k8s-delete-ingress:
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_MCP_INGRESS_MANIFEST)" --ignore-not-found
+	kubectl $(KUBECTL_NS) delete -f "$(K8S_INGRESS_MANIFEST)"
 
 # RuntimeClass is cluster-scoped — no namespace.
 k8s-apply-runtimeclass:
@@ -660,25 +651,32 @@ k8s-apply-runtimeclass:
 k8s-delete-runtimeclass:
 	kubectl delete -f "$(K8S_RUNTIMECLASS_MANIFEST)"
 
-k8s-apply-cuda:
-	kubectl $(KUBECTL_NS) apply -f "$(K8S_CUDA_MANIFEST)"
-
-k8s-delete-cuda:
-	kubectl $(KUBECTL_NS) delete -f "$(K8S_CUDA_MANIFEST)"
-
 k8s-apply-nvidia-plugin:
 	kubectl apply -f "$(K8S_NVIDIA_PLUGIN_MANIFEST)"
 
 k8s-delete-nvidia-plugin:
 	kubectl delete -f "$(K8S_NVIDIA_PLUGIN_MANIFEST)"
 
-k8s-delete-ingress:
-	kubectl $(KUBECTL_NS) delete -f "$(K8S_MCP_INGRESS_MANIFEST)" --ignore-not-found
-	kubectl $(KUBECTL_NS) delete -f "$(K8S_INGRESS_MANIFEST)"
+k8s-apply-all: k8s-apply-cuda k8s-apply-frontend
 
-k8s-apply-all: k8s-apply k8s-apply-frontend
+k8s-delete-all: k8s-delete-frontend k8s-delete-cuda
 
-k8s-delete-all: k8s-delete-frontend k8s-delete
+# Rolling restart — picks up the new `:cuda` / `:latest` image after a push.
+rollout-cuda:
+	kubectl $(KUBECTL_NS) rollout restart deployment/$(K8S_CUDA_DEPLOYMENT)
+	kubectl $(KUBECTL_NS) rollout status  deployment/$(K8S_CUDA_DEPLOYMENT) --timeout=5m
+
+rollout-frontend:
+	kubectl $(KUBECTL_NS) rollout restart deployment/$(K8S_FRONTEND_DEPLOYMENT)
+	kubectl $(KUBECTL_NS) rollout status  deployment/$(K8S_FRONTEND_DEPLOYMENT) --timeout=3m
+
+rollout: rollout-cuda rollout-frontend
+
+rollout-status:
+	kubectl $(KUBECTL_NS) rollout status deployment/$(K8S_CUDA_DEPLOYMENT) --timeout=5m
+	kubectl $(KUBECTL_NS) rollout status deployment/$(K8S_FRONTEND_DEPLOYMENT) --timeout=3m
+
+push-and-rollout: docker-push-all rollout
 
 tag-mcp-stdio:
 	@test -n "$(VERSION)" || { echo "usage: make tag-mcp-stdio VERSION=0.1.0"; exit 1; }
