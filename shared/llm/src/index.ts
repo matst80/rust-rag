@@ -17,6 +17,13 @@ export { useLlmStatus } from "./react"
 export { captionImage, type CaptionOptions } from "./vision"
 
 export {
+  classifyImage,
+  formatClassificationResult,
+  setVisionWasmBase,
+  type ClassifyOptions,
+} from "./classifier"
+
+export {
   runLocalChat,
   type LocalChatMessage,
   type LocalChatStepUpdate,

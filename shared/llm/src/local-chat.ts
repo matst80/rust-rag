@@ -80,13 +80,21 @@ function buildPrompt(
   history: LocalChatMessage[],
   scratch: string
 ): string {
-  const lines: string[] = [system, ""]
+  const parts: string[] = []
+
+  // System turn
+  parts.push(`<|turn|>system\n${system}<turn|>`)
+
+  // History turns
   for (const m of history) {
-    lines.push(m.role === "user" ? `User: ${m.content}` : `Assistant: ${m.content}`)
+    const role = m.role === "user" ? "user" : "model"
+    parts.push(`<|turn|>${role}\n${m.content}<turn|>`)
   }
-  lines.push("Assistant:")
-  if (scratch) lines.push(scratch)
-  return lines.join("\n")
+
+  // Final model turn (left open for completion)
+  parts.push(`<|turn|>model\n${scratch}`)
+
+  return parts.join("\n")
 }
 
 export interface RunLocalChatArgs {

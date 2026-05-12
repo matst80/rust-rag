@@ -17,7 +17,8 @@ export async function captionImage(
   const client = getLlmClient("vision")
   const bitmap =
     image instanceof Blob ? await createImageBitmap(image) : image
-  const prompt = [{ imageSource: bitmap }, opts.prompt] as const
+  const promptText = `<|turn|>user\n${opts.prompt}<turn|>\n<|turn|>model\n`
+  const prompt = [{ imageSource: bitmap }, promptText] as const
   let last = ""
   return client.generate(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

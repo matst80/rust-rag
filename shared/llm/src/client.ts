@@ -239,8 +239,15 @@ class LlmClient extends EventTarget {
     try {
       if (signal?.aborted) throw new Error("aborted")
       this.setStatus({ kind: "generating" })
+
+      let finalPrompt = prompt
+      if (typeof prompt === "string" && !prompt.includes("<|turn|>")) {
+        // Apply Gemma 4 instruction template for raw strings
+        finalPrompt = `<|turn|>user\n${prompt}<turn|>\n<|turn|>model\n`
+      }
+
       let accumulated = ""
-      const finalText = await llm.generateResponse(prompt, (partial, done) => {
+      const finalText = await llm.generateResponse(finalPrompt, (partial, done) => {
         accumulated += partial
         onToken(accumulated, done)
       })
