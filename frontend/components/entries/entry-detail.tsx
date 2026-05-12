@@ -19,6 +19,7 @@ import { EmbeddedGraph } from "../graph/embedded-graph"
 import { AttachmentsPanel } from "./attachments-panel"
 import { WikiPathPicker } from "./wiki-path-picker"
 import { AiAssistPanel } from "../ai/ai-assist-panel"
+import { AnalysisPanel } from "./analysis-panel"
 import { Textarea } from "@/components/ui/textarea"
 import { useUpdateItem } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -214,6 +215,9 @@ ${(entry.text ?? "").slice(0, 6000)}`
                 <MarkdownView content={entry.text} />
               </div>
             </div>
+
+            {/* Analysis */}
+            <AnalysisPanel entry={entry} />
 
             {/* Attachments */}
             <AttachmentsPanel itemId={id} />

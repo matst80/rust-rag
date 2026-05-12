@@ -554,6 +554,15 @@ pub struct AdminItemPayload {
     /// User-asserted wiki path (e.g. `team/handbook`). `None` when unset.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
+    /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, etc.).
+    /// `None` when no analysis has been run yet.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub analysis: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -894,6 +903,7 @@ pub fn router(state: AppState) -> Router {
             "/admin/items/{id}",
             get(get_item).put(update_item).delete(delete_item),
         )
+        .route("/admin/items/{id}/reanalyze", post(reanalyze_item))
         .route("/admin/items/{id}/rechunk", post(rechunk_item))
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
@@ -1848,13 +1858,69 @@ async fn get_item(
     Path(id): Path<String>,
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     let store = state.store.clone();
-    let item = tokio::task::spawn_blocking(move || store.get_item(&id))
+    let id_for_lookup = id.clone();
+    let (item, analysis) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let item = store.get_item(&id_for_lookup)?;
+        let analysis = store.get_item_analysis(&id_for_lookup)?;
+        Ok((item, analysis))
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    let item = item.ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
+    let mut payload: AdminItemPayload = item.into();
+    if let Some(a) = analysis {
+        payload.analysis = Some(a.analysis);
+        payload.analysis_at = Some(a.analysis_at);
+        payload.analysis_model = Some(a.analysis_model);
+    }
+    Ok(Json(payload))
+}
+
+async fn reanalyze_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AdminItemPayload>, ApiError> {
+    if !state.analysis.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "analysis not configured".to_owned(),
+        ));
+    }
+    let store = state.store.clone();
+    let id_for_lookup = id.clone();
+    let item = tokio::task::spawn_blocking(move || store.get_item(&id_for_lookup))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
 
-    Ok(Json(item.into()))
+    let analysis = run_analysis(&state, &item.text, Some(&item.source_id), Some(&item.id))
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let model = state
+        .analysis
+        .model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let json = serde_json::to_string(&analysis)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let store = state.store.clone();
+    let item_id = item.id.clone();
+    let model_for_store = model.clone();
+    tokio::task::spawn_blocking(move || store.update_item_analysis(&item_id, &json, &model_for_store))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut payload: AdminItemPayload = item.into();
+    payload.analysis = Some(serde_json::to_value(&analysis).unwrap_or(Value::Null));
+    payload.analysis_at = Some(now);
+    payload.analysis_model = Some(model);
+    Ok(Json(payload))
 }
 
 async fn update_item(
@@ -3204,6 +3270,9 @@ impl From<ItemRecord> for AdminItemPayload {
             created_at: value.created_at,
             token_count: None,
             path: value.path,
+            analysis: None,
+            analysis_at: None,
+            analysis_model: None,
         }
     }
 }

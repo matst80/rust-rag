@@ -69,6 +69,13 @@ export function useRechunkItem(id: string) {
   )
 }
 
+export function useReanalyzeItem(id: string) {
+  return useSWRMutation<Entry, Error, string[], void>(
+    ["item", id],
+    () => api.items.reanalyze(id)
+  )
+}
+
 export function useLlmRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, LlmRechunkRequest>(
     `llm-rechunk-${id}`,

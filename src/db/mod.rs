@@ -40,6 +40,14 @@ pub struct ItemRecord {
     pub path: Option<String>,
 }
 
+/// Persisted LLM-on-store analysis for an entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ItemAnalysisRecord {
+    pub analysis: Value,
+    pub analysis_at: i64,
+    pub analysis_model: String,
+}
+
 /// One (source_id, path) pair with entry count. Returned by `list_all_paths`
 /// for bulk wiki-tree rendering.
 #[derive(Debug, Clone, PartialEq)]
@@ -602,6 +610,10 @@ pub trait VectorStore: Send + Sync {
     fn update_item_analysis(&self, _id: &str, _json: &str, _model: &str) -> Result<bool> {
         anyhow::bail!("update_item_analysis not supported by this store")
     }
+    /// Fetch persisted analysis for an item. `Ok(None)` when item lacks one.
+    fn get_item_analysis(&self, _id: &str) -> Result<Option<ItemAnalysisRecord>> {
+        Ok(None)
+    }
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
@@ -1042,6 +1054,36 @@ impl VectorStore for SqliteVectorStore {
             results.push(row?);
         }
         Ok(results)
+    }
+
+    fn get_item_analysis(&self, id: &str) -> Result<Option<ItemAnalysisRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "SELECT analysis_json, analysis_at, analysis_model FROM items WHERE id = ?1",
+        )?;
+        let mut rows = statement.query(rusqlite::params![id])?;
+        match rows.next()? {
+            Some(row) => {
+                let json: Option<String> = row.get(0)?;
+                let at: Option<i64> = row.get(1)?;
+                let model: Option<String> = row.get(2)?;
+                match (json, at, model) {
+                    (Some(j), Some(a), Some(m)) if !j.is_empty() => {
+                        let parsed: Value = serde_json::from_str(&j).unwrap_or(Value::Null);
+                        Ok(Some(ItemAnalysisRecord {
+                            analysis: parsed,
+                            analysis_at: a,
+                            analysis_model: m,
+                        }))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            None => Ok(None),
+        }
     }
 
     fn update_item_analysis(&self, id: &str, json: &str, model: &str) -> Result<bool> {

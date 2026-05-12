@@ -10,7 +10,7 @@ use tracing::info;
 use super::{
     AttachmentRecord, AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord,
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-    GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
+    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
     NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, PathRow,
     SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
@@ -104,6 +104,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0006_attachments",
         include_str!("../../migrations/0006_attachments.sql"),
+    ),
+    (
+        "0007_document_analysis",
+        include_str!("../../migrations/0007_document_analysis.sql"),
     ),
 ];
 
@@ -767,6 +771,50 @@ impl VectorStore for PostgresVectorStore {
                 )
                 .await?;
             row.map(|r| row_to_item(&r)).transpose()
+        })
+    }
+
+    fn update_item_analysis(&self, id: &str, json: &str, model: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let parsed: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+        let model = model.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let now = chrono::Utc::now();
+            let n = client
+                .execute(
+                    "UPDATE documents SET analysis_json = $1, analysis_at = $2, analysis_model = $3 WHERE id = $4",
+                    &[&parsed, &now, &model, &id],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn get_item_analysis(&self, id: &str) -> Result<Option<ItemAnalysisRecord>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT analysis_json, analysis_at, analysis_model FROM documents WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            let Some(row) = row else { return Ok(None) };
+            let json: Option<Value> = row.get(0);
+            let at: Option<DateTime<Utc>> = row.get(1);
+            let model: Option<String> = row.get(2);
+            match (json, at, model) {
+                (Some(j), Some(a), Some(m)) if !j.is_null() => Ok(Some(ItemAnalysisRecord {
+                    analysis: j,
+                    analysis_at: ts_to_ms(a),
+                    analysis_model: m,
+                })),
+                _ => Ok(None),
+            }
         })
     }
 

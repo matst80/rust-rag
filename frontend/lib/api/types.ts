@@ -14,6 +14,41 @@ export interface Entry {
   token_count?: number
   /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
   path?: string | null
+  /** Persisted LLM-on-store analysis output. */
+  analysis?: StoreAnalysis | null
+  analysis_at?: number | null
+  analysis_model?: string | null
+}
+
+export interface StoreAnalysisVerdict {
+  target_id: string
+  relation: string
+  confidence: number
+  reason: string
+}
+
+export interface StoreAnalysisSuggestedEdge {
+  target_id: string
+  rel: string
+  weight: number
+}
+
+export interface StoreAnalysisQuality {
+  score: number
+  issues: string[]
+}
+
+export interface StoreAnalysis {
+  verdicts: StoreAnalysisVerdict[]
+  suggested_edges: StoreAnalysisSuggestedEdge[]
+  cluster_hint?: string | null
+  tags: string[]
+  title?: string | null
+  summary?: string | null
+  doc_type?: string | null
+  freshness?: string | null
+  quality?: StoreAnalysisQuality | null
+  raw?: string | null
 }
 
 export interface Attachment {

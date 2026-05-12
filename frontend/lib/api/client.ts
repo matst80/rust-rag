@@ -399,14 +399,13 @@ export async function getItems(
 }
 
 export async function getItem(id: string): Promise<Entry> {
-  const { items } = await getItems({ limit: 1000 }) // Hacky for now as it was before
-  const item = items.find((entry) => entry.id === id)
+  return request<Entry>(`/admin/items/${encodeURIComponent(id)}`)
+}
 
-  if (!item) {
-    throw new APIError(404, `API error: item ${id} not found`)
-  }
-
-  return item
+export async function reanalyzeItem(id: string): Promise<Entry> {
+  return request<Entry>(`/admin/items/${encodeURIComponent(id)}/reanalyze`, {
+    method: "POST",
+  })
 }
 
 export async function rechunkItem(
@@ -756,6 +755,7 @@ export const api = {
     delete: deleteItem,
     rechunk: rechunkItem,
     llmRechunk: llmRechunkItem,
+    reanalyze: reanalyzeItem,
     uploadImage,
   },
   attachments: {
