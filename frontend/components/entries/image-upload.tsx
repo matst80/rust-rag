@@ -15,7 +15,7 @@ import {
   formatClassificationResult,
   formatLoadProgress,
   isWebGpuAvailable,
-  useLlmStatus,
+  useLlmHelperStatus,
 } from "@rust-rag/llm"
 import { MarkdownView } from "./markdown-view"
 
@@ -37,7 +37,7 @@ export function ImageUpload() {
   const [caption, setCaption] = useState<string>("")
   const [labels, setLabels] = useState<string>("")
   const [captioning, setCaptioning] = useState(false)
-  const visionStatus = useLlmStatus("vision")
+  const visionStatus = useLlmHelperStatus()
   const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => { setWebgpu(isWebGpuAvailable()) }, [])
@@ -152,7 +152,7 @@ export function ImageUpload() {
     abortRef.current = new AbortController()
     try {
       const scaledBlob = await scaleImage(sourceFile)
-      
+
       // Step 1: Classify (very fast)
       try {
         const res = await classifyImage(scaledBlob)
@@ -197,9 +197,9 @@ export function ImageUpload() {
         if (!text) {
           text = await runLocalCaption(file)
         }
-        
+
         // Combine labels and caption
-        const combinedText = labels 
+        const combinedText = labels
           ? `Labels: ${labels}\n\n${text}`
           : text
 

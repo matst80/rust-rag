@@ -3,6 +3,7 @@ use super::{
     GraphNeighborhoodResponse, GraphStatusResponse, SearchResultPayload, current_timestamp_millis,
     map_graph_error, resolve_store_id, validate_graph_depth, validate_graph_limit,
     validate_metadata, validate_non_empty, validate_source_id,
+    ingest_url::{fetch_with_cdp, fetch_with_reqwest},
 };
 use crate::db::{ItemRecord, ListItemsRequest, SortOrder};
 use anyhow::{Context, anyhow};
@@ -1477,34 +1478,24 @@ async fn ingest_web_content_tool(
     validate_source_id(&arguments.source_id)?;
     validate_non_empty("url", &arguments.url)?;
 
-    let html_content = if let Some(cdp_url) = state.openai_chat.cdp_url.as_deref() {
-        // Simple CDP-like fetch via reqwest if CDP_URL is provided,
-        // otherwise fallback to normal fetch.
-        // For simplicity and to avoid complex CDP implementation, we fetch directly for now.
-        tracing::info!(url = %arguments.url, cdp_url = %cdp_url, "fetching via CDP (simulated)");
-        state
-            .http_client
-            .get(&arguments.url)
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to fetch URL via CDP")))?
-            .text()
-            .await
-            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to read response text")))?
-    } else {
-        state
-            .http_client
-            .get(&arguments.url)
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to fetch URL")))?
-            .text()
-            .await
-            .map_err(|e| ApiError::Internal(anyhow!(e).context("failed to read response text")))?
+    let html_content = match fetch_with_reqwest(state, &arguments.url).await {
+        Ok(html) => html,
+        Err(e) => {
+            if state.openai_chat.cdp_url.is_some() {
+                tracing::warn!(url = %arguments.url, error = %e, "reqwest fetch failed in tool, falling back to CDP");
+                fetch_with_cdp(state, &arguments.url).await?
+            } else {
+                return Err(e);
+            }
+        }
     };
 
     let cleaned_markdown = tokio::task::spawn_blocking(move || {
-        let document = Html::parse_document(&html_content);
+        if html_content.is_markdown {
+            return html_content.content;
+        }
+
+        let document = Html::parse_document(&html_content.content);
 
         // Actually, html2md is quite good. Let's try to refine the HTML before passing it.
         // We can use scraper to get the main content area if possible (main, article, or body).

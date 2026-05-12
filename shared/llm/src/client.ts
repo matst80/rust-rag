@@ -66,7 +66,7 @@ export const MODEL_PROFILES = {
       temperature: 0.4,
       randomSeed: 1,
       maxNumImages: 5,
-      maxNumVideos: 1,
+      // Removed maxNumVideos to ensure vision-only graph can initialize if video is unsupported
       supportAudio: true,
     },
   }),
@@ -241,9 +241,9 @@ class LlmClient extends EventTarget {
       this.setStatus({ kind: "generating" })
 
       let finalPrompt = prompt
-      if (typeof prompt === "string" && !prompt.includes("<|turn|>")) {
+      if (typeof prompt === "string" && !prompt.includes("<|turn>")) {
         // Apply Gemma 4 instruction template for raw strings
-        finalPrompt = `<|turn|>user\n${prompt}<turn|>\n<|turn|>model\n`
+        finalPrompt = `<|turn>user\n${prompt}<turn|>\n<|turn>model\n`
       }
 
       let accumulated = ""

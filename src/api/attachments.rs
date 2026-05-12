@@ -373,6 +373,7 @@ async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<Stri
 
         let resp = client
             .get(current.clone())
+            .header("Accept", "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8")
             .send()
             .await
             .map_err(|e| ApiError::BadRequest(format!("fetch failed: {e}")))?;

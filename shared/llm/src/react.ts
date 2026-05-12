@@ -15,3 +15,20 @@ export function useLlmStatus(profile: ProfileKey = "text"): LlmStatus {
   }, [profile])
   return status
 }
+
+import { getLlmHelper, type LlmHelperStatus } from "./helper"
+
+export function useLlmHelperStatus(): LlmHelperStatus {
+  const [status, setStatus] = useState<LlmHelperStatus>(() => getLlmHelper().status)
+  useEffect(() => {
+    const helper = getLlmHelper()
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<LlmHelperStatus>).detail
+      setStatus(detail)
+    }
+    helper.addEventListener("status", handler)
+    setStatus(helper.status)
+    return () => helper.removeEventListener("status", handler)
+  }, [])
+  return status
+}

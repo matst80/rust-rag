@@ -12,7 +12,7 @@ export {
   type LlmClient,
 } from "./client"
 
-export { useLlmStatus } from "./react"
+export { useLlmStatus, useLlmHelperStatus } from "./react"
 
 export { captionImage, type CaptionOptions } from "./vision"
 
@@ -31,3 +31,10 @@ export {
   type ToolDef,
   type RunLocalChatArgs,
 } from "./local-chat"
+
+export {
+  LlmHelper,
+  getLlmHelper,
+  type LlmStatus as LlmHelperStatus,
+  type GenerateOptions,
+} from "./helper"

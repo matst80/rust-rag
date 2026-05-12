@@ -87,7 +87,7 @@ LOG_FILE ?= $(LOG_DIR)/rust-rag.log
 RAG_CUDA_MEM_LIMIT_MB ?= 4096
 RAG_CUDA_DEVICE_ID ?= 0
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
-RAG_CDP_URL ?= ws://127.0.0.1:9222
+RAG_CDP_URL ?= ws://10.10.3.27:9222
 ZITADEL_ISSUER ?= https://auth.k6n.net
 ZITADEL_CLIENT_ID ?= 369530153681881434@rag
 ZITADEL_CLIENT_SECRET ?= U8opCVRn3hrFNcyXDJpb7DLQAa5aHEikjuQn2Rr5KwG7RiofvzKifxdTB3yEO0ID
@@ -328,7 +328,7 @@ run-pg: export-bge-m3
 	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
 	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
 	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
-	cargo run --features cuda 2>&1 | tee "$(LOG_FILE)"
+	cargo run 2>&1 | tee "$(LOG_FILE)"
 
 # Baseline server for eval comparisons: SQLite + bge-small + mean pooling
 # (the legacy stack), pointed at a read-only copy of the prod snapshot so it

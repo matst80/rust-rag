@@ -1,4 +1,4 @@
-import { getLlmClient } from "./client"
+import { getLlmHelper } from "./helper"
 
 export interface CaptionOptions {
   prompt: string
@@ -7,26 +7,19 @@ export interface CaptionOptions {
 }
 
 /**
- * Caption / OCR an image using the vision model profile.
- * Accepts anything Canvas can rasterize plus raw Blobs (auto-decoded).
+ * Caption / OCR an image using the multimodal helper.
+ * Uses Transformers.js v3 + WebGPU.
  */
 export async function captionImage(
   image: HTMLImageElement | ImageBitmap | HTMLCanvasElement | Blob,
   opts: CaptionOptions
 ): Promise<string> {
-  const client = getLlmClient("vision")
-  const bitmap =
-    image instanceof Blob ? await createImageBitmap(image) : image
-  const promptText = `<|turn|>user\n${opts.prompt}<turn|>\n<|turn|>model\n`
-  const prompt = [{ imageSource: bitmap }, promptText] as const
-  let last = ""
-  return client.generate(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    prompt as any,
-    (partial, done) => {
-      last = partial
-      opts.onToken?.(partial, done)
-    },
-    opts.signal
-  ).then((final) => final ?? last)
+  const helper = getLlmHelper()
+  
+  return helper.generate({
+    prompt: opts.prompt,
+    images: [image],
+    onToken: opts.onToken,
+    signal: opts.signal,
+  })
 }
