@@ -14,6 +14,72 @@ export interface Entry {
   token_count?: number
   /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
   path?: string | null
+  /** Persisted LLM-on-store analysis output. */
+  analysis?: StoreAnalysis | null
+  analysis_at?: number | null
+  analysis_model?: string | null
+  /** Structured-data type name; references a registered schema. */
+  type?: string | null
+  /** Typed payload conforming to the schema for `type`. */
+  data?: Record<string, unknown> | null
+}
+
+export interface SchemaDefinition {
+  type_name: string
+  json_schema: Record<string, unknown>
+  title?: string | null
+  description?: string | null
+  created_at: number
+  updated_at: number
+  item_count?: number | null
+}
+
+export interface SchemaListResponse {
+  schemas: SchemaDefinition[]
+}
+
+export interface UpsertSchemaRequest {
+  type_name?: string
+  json_schema: Record<string, unknown>
+  title?: string | null
+  description?: string | null
+}
+
+export interface DeleteSchemaResponse {
+  type_name: string
+  deleted: boolean
+  items_unset: number
+}
+
+export interface StoreAnalysisVerdict {
+  target_id: string
+  relation: string
+  confidence: number
+  reason: string
+}
+
+export interface StoreAnalysisSuggestedEdge {
+  target_id: string
+  rel: string
+  weight: number
+}
+
+export interface StoreAnalysisQuality {
+  score: number
+  issues: string[]
+}
+
+export interface StoreAnalysis {
+  verdicts: StoreAnalysisVerdict[]
+  suggested_edges: StoreAnalysisSuggestedEdge[]
+  cluster_hint?: string | null
+  tags: string[]
+  title?: string | null
+  summary?: string | null
+  doc_type?: string | null
+  freshness?: string | null
+  quality?: StoreAnalysisQuality | null
+  raw?: string | null
 }
 
 export interface Attachment {
@@ -133,6 +199,8 @@ export interface StoreRequest {
   metadata: EntryMetadata
   source_id: string
   path?: string | null
+  type?: string | null
+  data?: Record<string, unknown> | null
 }
 
 export interface SearchRequest {
@@ -151,6 +219,8 @@ export interface UpdateItemRequest {
   metadata: EntryMetadata
   source_id: string
   path?: string | null
+  type?: string | null
+  data?: Record<string, unknown> | null
 }
 
 export type SortOrder = "asc" | "desc"
@@ -161,6 +231,7 @@ export interface ListItemsRequest {
   offset?: number
   sort_order?: SortOrder
   path_prefix?: string
+  type?: string
 }
 
 export interface RechunkRequest {

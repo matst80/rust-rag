@@ -47,6 +47,7 @@ mod multimodal;
 mod openai;
 mod presence;
 mod query;
+pub mod schemas;
 mod tombstones;
 
 pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
@@ -115,6 +116,9 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub analysis: Arc<AnalysisConfig>,
+    /// Compiled-schema cache for typed-entry validation. Lives for the
+    /// lifetime of the process; invalidated on schema upsert/delete.
+    pub schema_cache: Arc<crate::validation::SchemaCache>,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
 }
 
@@ -163,6 +167,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -239,6 +244,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
     }
@@ -366,6 +372,14 @@ pub struct StoreRequest {
     /// Distinct from chunk-level `section_path` which is chunker-derived.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional structured-data type name. References a registered schema in
+    /// the `schemas` table; if set, `data` must validate against that schema.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Typed payload validated against the schema for `type`. Required when
+    /// `type` is set.
+    #[serde(default)]
+    pub data: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -392,6 +406,9 @@ pub struct SearchRequest {
     /// Maximum distance threshold for results. Default 0.8.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
+    /// Restrict results to entries whose `type` equals this value.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
 }
 
 fn default_hybrid() -> bool {
@@ -418,6 +435,13 @@ pub struct UpdateItemRequest {
     /// clear it; omit to leave it unchanged from the existing entry.
     #[serde(default)]
     pub path: Option<String>,
+    /// Optional structured-data type name. See StoreRequest.type.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Typed payload validated against the schema for `type`. Supply only when
+    /// updating; omit to leave existing payload unchanged.
+    #[serde(default)]
+    pub data: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
@@ -433,6 +457,9 @@ pub struct ListItemsQuery {
     /// (e.g. `team` matches `team` itself and `team/handbook`). Normalized
     /// server-side. Comparison is case-insensitive.
     pub path_prefix: Option<String>,
+    /// Restrict to entries whose `type` equals this value. See StoreRequest.type.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
     /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
     #[serde(flatten)]
     pub metadata: HashMap<String, String>,
@@ -554,6 +581,23 @@ pub struct AdminItemPayload {
     /// User-asserted wiki path (e.g. `team/handbook`). `None` when unset.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
+    /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, etc.).
+    /// `None` when no analysis has been run yet.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub analysis: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis_model: Option<String>,
+    /// Structured-data type name. References a registered schema. `None`
+    /// for untyped legacy entries.
+    #[serde(skip_serializing_if = "Option::is_none", default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Typed payload conforming to the schema for `type`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub data: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -894,6 +938,7 @@ pub fn router(state: AppState) -> Router {
             "/admin/items/{id}",
             get(get_item).put(update_item).delete(delete_item),
         )
+        .route("/admin/items/{id}/reanalyze", post(reanalyze_item))
         .route("/admin/items/{id}/rechunk", post(rechunk_item))
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
@@ -918,6 +963,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/entries/tree", get(attachments::entries_tree))
         .route("/api/entries/paths", get(attachments::entries_paths))
+        .route(
+            "/api/schemas",
+            get(schemas::list_schemas).post(schemas::create_schema),
+        )
+        .route(
+            "/api/schemas/{type_name}",
+            get(schemas::get_schema)
+                .put(schemas::upsert_schema)
+                .delete(schemas::delete_schema),
+        )
         .route("/api/messages", post(send_message).get(list_messages))
         .route("/api/messages/channels", get(list_message_channels))
         .route("/api/acp/instances", get(list_acp_instances))
@@ -1189,6 +1244,25 @@ pub(crate) async fn store_entry_core(
         None => None,
     };
 
+    if let Some(ref type_name) = request.type_name {
+        let data = request.data.clone().ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "type `{type_name}` requires a `data` payload"
+            ))
+        })?;
+        let cache = state.schema_cache.clone();
+        let store = state.store.clone();
+        let tn = type_name.clone();
+        tokio::task::spawn_blocking(move || cache.validate(&tn, &data, store.as_ref()))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(api_validation_error)?;
+    } else if request.data.is_some() {
+        return Err(ApiError::BadRequest(
+            "`data` is only valid when `type` is set".to_string(),
+        ));
+    }
+
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
@@ -1209,6 +1283,8 @@ pub(crate) async fn store_entry_core(
                 source_id: source_id.clone(),
                 created_at,
                 path: path.clone(),
+                type_name: request.type_name.clone(),
+                data: request.data.clone(),
             };
             let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
             tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1243,6 +1319,8 @@ pub(crate) async fn store_entry_core(
                     source_id: source_id.clone(),
                     created_at,
                     path: path.clone(),
+                    type_name: None,
+                    data: None,
                 };
                 let embed_text = slice.embed_text;
                 let emb = embedder.clone();
@@ -1268,6 +1346,8 @@ pub(crate) async fn store_entry_core(
             source_id: source_id.clone(),
             created_at,
             path: path.clone(),
+            type_name: request.type_name.clone(),
+            data: request.data.clone(),
         };
         let text = request.text.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1303,6 +1383,8 @@ pub(crate) async fn store_entry_core(
             source_id: source_id.clone(),
             created_at,
             path: path.clone(),
+            type_name: request.type_name.clone(),
+            data: request.data.clone(),
         };
         tokio::task::spawn_blocking(move || -> Result<()> {
             let embedding = embedder.embed(&item.text)?;
@@ -1830,6 +1912,7 @@ async fn list_items(
         min_created_at: query.min_created_at,
         max_created_at: query.max_created_at,
         path_prefix,
+        type_name: query.type_name,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1848,13 +1931,69 @@ async fn get_item(
     Path(id): Path<String>,
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     let store = state.store.clone();
-    let item = tokio::task::spawn_blocking(move || store.get_item(&id))
+    let id_for_lookup = id.clone();
+    let (item, analysis) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let item = store.get_item(&id_for_lookup)?;
+        let analysis = store.get_item_analysis(&id_for_lookup)?;
+        Ok((item, analysis))
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    let item = item.ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
+    let mut payload: AdminItemPayload = item.into();
+    if let Some(a) = analysis {
+        payload.analysis = Some(a.analysis);
+        payload.analysis_at = Some(a.analysis_at);
+        payload.analysis_model = Some(a.analysis_model);
+    }
+    Ok(Json(payload))
+}
+
+async fn reanalyze_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AdminItemPayload>, ApiError> {
+    if !state.analysis.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "analysis not configured".to_owned(),
+        ));
+    }
+    let store = state.store.clone();
+    let id_for_lookup = id.clone();
+    let item = tokio::task::spawn_blocking(move || store.get_item(&id_for_lookup))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
 
-    Ok(Json(item.into()))
+    let analysis = run_analysis(&state, &item.text, Some(&item.source_id), Some(&item.id))
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let model = state
+        .analysis
+        .model
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let json = serde_json::to_string(&analysis)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    let store = state.store.clone();
+    let item_id = item.id.clone();
+    let model_for_store = model.clone();
+    tokio::task::spawn_blocking(move || store.update_item_analysis(&item_id, &json, &model_for_store))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut payload: AdminItemPayload = item.into();
+    payload.analysis = Some(serde_json::to_value(&analysis).unwrap_or(Value::Null));
+    payload.analysis_at = Some(now);
+    payload.analysis_model = Some(model);
+    Ok(Json(payload))
 }
 
 async fn update_item(
@@ -1871,8 +2010,30 @@ async fn update_item(
         None => None,
     };
 
+    // Validate typed-data before touching the store. When `data` is supplied
+    // alongside a `type`, it must satisfy that type's schema. When only
+    // `type` is supplied (no `data`), require a payload — type without data
+    // is meaningless.
+    if let Some(ref type_name) = request.type_name {
+        if let Some(data) = request.data.clone() {
+            let cache = state.schema_cache.clone();
+            let store = state.store.clone();
+            let tn = type_name.clone();
+            tokio::task::spawn_blocking(move || cache.validate(&tn, &data, store.as_ref()))
+                .await
+                .map_err(ApiError::TaskJoin)?
+                .map_err(api_validation_error)?;
+        }
+    } else if request.data.is_some() {
+        return Err(ApiError::BadRequest(
+            "`data` is only valid when `type` is set".to_string(),
+        ));
+    }
+
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
+    let type_override = request.type_name.clone();
+    let data_override = request.data.clone();
 
     let updated = tokio::task::spawn_blocking(move || -> Result<ItemRecord> {
         let existing = store
@@ -1889,6 +2050,8 @@ async fn update_item(
             source_id: request.source_id,
             created_at: existing.created_at,
             path: new_path,
+            type_name: type_override.or(existing.type_name),
+            data: data_override.or(existing.data),
         };
         let embedding = embedder.embed(&item.text)?;
         store.upsert_item(item.clone(), &embedding)?;
@@ -1983,6 +2146,8 @@ async fn rechunk_item(
         source_id: item.source_id,
         chunk: Some(ChunkConfig { max_chars, overlap_chars }),
         path: None,
+        type_name: None,
+        data: None,
     };
     let response = store_entry_core(&state, request, subject.0).await?;
 
@@ -2140,6 +2305,8 @@ async fn llm_rechunk_item(
                 source_id: source_id.clone(),
                 created_at: now,
                 path: parent_path.clone(),
+                type_name: None,
+                data: None,
             };
             let embedding = embedder.embed(&text)?;
             store.upsert_item(record, &embedding)?;
@@ -2319,6 +2486,8 @@ async fn smart_store(
             source_id: item.source_id,
             chunk: None,
             path: None,
+            type_name: None,
+            data: None,
         };
         let resp = store_entry_core(&state, store_req, session.0.clone()).await?;
         responses.push(resp);
@@ -3137,10 +3306,43 @@ pub enum ApiError {
     Internal(anyhow::Error),
     #[error(transparent)]
     TaskJoin(#[from] tokio::task::JoinError),
+    /// Structured-data validation failure. Returned as 400 with a JSON body
+    /// listing the field-level errors.
+    #[error("schema validation failed for type `{type_name}`")]
+    SchemaValidation {
+        type_name: String,
+        errors: Vec<String>,
+    },
+    #[error("unknown type `{0}`")]
+    UnknownType(String),
+    #[error("invalid schema: {0}")]
+    InvalidSchema(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
+}
+
+pub(crate) fn api_validation_error(e: crate::validation::ValidationError) -> ApiError {
+    use crate::validation::ValidationError;
+    match e {
+        ValidationError::UnknownType(t) => ApiError::UnknownType(t),
+        ValidationError::InvalidSchema { message, .. } => ApiError::InvalidSchema(message),
+        ValidationError::Failed { type_name, errors } => {
+            ApiError::SchemaValidation { type_name, errors }
+        }
+        ValidationError::Storage(e) => ApiError::Internal(e),
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Self::SchemaValidation { type_name, errors } = &self {
+            let body = serde_json::json!({
+                "error": "schema_validation_failed",
+                "type": type_name,
+                "validation_errors": errors,
+            });
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
         let (status, error_message) = match &self {
             Self::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.clone()),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
@@ -3148,6 +3350,10 @@ impl IntoResponse for ApiError {
             Self::ServiceUnavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message.clone()),
             Self::Internal(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
             Self::TaskJoin(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            Self::SchemaValidation { .. } => unreachable!(),
+            Self::UnknownType(t) => (StatusCode::BAD_REQUEST, format!("unknown type `{t}`")),
+            Self::InvalidSchema(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            Self::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
         };
 
         if status.is_server_error() {
@@ -3204,6 +3410,11 @@ impl From<ItemRecord> for AdminItemPayload {
             created_at: value.created_at,
             token_count: None,
             path: value.path,
+            analysis: None,
+            analysis_at: None,
+            analysis_model: None,
+            type_name: value.type_name,
+            data: value.data,
         }
     }
 }
@@ -4393,6 +4604,8 @@ mod tests {
                         source_id: "memory".to_owned(),
                         created_at: 1,
                         path: None,
+                        type_name: None,
+                        data: None,
                     },
                     Vec::new(),
                 ),
@@ -4404,6 +4617,8 @@ mod tests {
                         source_id: "memory".to_owned(),
                         created_at: 2,
                         path: None,
+                        type_name: None,
+                        data: None,
                     },
                     Vec::new(),
                 ),
@@ -4415,6 +4630,8 @@ mod tests {
                         source_id: "memory".to_owned(),
                         created_at: 3,
                         path: None,
+                        type_name: None,
+                        data: None,
                     },
                     Vec::new(),
                 ),
@@ -4500,6 +4717,8 @@ mod tests {
                         source_id: "memory".to_owned(),
                         created_at: 1,
                         path: None,
+                        type_name: None,
+                        data: None,
                     },
                     Vec::new(),
                 ),
@@ -4511,6 +4730,8 @@ mod tests {
                         source_id: "memory".to_owned(),
                         created_at: 2,
                         path: None,
+                        type_name: None,
+                        data: None,
                     },
                     Vec::new(),
                 ),
@@ -4638,6 +4859,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -4646,6 +4869,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 200,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 ItemRecord {
                     id: "doc-3".to_owned(),
@@ -4654,6 +4879,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 300,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
             ],
             vec![
@@ -4735,6 +4962,8 @@ mod tests {
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -4743,6 +4972,8 @@ mod tests {
                     source_id: "memory".to_owned(),
                     created_at: 200,
                     path: None,
+                    type_name: None,
+                    data: None,
                 },
             ],
             vec![],
@@ -4796,6 +5027,8 @@ mod tests {
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
                 path: None,
+                type_name: None,
+                data: None,
             }],
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
@@ -4828,6 +5061,8 @@ mod tests {
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
                 path: None,
+                type_name: None,
+                data: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -4836,6 +5071,8 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 200,
                 path: None,
+                type_name: None,
+                data: None,
             },
             ItemRecord {
                 id: "doc-3".to_owned(),
@@ -4844,6 +5081,8 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 300,
                 path: None,
+                type_name: None,
+                data: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -4870,6 +5109,8 @@ mod tests {
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
                 path: None,
+                type_name: None,
+                data: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -4878,6 +5119,8 @@ mod tests {
                 source_id: "memory".to_owned(),
                 created_at: 200,
                 path: None,
+                type_name: None,
+                data: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -4907,6 +5150,8 @@ mod tests {
             source_id: "knowledge".to_owned(),
             created_at: 42,
             path: None,
+            type_name: None,
+            data: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4941,6 +5186,8 @@ mod tests {
             source_id: "knowledge".to_owned(),
             created_at: 123,
             path: None,
+            type_name: None,
+            data: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -4982,6 +5229,8 @@ mod tests {
             source_id: "knowledge".to_owned(),
             created_at: 123,
             path: None,
+            type_name: None,
+            data: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(

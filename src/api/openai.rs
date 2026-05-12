@@ -1009,6 +1009,8 @@ async fn store_entry_tool(
         source_id: arguments.source_id,
         chunk: None,
         path: arguments.path.filter(|p| !p.is_empty()),
+        type_name: None,
+        data: None,
     };
 
     let response = crate::api::store_entry_core(state, request, None).await?;
@@ -1055,6 +1057,7 @@ async fn list_items_tool(
         min_created_at: arguments.min_created_at,
         max_created_at: arguments.max_created_at,
         path_prefix: None,
+        type_name: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1116,6 +1119,8 @@ async fn update_item_tool(
         source_id: arguments.source_id,
         chunk: None,
         path,
+        type_name: None,
+        data: None,
     };
 
     let response = crate::api::store_entry_core(state, request, None).await?;
@@ -1178,6 +1183,8 @@ async fn split_entry_tool(
             source_id: target_source.clone(),
             chunk: None,
             path,
+            type_name: None,
+            data: None,
         };
         let resp = crate::api::store_entry_core(state, req, None).await?;
         written.push(resp);
@@ -1565,6 +1572,8 @@ async fn ingest_web_content_tool(
         source_id: arguments.source_id.clone(),
         created_at,
         path: None,
+        type_name: None,
+        data: None,
     };
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -1872,6 +1881,8 @@ mod tests {
             source_id: "knowledge".to_owned(),
             created_at: 123,
             path: None,
+            type_name: None,
+            data: None,
         };
         store
             .upsert_item(item, &[0.1, 0.2, 0.3, 0.4])

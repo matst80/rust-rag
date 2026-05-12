@@ -404,6 +404,13 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                     tracing::warn!(error=%e, "analysis persist failed");
                     span.record("outcome", "persist_err");
                 } else {
+                    // Promote LLM-derived tags onto the item's metadata.tags
+                    // so they participate in list/search filtering. Best-effort.
+                    if !analysis.tags.is_empty() {
+                        if let Err(e) = state.store.merge_item_tags(&item_id, &analysis.tags) {
+                            tracing::warn!(error=%e, "tag merge failed");
+                        }
+                    }
                     tracing::info!(
                         verdicts = analysis.verdicts.len(),
                         tags = analysis.tags.len(),

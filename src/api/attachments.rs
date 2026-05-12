@@ -535,6 +535,7 @@ pub async fn entries_tree_core(
             min_created_at: None,
             max_created_at: None,
             path_prefix: Some(prefix.clone()),
+            type_name: None,
         };
         let want = prefix.to_lowercase();
         let (items, _) = tokio::task::spawn_blocking(move || store.list_items(req))
