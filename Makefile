@@ -84,7 +84,7 @@ RAG_LARGE_ITEM_THRESHOLD ?= $(RAG_CHUNK_MAX_CHARS)
 RUST_LOG ?= rust_rag=info
 LOG_DIR ?= $(CURDIR)/data/logs
 LOG_FILE ?= $(LOG_DIR)/rust-rag.log
-RAG_CUDA_MEM_LIMIT_MB ?= 2048
+RAG_CUDA_MEM_LIMIT_MB ?= 4096
 RAG_CUDA_DEVICE_ID ?= 0
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
 RAG_CDP_URL ?= ws://127.0.0.1:9222
@@ -328,7 +328,7 @@ run-pg: export-bge-m3
 	RAG_MULTIMODAL_TIMEOUT_SECS="$(RAG_MULTIMODAL_TIMEOUT_SECS)" \
 	RAG_UPLOAD_PATH="$(RAG_UPLOAD_PATH)" \
 	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
-	cargo run 2>&1 | tee "$(LOG_FILE)"
+	cargo run --features cuda 2>&1 | tee "$(LOG_FILE)"
 
 # Baseline server for eval comparisons: SQLite + bge-small + mean pooling
 # (the legacy stack), pointed at a read-only copy of the prod snapshot so it

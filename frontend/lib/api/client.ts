@@ -43,6 +43,7 @@ import type {
   SchemaListResponse,
   UpsertSchemaRequest,
   DeleteSchemaResponse,
+  IngestUrlRequest,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -460,6 +461,15 @@ export async function uploadImage(
   return response.json()
 }
 
+export async function ingestUrl(
+  data: IngestUrlRequest
+): Promise<Entry> {
+  return request<Entry>("/api/ingest/url", {
+    method: "POST",
+    body: JSON.stringify(data),
+  })
+}
+
 // Attachments
 export async function uploadAttachment(
   itemId: string,
@@ -762,6 +772,7 @@ export const api = {
     llmRechunk: llmRechunkItem,
     reanalyze: reanalyzeItem,
     uploadImage,
+    ingestUrl,
   },
   attachments: {
     upload: uploadAttachment,

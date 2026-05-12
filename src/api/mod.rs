@@ -49,6 +49,7 @@ mod presence;
 mod query;
 pub mod schemas;
 mod tombstones;
+mod ingest_url;
 
 pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
 pub use auth::SessionSubject;
@@ -331,7 +332,7 @@ pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema
     schemars::Schema::from(map)
 }
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema, Default)]
 pub struct ChunkConfig {
     /// Maximum characters per chunk (≈ max_chars/4 tokens). Default 1024 (~256 tokens).
     #[serde(default = "default_chunk_max_chars")]
@@ -945,6 +946,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
         .route("/api/ingest/image", post(multimodal::ingest_image))
+        .route("/api/ingest/url", post(ingest_url::ingest_url))
         .route(
             "/api/attachments",
             post(attachments::upload_multipart),

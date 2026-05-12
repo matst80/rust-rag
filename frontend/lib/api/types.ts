@@ -201,6 +201,21 @@ export interface StoreRequest {
   path?: string | null
   type?: string | null
   data?: Record<string, unknown> | null
+  chunk?: ChunkConfig
+}
+
+export interface ChunkConfig {
+  max_chars?: number
+  overlap_chars?: number
+}
+
+export interface IngestUrlRequest {
+  url: string
+  source_id: string
+  use_cdp?: boolean
+  llm_clean?: boolean
+  path?: string
+  type?: string
 }
 
 export interface SearchRequest {
