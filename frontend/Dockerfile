@@ -4,8 +4,8 @@ RUN corepack enable
 
 WORKDIR /app
 
-COPY shared/ui/package.json ./shared/ui/package.json
-COPY shared/llm/package.json ./shared/llm/package.json
+COPY shared/ui ./shared/ui
+COPY shared/llm ./shared/llm
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 
 WORKDIR /app/frontend

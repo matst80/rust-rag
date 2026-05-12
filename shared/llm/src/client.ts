@@ -22,17 +22,18 @@ export interface ModelProfile {
     temperature?: number
     randomSeed?: number
     maxNumImages?: number
+    maxNumVideos?: number
     supportAudio?: boolean
   }
 }
 
 const DEFAULT_TEXT_URL =
-  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
+  "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.task"
 // Gemma 3n is gated on HF (401 without token). Try Gemma 4 web.task with
 // maxNumImages set — if MediaPipe rejects the modality, the error will be
 // explicit and we can swap back. Cheap experiment.
 const DEFAULT_VISION_URL =
-  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task"
+  "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.task"
 
 /** Resolve a model URL by checking common env / global override slots. */
 function resolveUrl(globalKey: string, fallback: string): string {
@@ -64,7 +65,9 @@ export const MODEL_PROFILES = {
       topK: 40,
       temperature: 0.4,
       randomSeed: 1,
-      maxNumImages: 1,
+      maxNumImages: 5,
+      maxNumVideos: 1,
+      supportAudio: true,
     },
   }),
 }
@@ -102,7 +105,7 @@ class LlmClient extends EventTarget {
     return typeof (navigator as unknown as { gpu?: unknown }).gpu !== "undefined"
   }
 
-  private async fetchModelBuffer(modelUrl: string): Promise<Uint8Array> {
+  private async fetchModelBuffer(modelUrl: string): Promise<Blob> {
     let cache: Cache | null = null
     try {
       cache = await caches.open(CACHE_NAME)
@@ -158,7 +161,7 @@ class LlmClient extends EventTarget {
   private async streamBody(
     response: Response,
     source: "cache" | "network"
-  ): Promise<Uint8Array> {
+  ): Promise<Blob> {
     const totalHeader = response.headers.get("content-length")
     const total = totalHeader ? parseInt(totalHeader, 10) : null
 
@@ -176,13 +179,7 @@ class LlmClient extends EventTarget {
         this.setStatus({ kind: "loading", loaded, total, source })
       }
     }
-    const buffer = new Uint8Array(loaded)
-    let off = 0
-    for (const c of chunks) {
-      buffer.set(c, off)
-      off += c.byteLength
-    }
-    return buffer
+    return new Blob(chunks)
   }
 
   async load(): Promise<LlmInferenceType> {
@@ -198,16 +195,20 @@ class LlmClient extends EventTarget {
         }
 
         this.setStatus({ kind: "loading", loaded: 0, total: null, source: "network" })
-        const buffer = await this.fetchModelBuffer(profile.url)
+        const blob = await this.fetchModelBuffer(profile.url)
+        const blobUrl = URL.createObjectURL(blob)
 
         const { FilesetResolver, LlmInference } = await import(
           "@mediapipe/tasks-genai"
         )
         const fileset = await FilesetResolver.forGenAiTasks(WASM_BASE)
         const llm = await LlmInference.createFromOptions(fileset, {
-          baseOptions: { modelAssetBuffer: buffer },
+          baseOptions: { modelAssetPath: blobUrl },
           ...profile.options,
         })
+
+        // We can revoke the URL after creation, MediaPipe has loaded it
+        URL.revokeObjectURL(blobUrl)
 
         this.llm = llm
         this.setStatus({ kind: "ready" })
