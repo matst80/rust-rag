@@ -6,7 +6,11 @@ import type {
   Prompt,
 } from "@mediapipe/tasks-genai"
 
-const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai/wasm"
+let WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-genai/wasm"
+
+export function setWasmBase(base: string): void {
+  WASM_BASE = base
+}
 const CACHE_NAME = "litert-models-v1"
 
 export interface ModelProfile {

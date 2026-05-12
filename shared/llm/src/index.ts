@@ -1,5 +1,6 @@
 export {
   getLlmClient,
+  setWasmBase,
   formatLoadProgress,
   clearModelCache,
   requestPersistentStorage,
