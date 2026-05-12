@@ -719,6 +719,13 @@ pub trait VectorStore: Send + Sync {
     fn count_items_by_type(&self, _type_name: &str) -> Result<i64> {
         Ok(0)
     }
+
+    /// Merge a set of tags into the item's `metadata.tags` array (union,
+    /// dedupe, preserve order). Best-effort; intended for analysis output
+    /// promotion. Does not re-embed. Returns true when the item exists.
+    fn merge_item_tags(&self, _id: &str, _tags: &[String]) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 pub struct SqliteVectorStore {
@@ -1831,6 +1838,56 @@ impl VectorStore for SqliteVectorStore {
             |row| row.get(0),
         )?;
         Ok(n)
+    }
+
+    fn merge_item_tags(&self, id: &str, tags: &[String]) -> Result<bool> {
+        if tags.is_empty() {
+            return Ok(true);
+        }
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let row: Option<String> = connection
+            .query_row(
+                "SELECT metadata FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(metadata_str) = row else {
+            return Ok(false);
+        };
+        let mut metadata: Value =
+            serde_json::from_str(&metadata_str).unwrap_or_else(|_| Value::Object(Default::default()));
+        let obj = metadata
+            .as_object_mut()
+            .context("metadata is not a JSON object")?;
+        let mut existing: Vec<String> = obj
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut seen: HashSet<String> = existing.iter().cloned().collect();
+        for tag in tags {
+            let t = tag.trim();
+            if t.is_empty() || !seen.insert(t.to_owned()) {
+                continue;
+            }
+            existing.push(t.to_owned());
+        }
+        obj.insert("tags".to_owned(), serde_json::json!(existing));
+        let serialized = serde_json::to_string(&metadata)?;
+        connection.execute(
+            "UPDATE items SET metadata = ?1 WHERE id = ?2",
+            params![serialized, id],
+        )?;
+        Ok(true)
     }
 }
 

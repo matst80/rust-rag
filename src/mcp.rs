@@ -509,10 +509,13 @@ impl RustRagMcpServer {
             None => None,
         };
         if let Some(ref type_name) = params.type_name {
-            if let Some(ref data) = params.data {
-                self.state
-                    .schema_cache
-                    .validate(type_name, data, self.state.store.as_ref())
+            if let Some(data) = params.data.clone() {
+                let cache = self.state.schema_cache.clone();
+                let store = self.state.store.clone();
+                let tn = type_name.clone();
+                tokio::task::spawn_blocking(move || cache.validate(&tn, &data, store.as_ref()))
+                    .await
+                    .map_err(|e| e.to_string())?
                     .map_err(|e| e.to_string())?;
             }
         } else if params.data.is_some() {
@@ -1361,16 +1364,27 @@ impl RustRagMcpServer {
     #[tool(description = "List every registered typed-entry schema. Each row carries the type_name, the JSON Schema, optional title/description, and item_count (how many entries are currently typed). Use to discover what mini-app types are available before calling store_entry with a `type`.")]
     async fn list_schemas(&self) -> Result<Json<crate::api::schemas::SchemaListResponse>, String> {
         let store = self.state.store.clone();
-        let records = tokio::task::spawn_blocking(move || store.list_schemas())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        let mut out = Vec::with_capacity(records.len());
-        for record in records {
-            let count = self.state.store.count_items_by_type(&record.type_name).ok();
-            out.push(crate::api::schemas::SchemaPayload::from_record_pub(record, count));
-        }
-        Ok(Json(crate::api::schemas::SchemaListResponse { schemas: out }))
+        let pairs = tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Vec<(crate::db::SchemaRecord, i64)>> {
+                let records = store.list_schemas()?;
+                let mut out = Vec::with_capacity(records.len());
+                for record in records {
+                    let count = store.count_items_by_type(&record.type_name).unwrap_or(0);
+                    out.push((record, count));
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        let schemas = pairs
+            .into_iter()
+            .map(|(record, count)| {
+                crate::api::schemas::SchemaPayload::from_record_pub(record, Some(count))
+            })
+            .collect();
+        Ok(Json(crate::api::schemas::SchemaListResponse { schemas }))
     }
 
     #[tool(description = "Fetch one typed-entry schema by `type_name`. Returns the JSON Schema plus metadata. Returns an error when the type is not registered.")]
@@ -1380,13 +1394,23 @@ impl RustRagMcpServer {
     ) -> Result<Json<crate::api::schemas::SchemaPayload>, String> {
         let store = self.state.store.clone();
         let tn = params.type_name.clone();
-        let record = tokio::task::spawn_blocking(move || store.get_schema(&tn))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("schema `{}` not found", params.type_name))?;
-        let count = self.state.store.count_items_by_type(&record.type_name).ok();
-        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(record, count)))
+        let pair = tokio::task::spawn_blocking(
+            move || -> anyhow::Result<Option<(crate::db::SchemaRecord, i64)>> {
+                let Some(record) = store.get_schema(&tn)? else {
+                    return Ok(None);
+                };
+                let count = store.count_items_by_type(&record.type_name).unwrap_or(0);
+                Ok(Some((record, count)))
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("schema `{}` not found", params.type_name))?;
+        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(
+            pair.0,
+            Some(pair.1),
+        )))
     }
 
     #[tool(description = "Register or update a typed-entry schema. Supply `type_name`, the `json_schema` (Draft 2020-12 / Draft-07 compatible), and optional `title` / `description`. The schema itself is validated as a JSON Schema before storage. The compiled validator cache for that type is invalidated; subsequent store_entry / update_item calls revalidate against the new schema.")]
@@ -1406,13 +1430,19 @@ impl RustRagMcpServer {
         };
         let store = self.state.store.clone();
         let to_store = record.clone();
-        tokio::task::spawn_blocking(move || store.upsert_schema(to_store))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+        let tn = params.type_name.clone();
+        let count = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+            store.upsert_schema(to_store)?;
+            Ok(store.count_items_by_type(&tn).unwrap_or(0))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
         self.state.schema_cache.invalidate(&params.type_name);
-        let count = self.state.store.count_items_by_type(&params.type_name).ok();
-        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(record, count)))
+        Ok(Json(crate::api::schemas::SchemaPayload::from_record_pub(
+            record,
+            Some(count),
+        )))
     }
 
     #[tool(description = "Delete a typed-entry schema. Refuses (returns an error) when items still reference the type, unless `force=true` — in which case those items have their `type` and `data` cleared. Returns deleted=true and items_unset count.")]

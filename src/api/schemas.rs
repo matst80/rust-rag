@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::db::SchemaRecord;
+use crate::db::{SchemaRecord, VectorStore};
 use crate::validation;
 
 use super::{api_validation_error, ApiError, AppState};
@@ -68,23 +68,39 @@ pub struct DeleteSchemaResponse {
     pub items_unset: usize,
 }
 
+/// Fetch `(record, item_count)` for one schema on a blocking worker.
+fn fetch_with_count(
+    store: &dyn VectorStore,
+    type_name: &str,
+) -> anyhow::Result<Option<(SchemaRecord, i64)>> {
+    let Some(record) = store.get_schema(type_name)? else {
+        return Ok(None);
+    };
+    let count = store.count_items_by_type(&record.type_name).unwrap_or(0);
+    Ok(Some((record, count)))
+}
+
 pub async fn list_schemas(
     State(state): State<AppState>,
 ) -> Result<Json<SchemaListResponse>, ApiError> {
     let store = state.store.clone();
-    let records = tokio::task::spawn_blocking(move || store.list_schemas())
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(ApiError::Internal)?;
-    let mut out = Vec::with_capacity(records.len());
-    for record in records {
-        let count = state
-            .store
-            .count_items_by_type(&record.type_name)
-            .ok();
-        out.push(SchemaPayload::from_record(record, count));
-    }
-    Ok(Json(SchemaListResponse { schemas: out }))
+    let pairs = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(SchemaRecord, i64)>> {
+        let records = store.list_schemas()?;
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let count = store.count_items_by_type(&record.type_name).unwrap_or(0);
+            out.push((record, count));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    let schemas = pairs
+        .into_iter()
+        .map(|(record, count)| SchemaPayload::from_record(record, Some(count)))
+        .collect();
+    Ok(Json(SchemaListResponse { schemas }))
 }
 
 pub async fn get_schema(
@@ -93,20 +109,19 @@ pub async fn get_schema(
 ) -> Result<Json<SchemaPayload>, ApiError> {
     let store = state.store.clone();
     let tn = type_name.clone();
-    let record = tokio::task::spawn_blocking(move || store.get_schema(&tn))
+    let pair = tokio::task::spawn_blocking(move || fetch_with_count(store.as_ref(), &tn))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("schema `{type_name}` not found")))?;
-    let count = state.store.count_items_by_type(&record.type_name).ok();
-    Ok(Json(SchemaPayload::from_record(record, count)))
+    Ok(Json(SchemaPayload::from_record(pair.0, Some(pair.1))))
 }
 
 async fn upsert_inner(
     state: &AppState,
     type_name: String,
     request: UpsertSchemaRequest,
-) -> Result<SchemaRecord, ApiError> {
+) -> Result<(SchemaRecord, i64), ApiError> {
     if type_name.trim().is_empty() {
         return Err(ApiError::BadRequest("type_name is required".into()));
     }
@@ -120,20 +135,36 @@ async fn upsert_inner(
         updated_at: 0,
     };
     let store = state.store.clone();
-    let record_clone = record.clone();
-    tokio::task::spawn_blocking(move || store.upsert_schema(record_clone))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(ApiError::Internal)?;
-    state.schema_cache.invalidate(&type_name);
-    let store = state.store.clone();
+    let to_store = record.clone();
     let tn = type_name.clone();
-    let stored = tokio::task::spawn_blocking(move || store.get_schema(&tn))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(ApiError::Internal)?
-        .unwrap_or(record);
-    Ok(stored)
+    let pair = tokio::task::spawn_blocking(move || -> anyhow::Result<(SchemaRecord, i64)> {
+        store.upsert_schema(to_store)?;
+        match fetch_with_count(store.as_ref(), &tn)? {
+            Some(p) => Ok(p),
+            None => Ok((
+                SchemaRecord {
+                    type_name: tn,
+                    json_schema: Value::Null,
+                    title: None,
+                    description: None,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                0,
+            )),
+        }
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    state.schema_cache.invalidate(&type_name);
+    // Fall back to the in-memory record when the store returned a stub.
+    let (stored, count) = if pair.0.json_schema.is_null() {
+        (record, pair.1)
+    } else {
+        pair
+    };
+    Ok((stored, count))
 }
 
 pub async fn create_schema(
@@ -144,9 +175,8 @@ pub async fn create_schema(
         .type_name
         .clone()
         .ok_or_else(|| ApiError::BadRequest("type_name is required".into()))?;
-    let record = upsert_inner(&state, type_name, request).await?;
-    let count = state.store.count_items_by_type(&record.type_name).ok();
-    Ok(Json(SchemaPayload::from_record(record, count)))
+    let (record, count) = upsert_inner(&state, type_name, request).await?;
+    Ok(Json(SchemaPayload::from_record(record, Some(count))))
 }
 
 pub async fn upsert_schema(
@@ -154,9 +184,8 @@ pub async fn upsert_schema(
     Path(type_name): Path<String>,
     Json(request): Json<UpsertSchemaRequest>,
 ) -> Result<Json<SchemaPayload>, ApiError> {
-    let record = upsert_inner(&state, type_name, request).await?;
-    let count = state.store.count_items_by_type(&record.type_name).ok();
-    Ok(Json(SchemaPayload::from_record(record, count)))
+    let (record, count) = upsert_inner(&state, type_name, request).await?;
+    Ok(Json(SchemaPayload::from_record(record, Some(count))))
 }
 
 pub async fn delete_schema(

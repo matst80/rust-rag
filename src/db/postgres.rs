@@ -1586,6 +1586,65 @@ impl VectorStore for PostgresVectorStore {
             Ok(n)
         })
     }
+
+    fn merge_item_tags(&self, id: &str, tags: &[String]) -> Result<bool> {
+        if tags.is_empty() {
+            return Ok(true);
+        }
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let new_tags: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            let row = tx
+                .query_opt(
+                    "SELECT metadata, tags FROM documents WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .await?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            let mut metadata: Value = row.try_get("metadata").unwrap_or(Value::Object(Default::default()));
+            let column_tags: Vec<String> = row.try_get("tags").unwrap_or_default();
+            let obj = metadata
+                .as_object_mut()
+                .context("metadata is not a JSON object")?;
+            let mut merged: Vec<String> = obj
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for t in &column_tags {
+                if !merged.iter().any(|m| m == t) {
+                    merged.push(t.clone());
+                }
+            }
+            for t in &new_tags {
+                if !merged.iter().any(|m| m == t) {
+                    merged.push(t.clone());
+                }
+            }
+            obj.insert("tags".to_owned(), serde_json::json!(merged));
+            tx.execute(
+                "UPDATE documents SET metadata = $1, tags = $2, updated_at = now() WHERE id = $3",
+                &[&metadata, &merged, &id],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(true)
+        })
+    }
 }
 
 fn row_to_message(row: &tokio_postgres::Row) -> Result<MessageRecord> {

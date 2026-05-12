@@ -1245,14 +1245,17 @@ pub(crate) async fn store_entry_core(
     };
 
     if let Some(ref type_name) = request.type_name {
-        let data = request.data.as_ref().ok_or_else(|| {
+        let data = request.data.clone().ok_or_else(|| {
             ApiError::BadRequest(format!(
                 "type `{type_name}` requires a `data` payload"
             ))
         })?;
-        state
-            .schema_cache
-            .validate(type_name, data, state.store.as_ref())
+        let cache = state.schema_cache.clone();
+        let store = state.store.clone();
+        let tn = type_name.clone();
+        tokio::task::spawn_blocking(move || cache.validate(&tn, &data, store.as_ref()))
+            .await
+            .map_err(ApiError::TaskJoin)?
             .map_err(api_validation_error)?;
     } else if request.data.is_some() {
         return Err(ApiError::BadRequest(
@@ -2012,10 +2015,13 @@ async fn update_item(
     // `type` is supplied (no `data`), require a payload — type without data
     // is meaningless.
     if let Some(ref type_name) = request.type_name {
-        if let Some(ref data) = request.data {
-            state
-                .schema_cache
-                .validate(type_name, data, state.store.as_ref())
+        if let Some(data) = request.data.clone() {
+            let cache = state.schema_cache.clone();
+            let store = state.store.clone();
+            let tn = type_name.clone();
+            tokio::task::spawn_blocking(move || cache.validate(&tn, &data, store.as_ref()))
+                .await
+                .map_err(ApiError::TaskJoin)?
                 .map_err(api_validation_error)?;
         }
     } else if request.data.is_some() {
