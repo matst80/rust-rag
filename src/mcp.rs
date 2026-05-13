@@ -1472,6 +1472,20 @@ impl RustRagMcpServer {
             items_unset: unset,
         }))
     }
+
+    #[tool(description = "Manually trigger a dreaming round to consolidate 'memory' entries. Moves durable facts to 'knowledge', merges duplicates, and prunes transient notes. Returns accepted status immediately; work continues in background.")]
+    async fn dream(&self) -> Result<String, String> {
+        if !self.state.analysis.is_configured() {
+            return Err("dreaming requires analysis (LLM) to be configured".to_owned());
+        }
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::api::process_dreaming_round(&state).await {
+                tracing::error!("mcp dream error: {e}");
+            }
+        });
+        Ok("Dreaming round started in background.".to_owned())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

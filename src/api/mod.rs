@@ -1,7 +1,7 @@
 use crate::{
     config::{
-        AnalysisConfig, AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig,
-        OpenAiChatConfig,
+        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
+        MultimodalConfig, OpenAiChatConfig,
     },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
@@ -37,6 +37,7 @@ use tower_http::{
     services::ServeDir,
     trace::TraceLayer,
 };
+use tracing::error;
 use uuid::Uuid;
 
 pub mod attachments;
@@ -50,8 +51,10 @@ mod query;
 pub mod schemas;
 mod tombstones;
 mod ingest_url;
+mod dreaming;
 
 pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
+pub use dreaming::{run_dreaming_worker, process_dreaming_round};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -117,6 +120,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub analysis: Arc<AnalysisConfig>,
+    pub dreaming: Arc<DreamingConfig>,
     /// Compiled-schema cache for typed-entry validation. Lives for the
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
@@ -168,6 +172,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -175,6 +180,11 @@ impl AppState {
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
         self.analysis = Arc::new(analysis);
+        self
+    }
+
+    pub fn with_dreaming(mut self, dreaming: DreamingConfig) -> Self {
+        self.dreaming = Arc::new(dreaming);
         self
     }
 
@@ -245,6 +255,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -1009,6 +1020,7 @@ pub fn router(state: AppState) -> Router {
         ]);
     let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
+        .route("/api/dream", post(dreaming_endpoint))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -2539,6 +2551,26 @@ async fn smart_store(
     Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
 }
 
+async fn dreaming_endpoint(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    if !state.analysis.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "dreaming requires analysis (LLM) to be configured".to_owned(),
+        ));
+    }
+    
+    // Spawn in background so the HTTP request doesn't timeout
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = dreaming::process_dreaming_round(&state_clone).await {
+            error!("manual dreaming error: {e}");
+        }
+    });
+    
+    Ok(StatusCode::ACCEPTED)
+}
+
 async fn rebuild_graph(
     State(state): State<AppState>,
 ) -> Result<Json<GraphRebuildResponse>, ApiError> {
@@ -3596,6 +3628,7 @@ fn map_missing_item(kind: &str, error: anyhow::Error) -> ApiError {
         ApiError::Internal(error.context(format!("failed to update {kind}")))
     }
 }
+
 
 pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();

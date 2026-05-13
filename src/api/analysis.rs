@@ -198,10 +198,10 @@ pub async fn run_analysis(
 
     let user_prompt = build_user_prompt(text, &neighbors);
     let started = std::time::Instant::now();
-    let content = call_llm(state, &user_prompt).await?;
+    let raw = call_llm(state, SYSTEM_PROMPT, &user_prompt).await?;
     span.record("llm_ms", started.elapsed().as_millis() as i64);
 
-    let parsed = parse_analysis(&content);
+    let parsed = parse_analysis(&raw);
     span.record("verdicts", parsed.verdicts.len());
     span.record("tags", parsed.tags.len());
     Ok(parsed)
@@ -282,8 +282,7 @@ fn build_user_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
     out
 }
 
-#[tracing::instrument(name = "analysis.call_llm", skip(state, user_prompt), fields(prompt_len = user_prompt.len(), model = tracing::field::Empty, http_status = tracing::field::Empty, output_len = tracing::field::Empty))]
-async fn call_llm(state: &AppState, user_prompt: &str) -> Result<String> {
+pub(crate) async fn call_llm(state: &AppState, system_prompt: &str, user_prompt: &str) -> Result<String> {
     let cfg = &state.analysis;
     let base_url = cfg
         .base_url
@@ -304,7 +303,7 @@ async fn call_llm(state: &AppState, user_prompt: &str) -> Result<String> {
         "chat_template_kwargs": {"enable_thinking": false},
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     });
