@@ -133,7 +133,7 @@ help:
 		'  make check-env        Verify required runtime env vars are set' \
 		'  make build            Build the rust-rag binary in release mode' \
 		'  make build-cuda       Build the rust-rag binary with the cuda feature enabled' \
-
+		'' \
 		'  make run              Start the service locally (SQLite, bge-small)' \
 		'  make run-pg           Start the service locally against Postgres + bge-m3 (CLS-pooled, 1024-d)' \
 		'  make run-cuda         Start the service locally with the cuda feature enabled' \
@@ -141,7 +141,7 @@ help:
 		'  make fetch-prod-snapshot  kubectl-cp the prod SQLite DB into $(PROD_SNAPSHOT_DIR)' \
 		'  make migrate-prod     Re-embed $(PROD_SNAPSHOT_DB) with bge-m3 and write to Postgres' \
 		'  make e2e-local        Print the two-command recipe for backend + frontend e2e' \
-
+		'' \
 		'  make docker-build-cuda    Build the CUDA server container image (amd64)' \
 		'  make docker-push-cuda     Build + push the CUDA server container image' \
 		'  make docker-run-cuda      Run the CUDA server container with the local data directory mounted' \
@@ -169,7 +169,7 @@ help:
 		'  make rollout-frontend     Restart only the frontend Deployment' \
 		'  make rollout-status       Show rollout status for both Deployments' \
 		'  make push-and-rollout     docker-push-all → rollout' \
-
+		'' \
 		'  make store-knowledge  POST a sample knowledge document' \
 		'  make store-memory     POST a sample memory document' \
 		'  make search-knowledge Search with source_id=knowledge' \
