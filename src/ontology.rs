@@ -563,12 +563,12 @@ async fn call_llm_for_edges(
     );
     // Dump the full prompts at info so the operator can read what's being
     // sent. Cheap: one ontology call per item, not in a hot loop.
-    info!(
-        item_id = %target.id,
-        system_prompt = %system_prompt,
-        user_prompt = %user_message,
-        "ontology worker: LLM prompts"
-    );
+    // info!(
+    //     item_id = %target.id,
+    //     system_prompt = %system_prompt,
+    //     user_prompt = %user_message,
+    //     "ontology worker: LLM prompts"
+    // );
 
     // Delegate the HTTP/envelope/thinking-mode plumbing to the same helper
     // the analysis endpoint uses — keeps both paths on the well-tested code.
