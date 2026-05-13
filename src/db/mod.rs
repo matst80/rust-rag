@@ -27,13 +27,14 @@ use schema::{initialize_schema, register_sqlite_vec};
 /// RRF paper (Cormack et al.) and is the de-facto default across search systems.
 const RRF_K: f32 = 60.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ItemRecord {
     pub id: String,
     pub text: String,
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     /// Wiki-style hierarchical path (slash-separated, e.g. `team/handbook`).
     /// User-asserted, optional. Distinct from chunk-level `section_path`
     /// which is derived from markdown headers by the chunker.
@@ -135,6 +136,7 @@ pub struct SearchHit {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     pub distance: f32,
     /// Header breadcrumb of the chunk that scored best for this document
     /// (e.g. `["Architecture", "Embedding execution"]`). Empty for hits
@@ -181,6 +183,7 @@ impl From<ItemRecord> for SearchHit {
             metadata: item.metadata,
             source_id: item.source_id,
             created_at: item.created_at,
+            updated_at: item.updated_at,
             distance: 0.0,
             section_path: Vec::new(),
             retrievers: Vec::new(),
@@ -1039,13 +1042,14 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.execute(
             "
-            INSERT INTO items (id, text, metadata, source_id, created_at, path, type, data)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO items (id, text, metadata, source_id, created_at, updated_at, path, type, data)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE
             SET text = excluded.text,
                 metadata = excluded.metadata,
                 source_id = excluded.source_id,
                 created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
                 path = excluded.path,
                 type = excluded.type,
                 data = excluded.data,
@@ -1057,6 +1061,7 @@ impl VectorStore for SqliteVectorStore {
                 metadata_json,
                 item.source_id,
                 item.created_at,
+                item.updated_at,
                 item.path,
                 item.type_name,
                 data_json,
@@ -1916,7 +1921,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at, path, type, data
+            "SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
              FROM items
              WHERE ontology_status = 'pending'
              ORDER BY created_at ASC
@@ -1931,13 +1936,14 @@ impl VectorStore for SqliteVectorStore {
                     metadata_str,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at, path, type_name, data_str) = r?;
+                let (id, text, metadata_str, source_id, created_at, updated_at, path, type_name, data_str) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -1945,6 +1951,7 @@ impl VectorStore for SqliteVectorStore {
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                     source_id,
                     created_at,
+                    updated_at,
                     path,
                     type_name,
                     data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
@@ -2949,7 +2956,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -2977,7 +2984,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
         FROM items
         WHERE id = ?1
         ",
@@ -3008,6 +3015,7 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         metadata,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
+        updated_at: row.get(11)?,
         distance: row.get(5)?,
         section_path: Vec::new(),
         retrievers: vec!["dense".to_owned()],
@@ -3019,17 +3027,18 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
 }
 
 fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
-    let data_str: Option<String> = row.get(7)?;
+    let data_str: Option<String> = row.get(8)?;
     Ok(ItemRecord {
         id: row.get(0)?,
         text: row.get(1)?,
         metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
-        path: row.get(5)?,
-        type_name: row.get(6)?,
+        updated_at: row.get(5)?,
+        path: row.get(6)?,
+        type_name: row.get(7)?,
         data: match data_str {
-            Some(s) => Some(parse_json_column(s, 7)?),
+            Some(s) => Some(parse_json_column(s, 8)?),
             None => None,
         },
     })

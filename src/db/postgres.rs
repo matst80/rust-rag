@@ -275,12 +275,14 @@ fn pg_row_to_attachment(row: &tokio_postgres::Row) -> AttachmentRecord {
 
 fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
     Ok(ItemRecord {
         id: row.try_get("id")?,
         text: row.try_get("content")?,
         metadata: row.try_get::<_, Value>("metadata")?,
         source_id: row.try_get("source_id")?,
         created_at: ts_to_ms(created_at),
+        updated_at: ts_to_ms(updated_at),
         path: row.try_get("path").ok(),
         type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
         data: row.try_get::<_, Option<Value>>("data").ok().flatten(),
@@ -491,7 +493,7 @@ impl VectorStore for PostgresVectorStore {
             // breadcrumb for the UI / LLM) in the same query.
             let rows = client
                 .query(
-                    "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
+                    "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
                             ranked.distance, ranked.section_path, ranked.chunk_content, \
                             d.type, d.tags \
                      FROM ( \
@@ -526,6 +528,7 @@ impl VectorStore for PostgresVectorStore {
                         metadata: item.metadata.clone(),
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
+                        updated_at: item.updated_at,
                         distance: distance as f32,
                         section_path: section_path.unwrap_or_default(),
                         retrievers: vec!["dense".to_owned()],
@@ -649,7 +652,7 @@ impl VectorStore for PostgresVectorStore {
                            (s.score IS NOT NULL) AS matched_sparse
                     FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
                 )
-                SELECT d.id, d.content, d.metadata, d.source_id, d.created_at,
+                SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at,
                        d.type, d.tags,
                        (f.rrf_score
                           * exp(- EXTRACT(EPOCH FROM (now() - d.updated_at))
@@ -709,6 +712,7 @@ impl VectorStore for PostgresVectorStore {
                         metadata: item.metadata.clone(),
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
+                        updated_at: item.updated_at,
                         distance: pseudo as f32,
                         section_path: section_path.unwrap_or_default(),
                         retrievers,
@@ -772,7 +776,7 @@ impl VectorStore for PostgresVectorStore {
                 .get(0);
 
             let sql = format!(
-                "SELECT id, content, metadata, source_id, created_at, path, type, data FROM documents \
+                "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
@@ -799,7 +803,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let row = client
                 .query_opt(
-                    "SELECT id, content, metadata, source_id, created_at, path, type, data FROM documents WHERE id = $1",
+                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data FROM documents WHERE id = $1",
                     &[&id],
                 )
                 .await?;
@@ -1068,6 +1072,7 @@ impl VectorStore for PostgresVectorStore {
                         metadata: item.metadata.clone(),
                         source_id: item.source_id.clone(),
                         created_at: item.created_at,
+                        updated_at: item.updated_at,
                         distance: distance as f32,
                         section_path: Vec::new(),
                         retrievers: vec!["dense".to_owned()],

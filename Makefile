@@ -111,7 +111,7 @@ K8S_CUDA_DEPLOYMENT ?= rust-rag-cuda
 K8S_FRONTEND_DEPLOYMENT ?= rust-rag-frontend
 
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files mcp-inspector-local mcp-inspector-hosted
 
 help:
 	@printf '%s\n' \
@@ -174,7 +174,9 @@ help:
 		'  make graph-rebuild    Rebuild similarity edges (graph must be enabled)' \
 		'  make graph-neighborhood GET one item neighborhood (set ITEM_ID=doc-memory-1)' \
 		'  make smoke            Run sample store + search requests with curl' \
-		'  make http-files       List the .http request files'
+		'  make http-files       List the .http request files' \
+		'  make mcp-inspector-local  Test local MCP server using npx @modelcontextprotocol/inspector' \
+		'  make mcp-inspector-hosted Test hosted MCP server using npx @modelcontextprotocol/inspector'
 
 fetch-assets:
 	mkdir -p "$(MODEL_DIR)" "$(CURDIR)/data" "$(RAG_UPLOAD_PATH)"
@@ -746,3 +748,9 @@ http-files:
 		'http/graph.http' \
 		'http/rag.http' \
 		'http/memory.http'
+
+mcp-inspector-local:
+	npx -y @modelcontextprotocol/inspector --transport http --server-url "http://127.0.0.1:$(RAG_PORT)/mcp" $(if $(RAG_MCP_AUTH_BEARER),--header "Authorization: Bearer $(RAG_MCP_AUTH_BEARER)",)
+
+mcp-inspector-hosted:
+	npx -y @modelcontextprotocol/inspector --transport http --server-url "https://rag.k6n.net/mcp" $(if $(RAG_MCP_AUTH_BEARER),--header "Authorization: Bearer $(RAG_MCP_AUTH_BEARER)",)

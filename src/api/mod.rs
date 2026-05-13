@@ -13,6 +13,7 @@ use crate::{
     embedding::EmbeddingService,
 };
 use anyhow::Result;
+use chrono::Utc;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -535,6 +536,7 @@ pub struct SearchResultPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     pub distance: f32,
     /// Stitched context window for chunk results: the matched chunk surrounded by
     /// its immediate neighbours. Null for non-chunk entries.
@@ -594,6 +596,7 @@ pub struct AdminItemPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     /// Token count under the embedding tokenizer, untruncated. Populated only
     /// by endpoints that opt in.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1317,6 +1320,7 @@ pub(crate) async fn store_entry_core(
                 metadata: request.metadata.clone(),
                 source_id: source_id.clone(),
                 created_at,
+                updated_at: created_at,
                 path: path.clone(),
                 type_name: request.type_name.clone(),
                 data: request.data.clone(),
@@ -1353,6 +1357,7 @@ pub(crate) async fn store_entry_core(
                     metadata: meta,
                     source_id: source_id.clone(),
                     created_at,
+                    updated_at: created_at,
                     path: path.clone(),
                     type_name: None,
                     data: None,
@@ -1380,6 +1385,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            updated_at: created_at,
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
@@ -1417,6 +1423,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            updated_at: created_at,
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
@@ -2204,6 +2211,7 @@ async fn update_item(
             metadata: request.metadata,
             source_id: request.source_id,
             created_at: existing.created_at,
+            updated_at: Utc::now().timestamp_millis(),
             path: new_path,
             type_name: type_override.or(existing.type_name),
             data: data_override.or(existing.data),
@@ -2459,6 +2467,7 @@ async fn llm_rechunk_item(
                 metadata,
                 source_id: source_id.clone(),
                 created_at: now,
+                updated_at: now,
                 path: parent_path.clone(),
                 type_name: None,
                 data: None,
@@ -3573,6 +3582,7 @@ impl From<SearchHit> for SearchResultPayload {
             metadata: value.metadata,
             source_id: value.source_id,
             created_at: value.created_at,
+            updated_at: value.updated_at,
             distance: value.distance,
             chunk_context: None,
             section_path: value.section_path,
@@ -3599,6 +3609,7 @@ impl From<ItemRecord> for AdminItemPayload {
             metadata: value.metadata,
             source_id: value.source_id,
             created_at: value.created_at,
+            updated_at: value.updated_at,
             token_count: None,
             path: value.path,
             analysis: None,
@@ -3606,6 +3617,7 @@ impl From<ItemRecord> for AdminItemPayload {
             analysis_model: None,
             type_name: value.type_name,
             data: value.data,
+            neighbors: None,
         }
     }
 }
@@ -6228,4 +6240,37 @@ mod tests {
         assert_eq!(body["code_challenge_methods_supported"], json!(["S256"]));
         assert!(body["authorization_endpoint"].is_string());
     }
+}
+
+pub(crate) async fn append_to_entry_core(
+    state: &AppState,
+    id: String,
+    text_to_append: String,
+) -> Result<StoreResponse, ApiError> {
+    let store = state.store.clone();
+    let target_id = id.clone();
+    let item = tokio::task::spawn_blocking(move || store.get_item(&target_id))
+        .await
+        .map_err(|e| ApiError::TaskJoin(e))?
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("item `{id}` not found")))?;
+
+    let mut new_text = item.text.clone();
+    if !new_text.ends_with('\n') && !text_to_append.starts_with('\n') {
+        new_text.push('\n');
+    }
+    new_text.push_str(&text_to_append);
+
+    let request = StoreRequest {
+        id: Some(id),
+        text: new_text,
+        metadata: item.metadata,
+        source_id: item.source_id,
+        chunk: None,
+        path: item.path,
+        type_name: item.type_name,
+        data: item.data,
+    };
+
+    store_entry_core(state, request, None).await
 }

@@ -3,6 +3,7 @@ use crate::{
     db::{ItemRecord, SearchHit},
 };
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::{interval, Duration};
@@ -167,6 +168,7 @@ async fn apply_dreaming_action(state: &AppState, action: DreamingAction) -> Resu
             state.store.upsert_item(ItemRecord {
                 source_id: state.dreaming.target_source_id.clone(),
                 metadata,
+                updated_at: Utc::now().timestamp_millis(),
                 ..item
             }, &embedding)?;
         }

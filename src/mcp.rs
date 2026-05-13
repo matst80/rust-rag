@@ -8,13 +8,13 @@
 
 use crate::{
     api::{
-        ActiveUserPayload, AdminItemPayload, AdminItemsResponse, AppState, CategoriesResponse,
-        ChannelsResponse, ClearChannelResponse, CreateManualEdgeRequest, DeleteResponse,
-        EntryNeighbor, GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery,
-        GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse, HealthResponse,
-        ListGraphEdgesQuery, ListItemsQuery, MessagePayload, MessagesResponse, SearchRequest,
-        SearchResponse, SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest,
-        metadata_schema, search_core, store_entry_core,
+        ActiveUserPayload, AdminItemPayload, AppState, ClearChannelResponse,
+        CreateManualEdgeRequest, DeleteResponse, EntryNeighbor, GraphEdgePayload,
+        GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
+        GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
+        ListItemsQuery, MessagePayload, SearchRequest, SearchResponse, SearchResultPayload,
+        StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema, search_core,
+        store_entry_core,
     },
     db::{
         GraphEdgeType, GraphNeighborhood, ItemRecord, ListItemsRequest, ManualEdgeInput,
@@ -35,6 +35,7 @@ use rmcp::{
     },
 };
 use schemars::JsonSchema;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
@@ -136,6 +137,14 @@ impl ServerHandler for RustRagMcpServer {
             ))
             .with_instructions(SERVER_INSTRUCTIONS.to_owned())
     }
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AppendRequest {
+    /// ID of the entry to append to.
+    pub id: String,
+    /// Text to append to the end of the entry.
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -501,6 +510,19 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     }
 
     #[tool(
+        description = "Append text to an existing entry. This is more token-efficient than `update_item` for adding notes or extending documents. Re-embeds the entire content after appending."
+    )]
+    async fn append_to_entry(
+        &self,
+        Parameters(params): Parameters<AppendRequest>,
+    ) -> Result<Json<StoreResponse>, String> {
+        crate::api::append_to_entry_core(&self.state, params.id, params.text)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
+    #[tool(
         description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace (see `list_memory_conventions` for the canonical taxonomy). Pass `type` to scope to a single typed-entry schema (see `list_schemas` for what's registered) — useful for retrieving only decisions, only facts, etc. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
@@ -537,7 +559,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     async fn get_entry(
         &self,
         Parameters(IdParams { id }): Parameters<IdParams>,
-    ) -> Result<Json<AdminItemPayload>, String> {
+    ) -> Result<CallToolResult, String> {
         let store = self.state.store.clone();
         let target_id = id.clone();
         let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || {
@@ -559,6 +581,8 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             payload.analysis_model = Some(a.analysis_model);
         }
 
+        let mut text = format_item_markdown(&payload);
+
         if let Some(nbh) = neighborhood {
             let center_id = id.clone();
             let neighbors: Vec<EntryNeighbor> = nbh
@@ -568,8 +592,6 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                     if n.id == center_id {
                         return false;
                     }
-                    // Only include nodes connected by "proven" or "high quality" edges.
-                    // Prioritizes confirmed manual edges and extremely close embeddings.
                     nbh.edges.iter().any(|e| {
                         let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
                             || (e.from_item_id == center_id && e.to_item_id == n.id);
@@ -584,52 +606,51 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                                     .get("confidence")
                                     .and_then(|v| v.as_f64())
                                     .unwrap_or(1.0);
-                                // Include confirmed edges or manual overrides with decent confidence
                                 status == Some("confirmed")
                                     || (status.is_none() && confidence >= 0.7)
                             }
-                            GraphEdgeType::Similarity => {
-                                // "really close" threshold (approx distance < 0.25)
-                                e.weight >= 0.8
-                            }
+                            GraphEdgeType::Similarity => e.weight >= 0.8
                         }
                     })
                 })
                 .map(|n| EntryNeighbor {
-                    id: n.id,
-                    title: n
-                        .metadata
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_owned()),
+                    id: n.id.clone(),
+                    title: n.metadata.get("title").and_then(|v| v.as_str()).map(|s| s.to_owned()),
                 })
                 .collect();
             if !neighbors.is_empty() {
-                payload.neighbors = Some(neighbors);
+                let _ = writeln!(text, "\n## Contextual Neighbors");
+                for neighbor in neighbors {
+                    let title = neighbor.title.as_deref().unwrap_or("untitled");
+                    let _ = writeln!(text, "- `{}` ({})", neighbor.id, title);
+                }
             }
         }
 
-        Ok(Json(payload))
+        let value = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(value);
+        Ok(result)
     }
 
     #[tool(description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id.")]
-    async fn list_categories(&self) -> Result<Json<CategoriesResponse>, String> {
+    async fn list_categories(&self) -> Result<String, String> {
         let store = self.state.store.clone();
         let categories = tokio::task::spawn_blocking(move || store.list_categories())
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
-        Ok(Json(CategoriesResponse {
-            categories: categories.into_iter().map(Into::into).collect(),
-        }))
+        Ok(format_categories_markdown(&categories))
     }
 
     #[tool(description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing.")]
     async fn list_items(
         &self,
         Parameters(query): Parameters<ListItemsQuery>,
-    ) -> Result<Json<AdminItemsResponse>, String> {
+    ) -> Result<CallToolResult, String> {
         let store = self.state.store.clone();
+        let limit = query.limit.unwrap_or(50);
+        let offset = query.offset.unwrap_or(0);
         let path_prefix = match query.path_prefix.as_deref() {
             Some(p) => crate::db::normalize_path(p).map_err(|e| e.to_string())?,
             None => None,
@@ -645,14 +666,16 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             path_prefix,
             type_name: query.type_name,
         };
-        let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
+        let (items, total) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
-        Ok(Json(AdminItemsResponse {
-            items: items.into_iter().map(Into::into).collect(),
-            total_count,
-        }))
+
+        let text = format_item_list_markdown(&items, total, limit, offset);
+        let value = serde_json::to_value(&items).unwrap_or_else(|_| serde_json::json!([]));
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(value);
+        Ok(result)
     }
 
     #[tool(description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched.")]
@@ -709,6 +732,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                 metadata: request.metadata,
                 source_id: request.source_id,
                 created_at: existing.created_at,
+                updated_at: now_ms(),
                 path: new_path,
                 type_name: type_override.or(existing.type_name),
                 data: data_override.or(existing.data),
@@ -894,7 +918,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     async fn list_messages(
         &self,
         Parameters(params): Parameters<ListMessagesParams>,
-    ) -> Result<Json<MessagesResponse>, String> {
+    ) -> Result<String, String> {
         let limit = params.limit.unwrap_or(50).min(500);
         let messages = self.state.messages.clone();
         let query = MessageQuery {
@@ -914,34 +938,23 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let active_users: Vec<ActiveUserPayload> = match params.channel.as_deref() {
-            Some(ch) => self
-                .state
-                .presence
-                .list(ch)
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            None => Vec::new(),
-        };
-        Ok(Json(MessagesResponse {
-            messages: rows.into_iter().map(Into::into).collect(),
-            total_count: total,
-            active_users,
-            deleted_ids: Vec::new(),
-        }))
+
+        let payloads: Vec<MessagePayload> = rows.into_iter().map(Into::into).collect();
+        Ok(format_messages_markdown(
+            &payloads,
+            total,
+            params.channel.as_deref(),
+        ))
     }
 
     #[tool(description = "List all known channels with message counts and last activity timestamp.")]
-    async fn list_channels(&self) -> Result<Json<ChannelsResponse>, String> {
+    async fn list_channels(&self) -> Result<String, String> {
         let messages = self.state.messages.clone();
         let channels = tokio::task::spawn_blocking(move || messages.list_channels())
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        Ok(Json(ChannelsResponse {
-            channels: channels.into_iter().map(Into::into).collect(),
-        }))
+        Ok(format_channels_markdown(&channels))
     }
 
     #[tool(
@@ -1884,6 +1897,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 metadata: related.metadata.clone(),
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
+                updated_at: related.created_at, // Related hit might not have updated_at in its payload yet
                 distance: related.distance,
                 chunk_context: None,
                 section_path: Vec::new(),
@@ -1908,13 +1922,144 @@ fn write_result_entry(
         Some(r) => format!(" — relation: {r}"),
         None => String::new(),
     };
+    let path_str = hit.path.as_deref().map(|p| format!(" (path: {p})")).unwrap_or_default();
     let _ = writeln!(
         out,
-        "\n### {index}. `{id}` — {relevance}% [{source}]{suffix}",
+        "\n### {index}. `{id}` — {relevance}% [{source}]{path_str}{suffix}",
         id = hit.id,
         source = hit.source_id,
     );
+    let _ = writeln!(out, "> Created: {} | Updated: {}", format_ms(hit.created_at), format_ms(hit.updated_at));
     let _ = writeln!(out, "\n{}", hit.text.trim());
+}
+
+fn format_ms(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn format_item_markdown(item: &AdminItemPayload) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Entry: `{}`", item.id);
+    let _ = writeln!(out, "\n- **Source**: `{}`", item.source_id);
+    if let Some(path) = &item.path {
+        let _ = writeln!(out, "- **Path**: `{}`", path);
+    }
+    if let Some(type_name) = &item.type_name {
+        let _ = writeln!(out, "- **Type**: `{}`", type_name);
+    }
+    let _ = writeln!(out, "- **Created**: {}", format_ms(item.created_at));
+    let _ = writeln!(out, "- **Updated**: {}", format_ms(item.updated_at));
+    
+    let tags: Vec<&str> = item.metadata.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !tags.is_empty() {
+        let _ = writeln!(out, "- **Tags**: {}", tags.join(", "));
+    }
+
+    if let Some(data) = &item.data {
+        let _ = writeln!(out, "\n## Data (JSON)");
+        let _ = writeln!(out, "```json\n{}\n```", serde_json::to_string_pretty(data).unwrap_or_default());
+    }
+
+    let _ = writeln!(out, "\n## Content\n\n{}", item.text.trim());
+
+    if let Some(analysis) = &item.analysis {
+        let _ = writeln!(out, "\n## Intelligence Analysis");
+        if let Some(model) = &item.analysis_model {
+             let _ = writeln!(out, "> Analyzed by `{}`", model);
+        }
+        let _ = writeln!(out, "\n```json\n{}\n```", serde_json::to_string_pretty(analysis).unwrap_or_default());
+    }
+
+    out
+}
+
+fn format_item_list_markdown(items: &[ItemRecord], total: i64, _limit: usize, offset: usize) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Browse Entries (Total: {})", total);
+    let _ = writeln!(out, "> Showing results {}-{} of {}", offset + 1, offset + items.len(), total);
+    
+    if items.is_empty() {
+        let _ = writeln!(out, "\nNo entries found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| ID | Path | Type | Updated |");
+    let _ = writeln!(out, "|----|------|------|---------|");
+    
+    for item in items {
+        let path = item.path.as_deref().unwrap_or("-");
+        let type_name = item.type_name.as_deref().unwrap_or("-");
+        let updated = format_ms(item.updated_at);
+        let _ = writeln!(out, "| `{}` | `{}` | `{}` | {} |", item.id, path, type_name, updated);
+    }
+
+    let _ = writeln!(out, "\n*Use `get_entry(id)` to see full content and metadata for a specific item.*");
+    
+    out
+}
+
+fn format_messages_markdown(messages: &[MessagePayload], total: i64, channel: Option<&str>) -> String {
+    let mut out = String::new();
+    let chan_suffix = channel.map(|c| format!(" in `{}`", c)).unwrap_or_default();
+    let _ = writeln!(out, "# Messages{} (Total: {})", chan_suffix, total);
+    
+    if messages.is_empty() {
+        let _ = writeln!(out, "\nNo messages found.");
+        return out;
+    }
+
+    for m in messages {
+        let ts = format_ms(m.created_at);
+        let _ = writeln!(out, "\n---");
+        let _ = writeln!(out, "**{}** [{:?}] ({})", m.sender, m.sender_kind, ts);
+        let _ = writeln!(out, "\n{}", m.text.trim());
+    }
+    
+    out
+}
+
+fn format_channels_markdown(channels: &[crate::db::ChannelSummary]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Channels");
+    
+    if channels.is_empty() {
+        let _ = writeln!(out, "\nNo channels found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| Channel | Messages | Last Activity |");
+    let _ = writeln!(out, "|---------|----------|---------------|");
+    
+    for c in channels {
+        let last = format_ms(c.last_message_at);
+        let _ = writeln!(out, "| `{}` | {} | {} |", c.channel, c.message_count, last);
+    }
+    
+    out
+}
+
+fn format_categories_markdown(categories: &[crate::db::CategorySummary]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Categories (Sources)");
+    
+    if categories.is_empty() {
+        let _ = writeln!(out, "\nNo categories found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| Source ID | Item Count |");
+    let _ = writeln!(out, "|-----------|------------|");
+    
+    for c in categories {
+        let _ = writeln!(out, "| `{}` | {} |", c.source_id, c.item_count);
+    }
+    
+    out
 }
 
 /// Build the `StreamableHttpService` tower service that serves MCP traffic.
