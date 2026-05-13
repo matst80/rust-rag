@@ -226,8 +226,7 @@ LAN client → /api/acp/register
 
 ## MCP tools
 
-Most HTTP endpoints have an MCP equivalent under `/mcp` (in-process) and
-the `mcp-stdio` bridge. Notable additions:
+Most HTTP endpoints have an MCP equivalent under `/mcp` (in-process). Notable additions:
 
 - `store_entry` / `update_item` / `list_items` — accept `path`.
 - `list_entry_tree {source_id, prefix?}` — same shape as the HTTP tree.
@@ -235,8 +234,6 @@ the `mcp-stdio` bridge. Notable additions:
 - `list_attachments {id}` / `delete_attachment {id}`.
 - `search_entries` — defaults `rerank: true` for MCP callers.
 
-Tool descriptions in `src/mcp.rs` and `mcp-stdio/src/server.rs` must stay
-in sync (CLAUDE.md rule).
 
 ---
 

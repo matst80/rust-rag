@@ -46,14 +46,9 @@ Local helper targets are available in the Makefile:
 
 ```bash
 make run
-make run-mcp
 ```
 
-## MCP Integration
-
-`rust-rag` supports the Model Context Protocol (MCP) via two transports:
-
-### 1. Direct SSE Transport (Recommended)
+`rust-rag` supports the Model Context Protocol (MCP) via direct SSE transport:
 The server exposes an in-process MCP transport at `/mcp`. This allows direct connection from clients like Claude Code without a bridge process.
 
 ~~~bash
@@ -61,27 +56,9 @@ claude mcp add --transport http rust-rag https://your-rag-server.com/mcp \
   --header "Authorization: Bearer your-mcp-token"
 ~~~
 
-### 2. stdio Bridge (`mcp-stdio`)
-The workspace also includes `mcp-stdio`, a standalone bridge that forwards tool calls to the HTTP API. This is useful for clients that only support stdio-based MCP.
-
-~~~bash
-cargo run -p mcp-stdio
-~~~
 
 See [MCP Setup](docs/mcp-setup.md) for detailed configuration and authentication (device login) instructions.
 
-### Release workflow
-
-GitHub Actions publishes `mcp-stdio` release archives for Linux `amd64` and `arm64` only when a tag matching `mcp-stdio-v*` is pushed.
-
-Create the expected annotated tag locally with:
-
-```bash
-make tag-mcp-stdio VERSION=0.1.0
-git push origin mcp-stdio-v0.1.0
-```
-
-That tag triggers `.github/workflows/release-mcp-stdio.yml`, which builds the `mcp-stdio` binary for both architectures and attaches `.tar.gz` archives plus SHA-256 checksum files to the GitHub release.
 
 ## Container image
 

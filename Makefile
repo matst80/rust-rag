@@ -109,9 +109,9 @@ K8S_NAMESPACE ?= home
 KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 K8S_CUDA_DEPLOYMENT ?= rust-rag-cuda
 K8S_FRONTEND_DEPLOYMENT ?= rust-rag-frontend
-MCP_STDIO_TAG_PREFIX ?= mcp-stdio-v
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda build-mcp run run-pg run-baseline run-cuda run-mcp eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout tag-mcp-stdio store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
+
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files
 
 help:
 	@printf '%s\n' \
@@ -127,7 +127,7 @@ help:
 		'  make check-env        Verify required runtime env vars are set' \
 		'  make build            Build the rust-rag binary in release mode' \
 		'  make build-cuda       Build the rust-rag binary with the cuda feature enabled' \
-		'  make build-mcp        Build the mcp-stdio binary in release mode' \
+
 		'  make run              Start the service locally (SQLite, bge-small)' \
 		'  make run-pg           Start the service locally against Postgres + bge-m3 (CLS-pooled, 1024-d)' \
 		'  make run-cuda         Start the service locally with the cuda feature enabled' \
@@ -135,7 +135,7 @@ help:
 		'  make fetch-prod-snapshot  kubectl-cp the prod SQLite DB into $(PROD_SNAPSHOT_DIR)' \
 		'  make migrate-prod     Re-embed $(PROD_SNAPSHOT_DB) with bge-m3 and write to Postgres' \
 		'  make e2e-local        Print the two-command recipe for backend + frontend e2e' \
-		'  make run-mcp          Start the stdio MCP bridge locally' \
+
 		'  make docker-build-cuda    Build the CUDA server container image (amd64)' \
 		'  make docker-push-cuda     Build + push the CUDA server container image' \
 		'  make docker-run-cuda      Run the CUDA server container with the local data directory mounted' \
@@ -163,7 +163,7 @@ help:
 		'  make rollout-frontend     Restart only the frontend Deployment' \
 		'  make rollout-status       Show rollout status for both Deployments' \
 		'  make push-and-rollout     docker-push-all → rollout' \
-		'  make tag-mcp-stdio    Create an annotated release tag (set VERSION=0.1.0)' \
+
 		'  make store-knowledge  POST a sample knowledge document' \
 		'  make store-memory     POST a sample memory document' \
 		'  make search-knowledge Search with source_id=knowledge' \
@@ -238,8 +238,7 @@ build:
 build-cuda:
 	cargo build --release --features cuda --bin rust-rag
 
-build-mcp:
-	cargo build --release --manifest-path mcp-stdio/Cargo.toml
+
 
 run:
 	@mkdir -p "$(LOG_DIR)" "$(RAG_UPLOAD_PATH)"
@@ -488,10 +487,7 @@ run-cuda:
 	RAG_MCP_ALLOWED_HOSTS="$(RAG_MCP_ALLOWED_HOSTS)" \
 	cargo run --features cuda 2>&1 | tee "$(LOG_FILE)"
 
-run-mcp:
-	RAG_MCP_API_BASE_URL="$(API_URL)" \
-	RAG_MCP_AUTH_BEARER="$(RAG_MCP_AUTH_BEARER)" \
-	cargo run --manifest-path mcp-stdio/Cargo.toml
+
 
 tail-logs:
 	@test -f "$(LOG_FILE)" || { printf 'No log file at %s — run "make run" first\n' "$(LOG_FILE)"; exit 1; }
@@ -678,14 +674,7 @@ rollout-status:
 
 push-and-rollout: docker-push-all rollout
 
-tag-mcp-stdio:
-	@test -n "$(VERSION)" || { echo "usage: make tag-mcp-stdio VERSION=0.1.0"; exit 1; }
-	@git diff --quiet || { echo "working tree has unstaged changes"; exit 1; }
-	@git diff --cached --quiet || { echo "working tree has staged but uncommitted changes"; exit 1; }
-	@git rev-parse "$(MCP_STDIO_TAG_PREFIX)$(VERSION)" >/dev/null 2>&1 && { echo "tag $(MCP_STDIO_TAG_PREFIX)$(VERSION) already exists"; exit 1; } || true
-	git tag -a "$(MCP_STDIO_TAG_PREFIX)$(VERSION)" -m "mcp-stdio $(VERSION)"
-	@printf '%s\n' "created tag $(MCP_STDIO_TAG_PREFIX)$(VERSION)"
-	@printf '%s\n' "push it with: git push origin $(MCP_STDIO_TAG_PREFIX)$(VERSION)"
+
 
 store-knowledge:
 	curl -sS -X POST "$(API_URL)/store" \

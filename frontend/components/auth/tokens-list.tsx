@@ -257,8 +257,7 @@ export function TokensList() {
 
 			{tokens.length === 0 ? (
 				<p className="text-sm text-muted-foreground">
-					No tokens yet. Create one above or run{" "}
-					<code className="font-mono">mcp-stdio login</code> from your MCP host.
+					No tokens yet. Create one above to connect your MCP host.
 				</p>
 			) : (
 				<div className="divide-y rounded-md border">
