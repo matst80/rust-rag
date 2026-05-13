@@ -7,13 +7,15 @@ import {
 } from "@huggingface/transformers"
 
 // Configure WASM paths to use your local files in public/wasm/
-env.backends.onnx.wasm.wasmPaths = "/wasm/"
+if (env.backends.onnx.wasm) {
+  env.backends.onnx.wasm.wasmPaths = "/wasm/"
+}
 
 // Remote fetching enabled - using the public Gemma 4 model ID
 env.allowRemoteModels = true 
 env.allowLocalModels = false
 
-export interface LlmStatus {
+export interface LlmHelperStatus {
   kind: "idle" | "loading" | "ready" | "generating" | "error"
   progress?: number
   message?: string
@@ -32,7 +34,7 @@ export interface GenerateOptions {
 export class LlmHelper extends EventTarget {
   private model: any = null
   private processor: any = null
-  private _status: LlmStatus = { kind: "idle" }
+  private _status: LlmHelperStatus = { kind: "idle" }
 
   constructor(public readonly modelId: string = "onnx-community/gemma-4-E4B-it-ONNX") {
     super()
@@ -42,7 +44,7 @@ export class LlmHelper extends EventTarget {
     return this._status
   }
 
-  private setStatus(status: LlmStatus) {
+  private setStatus(status: LlmHelperStatus) {
     this._status = status
     this.dispatchEvent(new CustomEvent("status", { detail: status }))
   }

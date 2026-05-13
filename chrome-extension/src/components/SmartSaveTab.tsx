@@ -34,13 +34,23 @@ async function grabPageContent(): Promise<{ url: string; title: string; text: st
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: () => {
-      const article = document.querySelector('article') as HTMLElement | null
-      const main = document.querySelector('main') as HTMLElement | null
-      const root = article || main || document.body
+      const doc = document.cloneNode(true) as Document;
+      const selectorsToRemove = [
+        'header', 'footer', 'nav', 'aside', 'script', 'style', 'iframe', 'noscript',
+        '.header', '.footer', '.nav', '.navigation', '.sidebar', '.menu', '.ad', '.ads',
+        '#header', '#footer', '#nav', '#navigation', '#sidebar', '#menu',
+        '[role="banner"]', '[role="navigation"]', '[role="contentinfo"]', '.cookie-banner'
+      ];
+      selectorsToRemove.forEach(s => doc.querySelectorAll(s).forEach(el => el.remove()));
+      
+      const body = doc.body;
+      let text = body?.innerText || body?.textContent || '';
+      text = text.replace(/\s+/g, ' ').trim();
+      
       return {
         title: document.title,
         url: location.href,
-        text: (root.innerText || '').slice(0, 12000),
+        text: text.slice(0, 15000),
       }
     },
   })

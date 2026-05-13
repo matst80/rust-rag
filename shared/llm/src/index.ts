@@ -35,6 +35,6 @@ export {
 export {
   LlmHelper,
   getLlmHelper,
-  type LlmStatus as LlmHelperStatus,
+  type LlmHelperStatus,
   type GenerateOptions,
 } from "./helper"
