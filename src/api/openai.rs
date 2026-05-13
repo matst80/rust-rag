@@ -972,9 +972,10 @@ async fn search_entries_tool(
                     &sparse,
                     top_k,
                     source_id.as_deref(),
+                    None,
                 )?
             } else {
-                store.search(&embedding, top_k, source_id.as_deref())?
+                store.search(&embedding, top_k, source_id.as_deref(), None)?
             };
 
             Ok(hits

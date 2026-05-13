@@ -470,6 +470,7 @@ impl VectorStore for PostgresVectorStore {
         query_embedding: &[f32],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if query_embedding.is_empty() {
             anyhow::bail!("query embedding cannot be empty");
@@ -498,12 +499,13 @@ impl VectorStore for PostgresVectorStore {
                          JOIN documents d ON d.id = c.document_id \
                          WHERE c.dense_embedding IS NOT NULL \
                            AND ($2::text IS NULL OR d.source_id = $2) \
+                           AND ($4::text IS NULL OR d.type = $4) \
                          ORDER BY c.document_id, c.dense_embedding <=> $1::vector \
                      ) ranked \
                      JOIN documents d ON d.id = ranked.document_id \
                      ORDER BY ranked.distance ASC \
                      LIMIT $3",
-                    &[&vector, &source, &limit],
+                    &[&vector, &source, &limit, &type_name],
                 )
                 .await?;
 
@@ -537,6 +539,7 @@ impl VectorStore for PostgresVectorStore {
         query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if query_embedding.is_empty() {
             anyhow::bail!("query embedding cannot be empty");
@@ -545,14 +548,14 @@ impl VectorStore for PostgresVectorStore {
         // embedder couldn't produce a sparse output (legacy export, etc.)
         // or when callers explicitly want dense.
         if query_sparse.is_empty() {
-            return self.search(query_embedding, top_k, source_id);
+            return self.search(query_embedding, top_k, source_id, type_name);
         }
 
         let pool = self.pool.clone();
         let dense_vec = pgvector::Vector::from(query_embedding.to_vec());
         let sparse_vec = match build_sparsevec(query_sparse) {
             Some(v) => v,
-            None => return self.search(query_embedding, top_k, source_id),
+            None => return self.search(query_embedding, top_k, source_id, type_name),
         };
         let limit = top_k as i64;
         let source = source_id.map(str::to_owned);
@@ -599,6 +602,7 @@ impl VectorStore for PostgresVectorStore {
                     JOIN documents d ON d.id = c.document_id
                     WHERE c.dense_embedding IS NOT NULL
                       AND ($3::text IS NULL OR d.source_id = $3)
+                      AND ($8::text IS NULL OR d.type = $8)
                     ORDER BY c.dense_embedding <=> $1::vector
                     LIMIT $5
                 ),
@@ -611,6 +615,7 @@ impl VectorStore for PostgresVectorStore {
                     JOIN documents d ON d.id = c.document_id
                     WHERE c.sparse_embedding IS NOT NULL
                       AND ($3::text IS NULL OR d.source_id = $3)
+                      AND ($8::text IS NULL OR d.type = $8)
                     ORDER BY c.sparse_embedding <=> $2::sparsevec
                     LIMIT $5
                 ),
@@ -664,6 +669,7 @@ impl VectorStore for PostgresVectorStore {
                         &RRF_CANDIDATE_LIMIT,        // $5
                         &RRF_K,                      // $6
                         &half_life_days,             // $7
+                        &type_name,                  // $8
                     ],
                 )
                 .await?;

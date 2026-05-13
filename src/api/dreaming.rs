@@ -116,7 +116,7 @@ async fn process_item_dreaming(state: &AppState, item: ItemRecord) -> Result<()>
     let embedding = embedder.embed(&item.text)?;
     
     // Find neighbors in both memory and knowledge to see if we should merge or promote
-    let neighbors = state.store.search(&embedding, 5, None)?;
+    let neighbors = state.store.search(&embedding, 5, None, None)?;
     let filtered_neighbors: Vec<_> = neighbors.into_iter().filter(|h| h.id != item.id).collect();
 
     let user_prompt = build_dreaming_prompt(&item, &filtered_neighbors);

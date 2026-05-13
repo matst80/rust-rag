@@ -559,6 +559,7 @@ export async function search(data: SearchRequest): Promise<SearchResultsBundle> 
       ...(data.max_distance !== undefined && { max_distance: data.max_distance }),
       ...(data.hybrid !== undefined && { hybrid: data.hybrid }),
       ...(data.rerank !== undefined && { rerank: data.rerank }),
+      ...(data.type && { type: data.type }),
     }),
   })
   return {

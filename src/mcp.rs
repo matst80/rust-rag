@@ -416,7 +416,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Pass `type` to restrict results to entries of a specific data type (e.g., 'todo', 'note'). Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,

@@ -233,6 +233,7 @@ async fn fetch_neighbors(
             &sparse,
             max_neighbors + 1,
             owned_source.as_deref(),
+            None,
         )?;
         Ok(hits
             .into_iter()

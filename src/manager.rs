@@ -1734,7 +1734,7 @@ async fn tool_search_rag(state: &AppState, args: &str) -> Result<String> {
     let source_id = args.source_id.clone();
     let hits = tokio::task::spawn_blocking(move || -> Result<_> {
         let (embedding, sparse) = embedder.embed_both(&query)?;
-        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref())
+        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref(), None)
     })
     .await??;
     let payload: Vec<Value> = hits
@@ -1799,6 +1799,7 @@ async fn recall_items(
                 &sparse,
                 limit * 2,
                 Some(&source_for_search),
+                None,
             )
         })
         .await??;
