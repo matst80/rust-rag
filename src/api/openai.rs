@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, convert::Infallible};
+use std::{borrow::Cow, collections::HashMap, convert::Infallible};
 
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const SEARCH_ENTRIES_TOOL: &str = "search_entries";
@@ -1338,7 +1338,7 @@ async fn create_graph_edge_tool(
     let input = crate::db::ManualEdgeInput {
         from_item_id: arguments.from_item_id,
         to_item_id: arguments.to_item_id,
-        relation: arguments.relation,
+        relation: arguments.relation.map(Cow::Owned),
         weight: arguments.weight.unwrap_or(1.0),
         directed: arguments.directed.unwrap_or(false),
         metadata: arguments.metadata,

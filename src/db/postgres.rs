@@ -1381,12 +1381,13 @@ impl VectorStore for PostgresVectorStore {
             timestamp, input.from_item_id, input.to_item_id
         );
         let pool = self.pool.clone();
+        let relation_owned = input.relation.map(|r| r.into_owned());
         let record = GraphEdgeRecord {
             id: edge_id.clone(),
             from_item_id: input.from_item_id.clone(),
             to_item_id: input.to_item_id.clone(),
             edge_type: GraphEdgeType::Manual,
-            relation: input.relation.clone(),
+            relation: relation_owned.clone(),
             weight: input.weight,
             directed: input.directed,
             metadata: input.metadata.clone(),
@@ -1415,7 +1416,7 @@ impl VectorStore for PostgresVectorStore {
                     &edge_id,
                     &input.from_item_id,
                     &input.to_item_id,
-                    &input.relation,
+                    &relation_owned,
                     &input.weight,
                     &input.directed,
                     &input.metadata,

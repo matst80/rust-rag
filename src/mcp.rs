@@ -36,7 +36,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Write as _, sync::Arc, time::Duration};
+use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
 const SERVER_NAME: &str = "rust-rag";
 const SERVER_INSTRUCTIONS: &str = "rust-rag retrieval store + cross-agent collaboration surface.\n\
@@ -1008,7 +1008,7 @@ impl RustRagMcpServer {
         let input = ManualEdgeInput {
             from_item_id: request.from_item_id,
             to_item_id: request.to_item_id,
-            relation: request.relation,
+            relation: request.relation.map(Cow::Owned),
             weight: request.weight.unwrap_or(1.0),
             directed: request.directed.unwrap_or(false),
             metadata: request.metadata,
