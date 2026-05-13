@@ -38,3 +38,8 @@ export {
   type LlmStatus as LlmHelperStatus,
   type GenerateOptions,
 } from "./helper"
+export {
+  parseToolCall,
+  hideToolTokens,
+  type ToolCallParseResult,
+} from "./parser"

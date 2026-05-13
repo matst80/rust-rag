@@ -14,19 +14,15 @@ import type {
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import {
-  runLocalChat,
   formatLoadProgress,
   useLlmStatus,
   type LocalChatMessage,
   type LocalToolCall,
 } from "@rust-rag/llm"
-import { buildRagTools } from "@/lib/ai/tools"
+import { useLocalChat } from "@/hooks/use-local-chat"
+import { useHostedChat, type ExtendedMessage } from "@/hooks/use-hosted-chat"
 
-interface ExtendedMessage extends ChatCompletionMessage {
-  reasoning?: string
-  tool_results?: Record<string, string>
-  local_tool_calls?: LocalToolCall[]
-}
+import { ToolResultView } from "@/components/chat/tool-result-view"
 
 function detectWebGpu(): boolean {
   if (typeof navigator === "undefined") return false
@@ -44,7 +40,6 @@ export function ChatInterface() {
   useEffect(() => { setWebgpuAvailable(detectWebGpu()) }, [])
   const llmStatus = useLlmStatus()
   const scrollRef = useRef<HTMLDivElement>(null)
-  const abortControllerRef = useRef<AbortController | null>(null)
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -54,46 +49,65 @@ export function ChatInterface() {
     scrollToBottom()
   }, [messages, scrollToBottom])
 
-  const handleLocalSend = async (newMessages: ExtendedMessage[]) => {
-    abortControllerRef.current = new AbortController()
-    const history: LocalChatMessage[] = newMessages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-      }))
-
-    try {
-      await runLocalChat({
-        history,
-        tools: buildRagTools(),
-        signal: abortControllerRef.current.signal,
-        onUpdate: ({ partialAnswer, toolCalls }) => {
-          setMessages((prev) => {
-            const next = [...prev]
-            const last = next[next.length - 1]
-            if (last.role === "assistant") {
-              last.content = partialAnswer ?? ""
-              if (toolCalls) last.local_tool_calls = toolCalls
-            }
-            return next
-          })
-        },
+  const { generate: generateLocal, stop: stopLocal } = useLocalChat({
+    onUpdate: (partialAnswer, toolCalls) => {
+      setMessages((prev) => {
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last.role === "assistant") {
+          last.content = partialAnswer
+          last.local_tool_calls = toolCalls
+        }
+        return next
       })
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (msg !== "aborted") {
-        setMessages((prev) => {
-          const next = [...prev]
-          const last = next[next.length - 1]
-          if (last.role === "assistant") last.content = `Local chat error: ${msg}`
-          return next
-        })
-      }
-    } finally {
+    },
+    onError: (msg) => {
+      setMessages((prev) => {
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last.role === "assistant") last.content = `Local chat error: ${msg}`
+        return next
+      })
+    },
+    onDone: () => {
       setIsStreaming(false)
     }
-  }
+  })
+
+  const { generate: generateHosted, stop: stopHosted } = useHostedChat({
+    onUpdate: (content, reasoning, toolCalls) => {
+      setMessages(prev => {
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last.role === "assistant") {
+          last.content = content
+          last.reasoning = reasoning
+          if (toolCalls.length > 0) last.tool_calls = toolCalls
+        }
+        return next
+      })
+    },
+    onToolResult: (toolCallId, content) => {
+      setMessages(prev => {
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last.role === "assistant") {
+          if (!last.tool_results) last.tool_results = {}
+          last.tool_results[toolCallId] = content
+        }
+        return next
+      })
+    },
+    onError: (msg) => {
+      setMessages(prev => [
+        ...prev,
+        { role: "assistant", content: `Failed to connect to assistant: ${msg}` }
+      ])
+    },
+    onDone: () => {
+      setIsStreaming(false)
+    }
+  })
 
   const handleSend = async () => {
     if (!input.trim() || isStreaming) return
@@ -108,105 +122,15 @@ export function ChatInterface() {
     setMessages(prev => [...prev, assistantMessage])
 
     if (localMode) {
-      await handleLocalSend([...newMessages, assistantMessage])
-      return
-    }
-
-    abortControllerRef.current = new AbortController()
-
-    try {
-      let fullContent = ""
-      let fullReasoning = ""
-      let accumulatedToolCalls: Record<number, Partial<ChatCompletionAssistantToolCall>> = {}
-
-      await api.chat.stream(
-        {
-          messages: newMessages.flatMap(m => {
-            if (m.tool_calls && m.tool_results && Object.keys(m.tool_results).length > 0) {
-              const expanded = []
-              expanded.push({ role: m.role, content: null, tool_calls: m.tool_calls })
-              for (const tc of m.tool_calls) {
-                if (m.tool_results[tc.id] !== undefined) {
-                  expanded.push({ role: "tool" as const, tool_call_id: tc.id, content: m.tool_results[tc.id], name: tc.function.name })
-                }
-              }
-              if (m.content) {
-                expanded.push({ role: m.role, content: m.content })
-              }
-              return expanded
-            }
-            return [{ role: m.role, content: m.content, name: m.name, tool_call_id: m.tool_call_id, tool_calls: m.tool_calls }]
-          }),
-          stream: true
-        },
-        {
-          onChunk: (chunk: ChatCompletionChunk) => {
-            const delta = chunk.choices[0]?.delta
-            if (!delta) return
-
-            let updated = false
-
-            if (delta.content) { fullContent += delta.content; updated = true }
-
-            const reasoning = delta.reasoning_content || delta.reasoning
-            if (reasoning) { fullReasoning += reasoning; updated = true }
-
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const existing = accumulatedToolCalls[tc.index] || { id: "", type: "function", function: { name: "", arguments: "" } }
-                if (tc.id) existing.id = tc.id
-                if (tc.function?.name) { if (!existing.function) existing.function = { name: "", arguments: "" }; existing.function.name += tc.function.name }
-                if (tc.function?.arguments) { if (!existing.function) existing.function = { name: "", arguments: "" }; existing.function.arguments += tc.function.arguments }
-                accumulatedToolCalls[tc.index] = existing
-              }
-              updated = true
-            }
-
-            if (updated) {
-              setMessages(prev => {
-                const next = [...prev]
-                const last = next[next.length - 1]
-                if (last.role === "assistant") {
-                  last.content = fullContent
-                  last.reasoning = fullReasoning
-                  const toolCalls = Object.values(accumulatedToolCalls)
-                  if (toolCalls.length > 0) last.tool_calls = toolCalls as ChatCompletionAssistantToolCall[]
-                }
-                return next
-              })
-            }
-          },
-          onToolResult: (result: ChatCompletionToolResult) => {
-            setMessages(prev => {
-              const next = [...prev]
-              const last = next[next.length - 1]
-              if (last.role === "assistant") {
-                if (!last.tool_results) last.tool_results = {}
-                last.tool_results[result.tool_call_id] = result.content
-              }
-              return next
-            })
-          },
-          onError: (error: ChatCompletionStreamError) => {
-            setMessages(prev => [...prev, { role: "assistant", content: `Error: ${error.error.message}` }])
-          },
-          onDone: () => { setIsStreaming(false) }
-        },
-        { signal: abortControllerRef.current.signal }
-      )
-    } catch (error: unknown) {
-      if ((error as { name?: string })?.name !== "AbortError") {
-        setMessages(prev => [
-          ...prev,
-          { role: "assistant", content: `Failed to connect to assistant: ${(error as { message?: string })?.message ?? String(error)}` }
-        ])
-      }
-      setIsStreaming(false)
+      await generateLocal([...newMessages, assistantMessage])
+    } else {
+      await generateHosted([...newMessages, assistantMessage])
     }
   }
 
   const clearChat = () => {
-    abortControllerRef.current?.abort()
+    stopLocal()
+    stopHosted()
     setMessages([{ role: "assistant", content: "Hello! I'm your RAG assistant. How can I help you today?" }])
     setIsStreaming(false)
   }
@@ -228,10 +152,10 @@ export function ChatInterface() {
               {/* Avatar */}
               <div
                 className={cn(
-                  "size-8 flex items-center justify-center shrink-0 border",
+                  "size-8 flex items-center justify-center shrink-0 border transition-all duration-300",
                   message.role === "user"
-                    ? "bg-primary text-primary-foreground border-primary/30"
-                    : "bg-card border-border text-muted-foreground"
+                    ? "bg-primary text-primary-foreground border-primary/40 shadow-lg shadow-primary/20"
+                    : "bg-card border-border text-muted-foreground shadow-sm"
                 )}
               >
                 {message.role === "user" ? <User className="size-4" /> : <Bot className="size-4" />}
@@ -276,8 +200,8 @@ export function ChatInterface() {
                           <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
                             View result
                           </AccordionTrigger>
-                          <AccordionContent className="p-3 bg-muted/20 max-h-40 overflow-auto border-t border-primary/5">
-                            <pre className="text-[10px] whitespace-pre-wrap font-mono">{tc.result}</pre>
+                          <AccordionContent className="p-3 bg-muted/20 max-h-80 overflow-auto border-t border-primary/5">
+                            <ToolResultView name={tc.name} result={tc.result} />
                           </AccordionContent>
                         </AccordionItem>
                       </Accordion>
@@ -302,8 +226,8 @@ export function ChatInterface() {
                           <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
                             View result
                           </AccordionTrigger>
-                          <AccordionContent className="p-3 bg-muted/20 max-h-40 overflow-auto border-t border-primary/5">
-                            <pre className="text-[10px] whitespace-pre-wrap font-mono">{message.tool_results[tc.id]}</pre>
+                          <AccordionContent className="p-3 bg-muted/20 max-h-80 overflow-auto border-t border-primary/5">
+                            <ToolResultView name={tc.function.name} result={message.tool_results[tc.id]} />
                           </AccordionContent>
                         </AccordionItem>
                       </Accordion>
@@ -314,10 +238,10 @@ export function ChatInterface() {
                 {/* Bubble */}
                 <div
                   className={cn(
-                    "px-5 py-3 border leading-relaxed",
+                    "px-6 py-4 border leading-relaxed transition-all duration-200",
                     message.role === "user"
-                      ? "bg-primary text-primary-foreground border-primary/40 shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.2)]"
-                      : "bg-card text-card-foreground border-border"
+                      ? "bg-primary text-primary-foreground border-primary/40 shadow-[0_12px_30px_-10px_rgba(0,0,0,0.15)] ring-1 ring-white/10 ring-inset"
+                      : "bg-card text-card-foreground border-border shadow-sm"
                   )}
                 >
                   {typeof message.content === "string" ? (
@@ -339,7 +263,7 @@ export function ChatInterface() {
                   )}
                 </div>
 
-                <span className="font-mono text-[9px] text-muted-foreground/40 uppercase tracking-[2px] px-1">
+                <span className="font-mono text-[9px] text-muted-foreground/60 uppercase tracking-[2.5px] px-2 py-0.5 border-l border-primary/30 mt-1 ml-1">
                   {message.role}
                 </span>
               </div>
