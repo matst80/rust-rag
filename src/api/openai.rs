@@ -1567,6 +1567,7 @@ async fn ingest_web_content_tool(
         path: None,
         type_name: None,
         data: None,
+        analysis: None,
     };
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

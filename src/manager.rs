@@ -1348,6 +1348,7 @@ async fn tool_assign_task(
         path: None,
         type_name: None,
         data: None,
+        analysis: None,
     };
     let embedder = state
         .embedder
@@ -1490,6 +1491,7 @@ async fn tool_update_task(state: &AppState, args: &str) -> Result<String> {
         path: None,
         type_name: None,
         data: None,
+        analysis: existing.analysis,
     };
     let embedder = state
         .embedder
@@ -1623,6 +1625,7 @@ async fn tool_remember(state: &AppState, cfg: &ManagerConfig, args: &str) -> Res
         path: None,
         type_name: None,
         data: None,
+        analysis: None,
     };
     let embedder = state
         .embedder
@@ -1689,6 +1692,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
         path: None,
         type_name: None,
         data: None,
+        analysis: existing.analysis,
     };
     let embedder = state
         .embedder

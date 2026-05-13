@@ -760,6 +760,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                 path: new_path,
                 type_name: type_override.or(existing.type_name),
                 data: data_override.or(existing.data),
+                analysis: existing.analysis,
             };
             let embedding = embedder.embed(&item.text)?;
             store.upsert_item(item.clone(), &embedding)?;

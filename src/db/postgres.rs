@@ -586,6 +586,7 @@ impl VectorStore for PostgresVectorStore {
                         path: item.path.clone(),
                         type_name: row.try_get::<_, Option<String>>("type")?,
                         tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        analysis: item.analysis.clone(),
                     })
                 })
                 .collect()
@@ -770,6 +771,7 @@ impl VectorStore for PostgresVectorStore {
                         path: item.path.clone(),
                         type_name: row.try_get::<_, Option<String>>("type")?,
                         tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        analysis: item.analysis.clone(),
                     })
                 })
                 .collect()
@@ -1127,9 +1129,10 @@ impl VectorStore for PostgresVectorStore {
                         section_path: Vec::new(),
                         retrievers: vec!["dense".to_owned()],
                         chunk_text: None,
-                        path: row.try_get::<_, Option<String>>("path").ok().flatten(),
-                        type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
-                        tags: row.try_get::<_, Option<Vec<String>>>("tags").ok().flatten().unwrap_or_default(),
+                        path: row.try_get("path")?,
+                        type_name: row.try_get("type")?,
+                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        analysis: item.analysis.clone(),
                     })
                 })
                 .collect()

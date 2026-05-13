@@ -1348,6 +1348,7 @@ pub(crate) async fn store_entry_core(
                 path: path.clone(),
                 type_name: request.type_name.clone(),
                 data: request.data.clone(),
+                analysis: None,
             };
             let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
             tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1385,6 +1386,7 @@ pub(crate) async fn store_entry_core(
                     path: path.clone(),
                     type_name: None,
                     data: None,
+                    analysis: None,
                 };
                 let embed_text = slice.embed_text;
                 let emb = embedder.clone();
@@ -1413,6 +1415,7 @@ pub(crate) async fn store_entry_core(
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
+            analysis: None,
         };
         let text = request.text.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -1451,6 +1454,7 @@ pub(crate) async fn store_entry_core(
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
+            analysis: None,
         };
         tokio::task::spawn_blocking(move || -> Result<()> {
             let embedding = embedder.embed(&item.text)?;
@@ -2279,6 +2283,7 @@ async fn update_item(
             path: new_path,
             type_name: type_override.or(existing.type_name),
             data: data_override.or(existing.data),
+            analysis: existing.analysis,
         };
         let embedding = embedder.embed(&item.text)?;
         store.upsert_item(item.clone(), &embedding)?;
@@ -2535,6 +2540,7 @@ async fn llm_rechunk_item(
                 path: parent_path.clone(),
                 type_name: None,
                 data: None,
+                analysis: None,
             };
             let embedding = embedder.embed(&text)?;
             store.upsert_item(record, &embedding)?;
