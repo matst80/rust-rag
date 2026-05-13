@@ -3,7 +3,7 @@
 > **Documentation**
 > How the product is organized, which routes matter, and how humans should move through search, entries, and graph exploration.
 
-rust-rag is a local retrieval backend with a Next.js frontend, an Axum HTTP API, SQLite/sqlite-vec storage, and an MCP stdio bridge for agent clients.
+rust-rag is a local retrieval backend with a Next.js frontend, an Axum HTTP API, SQLite/sqlite-vec storage, and a direct SSE MCP surface.
 
 The web application is protected with Zitadel-backed sign-in. The Next.js server completes the authorization-code exchange, stores a signed session cookie, and proxies browser traffic to the Rust API with an internal API key.
 
@@ -12,7 +12,7 @@ The web application is protected with Zitadel-backed sign-in. The Next.js server
 - Search entries semantically from the web UI.
 - Browse and edit stored entries.
 - Visualize manual and semantic graph relationships.
-- Connect MCP-compatible agents to the mcp-stdio bridge.
+- Connect MCP-compatible agents to the in-process `/mcp` surface.
 
 ## Human Routes
 
@@ -47,10 +47,10 @@ Direct HTTP and MCP access can use configured API keys via `x-api-key` or `Autho
 - Entries are stored with `id`, `text`, `metadata`, and `source_id`.
 - Semantic search uses vector distance over stored embeddings.
 - Graph edges can be manual or similarity-derived.
-- The MCP bridge exposes the same underlying capabilities to agents.
+- The direct SSE MCP surface exposes the same underlying capabilities to agents.
 
 ## Links
 
 - GitHub: https://github.com/matst80/rust-rag
 - Releases: https://github.com/matst80/rust-rag/releases
-- MCP README: https://github.com/matst80/rust-rag/blob/main/mcp-stdio/README.md
+

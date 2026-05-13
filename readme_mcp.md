@@ -1,12 +1,6 @@
 # MCP Access for rust-rag
 
-rust-rag speaks the Model Context Protocol in two ways:
-
-1. **`mcp-stdio`** — a standalone bridge binary that MCP clients launch as a
-   subprocess. It talks to the rust-rag HTTP API over the network.
-2. **`/mcp` in-process** — a streamable-HTTP transport mounted directly on the
-   Axum server. MCP clients that support remote servers (Claude Code, etc.)
-   connect to it straight, no bridge process required.
+rust-rag speaks the Model Context Protocol via **`/mcp` in-process** — a streamable-HTTP transport mounted directly on the Axum server. MCP clients that support remote servers (Claude Code, etc.) connect to it straight, no bridge process required.
 
 Both surfaces authenticate with long-lived bearer tokens minted through an
 OAuth 2.0 device authorization grant (RFC 8628). Tokens are bound to a Zitadel
@@ -16,7 +10,7 @@ identity, stored hashed, and revocable per-token from the UI.
 
 - [Overview](#overview)
 - [Server configuration](#server-configuration)
-- [Client: `mcp-stdio login`](#client-mcp-stdio-login)
+
 - [Client: remote MCP at `/mcp`](#client-remote-mcp-at-mcp)
 - [Auth endpoints](#auth-endpoints)
 - [Frontend routes](#frontend-routes)
@@ -38,7 +32,7 @@ identity, stored hashed, and revocable per-token from the UI.
      │ Authorization: Bearer rag_mcp_…
      ▼
 ┌────────────────┐
-│ /mcp (in-proc) │   or   mcp-stdio bridge → HTTP → rust-rag
+│ /mcp (in-proc) │
 │  streamable-   │
 │  HTTP server   │
 └────────────────┘
@@ -67,38 +61,6 @@ cookie minted in Next.js validates directly on the Axum side — that's how the
 device-approval handshake flows from browser → Next → backend without a second
 round of OAuth.
 
-## Client: `mcp-stdio login`
-
-The bridge binary now has a `login` subcommand that runs the full device
-grant and writes a token locally.
-
-```bash
-mcp-stdio login \
-  --base-url https://rag.example.com \
-  --client-name "claude-code on laptop"
-# ▸ Open this URL to approve:
-# ▸   https://rag.example.com/auth/device?user_code=XRTY-ABCD
-# ▸ Waiting for approval (expires in 600s, polling every 5s)...
-# ▸ Approved. Token id 01HX… written to /Users/you/.config/rust-rag/mcp-token
-```
-
-Flags:
-
-- `--base-url <url>` — override `RAG_MCP_API_BASE_URL`.
-- `--token-path <path>` — override `RAG_MCP_TOKEN_PATH` / the default location.
-- `--client-name <name>` — label attached to the token (shown in the UI).
-
-Default token path resolution:
-
-1. `$RAG_MCP_TOKEN_PATH` if set.
-2. `$XDG_CONFIG_HOME/rust-rag/mcp-token`.
-3. `$HOME/.config/rust-rag/mcp-token`.
-
-The file is written mode `0600`.
-
-On normal startup, if `RAG_MCP_AUTH_BEARER` is unset, `mcp-stdio` reads the
-token file automatically. Existing `RAG_MCP_AUTH_BEARER=...` / `RAG_MCP_HEADERS`
-setups keep working — only the fallback is new.
 
 ## Client: remote MCP at `/mcp`
 
@@ -141,9 +103,7 @@ curl -N https://rag.example.com/mcp \
 The first response includes an `Mcp-Session-Id` header; subsequent
 requests must echo it back so rmcp can route to the right in-process session.
 
-### Tool surface
-
-`/mcp` exposes the same tools as the stdio bridge:
+`/mcp` exposes the core tool surface:
 
 - **Core**: `health_status`, `store_entry`, `search_entries`, `get_entry`.
 - **Admin**: `list_categories`, `list_items`, `update_item`, `delete_item`.
@@ -151,8 +111,6 @@ requests must echo it back so rmcp can route to the right in-process session.
   `rebuild_graph`, `create_manual_edge`, `delete_graph_edge`.
 
 Implementation lives in `src/mcp.rs` and reuses the same
-`store_entry_core` / `search_core` helpers the HTTP handlers call, so
-semantics are identical. No extra hop through localhost.
 
 ## Auth endpoints
 
@@ -290,9 +248,6 @@ checker doesn't.
 - `src/mcp.rs` — in-process MCP server + `streamable_http_service()`.
 - `src/db/mod.rs` — `mcp_tokens`, `device_auth_requests` schema + `AuthStore`
   trait.
-- `src/config/mod.rs` — new env knobs.
-- `mcp-stdio/src/main.rs`, `mcp-stdio/src/login.rs` — `login` subcommand +
-  token file fallback.
 - `frontend/app/auth/device/`, `frontend/app/auth/tokens/`,
   `frontend/components/auth/` — Next.js UI.
 - `frontend/app/api/device/` — session-aware proxies to the backend device-

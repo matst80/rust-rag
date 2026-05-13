@@ -1,7 +1,7 @@
 //! In-process Model Context Protocol server.
 //!
-//! This mounts the same tool surface as the `mcp-stdio` bridge, but talks to
-//! the store and embedder directly instead of round-tripping through HTTP.
+//! This mounts the tool surface directly on the server, talking to
+//! the store and embedder instead of round-tripping through HTTP.
 //! The `StreamableHttpService` service is nested into the main axum router at
 //! `/mcp`, gated by the same bearer-token middleware that protects every
 //! other write path.

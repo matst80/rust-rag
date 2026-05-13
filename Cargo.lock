@@ -2313,25 +2313,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-stdio"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum 0.8.9",
- "openssl",
- "openssl-sys",
- "reqwest 0.12.28",
- "rmcp",
- "rust-rag",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

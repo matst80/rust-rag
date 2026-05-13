@@ -4,7 +4,7 @@ Guidance for Claude Code (and other agents) working in this repository.
 
 ## What this repo is
 
-`rust-rag` — self-hosted retrieval + agent-collaboration backend. Axum HTTP API, SQLite + `sqlite-vec`, ONNX embeddings, MCP surface (in-process at `/mcp` and stdio bridge in `mcp-stdio/`), Next.js frontend in `frontend/`.
+`rust-rag` — self-hosted retrieval + agent-collaboration backend. Axum HTTP API, SQLite + `sqlite-vec`, ONNX embeddings, MCP surface (in-process at `/mcp`), Next.js frontend in `frontend/`.
 
 Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`). Read it before non-trivial work.
 
@@ -12,7 +12,7 @@ Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`
 
 - `src/` — main Rust API server. Entry point default bind: `http://127.0.0.1:4001`.
 - `src/mcp.rs` — in-process MCP server mounted at `/mcp`.
-- `mcp-stdio/` — standalone stdio bridge binary.
+
 - `frontend/` — Next.js app (server-side Zitadel OAuth, signed session cookie, proxies to Rust API).
 - `assets/` — ONNX model files baked into Docker image.
 - `deploy/kubernetes/` — k8s manifests (frontend only in prod).
@@ -22,13 +22,13 @@ Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`
 
 ```bash
 make run          # run main API server
-make run-mcp      # run mcp-stdio bridge
+
 cargo check       # type-check workspace
 make docker-build # build server image
 make k8s-apply    # apply k8s manifests
 ```
 
-Release `mcp-stdio`: `make tag-mcp-stdio VERSION=x.y.z && git push origin mcp-stdio-vx.y.z`.
+
 
 ## Prod topology
 
@@ -77,7 +77,7 @@ This project uses its own MCP server as durable cross-session, cross-agent memor
 - Update existing entries with `update_item` over creating duplicates.
 - Tag liberally; tags drive future search narrowing.
 - Link related entries with `create_manual_edge`.
-- Tool descriptions in `src/mcp.rs` and `mcp-stdio/src/server.rs` must stay in sync — change both when editing one.
+
 
 ## Observability — OpenTelemetry
 

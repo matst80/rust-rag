@@ -1763,8 +1763,8 @@ mod tests {
 
         assert_eq!(payload["model"], Value::String("gpt-test".to_owned()));
         assert_eq!(payload["stream"], Value::Bool(true));
-        assert_eq!(payload["tools"].as_array().map(Vec::len), Some(1));
-        assert_eq!(payload.get("tool_choice"), None);
+        assert_eq!(payload["tools"].as_array().map(Vec::len), Some(15));
+        assert_eq!(payload.get("tool_choice").map(|v| v.clone()), Some(serde_json::json!({ "type": "function", "function": { "name": "client__open_modal" } })));
     }
 
     #[test]

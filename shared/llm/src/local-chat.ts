@@ -1,4 +1,5 @@
 import { getLlmClient, type ProfileKey } from "./client"
+import { parseToolCall, hideToolTokens } from "./parser"
 
 export interface LocalChatMessage {
   role: "user" | "assistant"
@@ -49,30 +50,6 @@ Rules:
 - After getting tool results, you may call another tool or give a final answer.
 - Final answer: plain markdown, no tool block.
 - Be brief. 3-6 sentences unless asked for detail.`
-}
-
-interface ToolCallParseResult {
-  before: string
-  call: { name: string; args: Record<string, unknown> } | null
-}
-
-function parseToolCall(text: string): ToolCallParseResult {
-  const re = /```tool\s*([\s\S]*?)```/i
-  const m = text.match(re)
-  if (!m) return { before: text, call: null }
-  const before = text.slice(0, m.index ?? 0)
-  try {
-    const json = JSON.parse(m[1].trim())
-    if (json && typeof json.name === "string") {
-      return {
-        before,
-        call: { name: json.name, args: json.args ?? {} },
-      }
-    }
-  } catch {
-    // not a tool call
-  }
-  return { before: text, call: null }
 }
 
 function buildPrompt(
@@ -127,7 +104,7 @@ export async function runLocalChat({
       prompt,
       (partial) => {
         lastPartial = partial
-        const visible = partial.split("```tool")[0]
+        const visible = hideToolTokens(partial)
         onUpdate({
           partialAnswer: (scratch + visible).trim(),
           toolCalls: toolLog,
