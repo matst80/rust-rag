@@ -384,7 +384,8 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
         );
         let _g = span.enter();
         let started = std::time::Instant::now();
-        match run_analysis(&state, &text, Some(&source_id), Some(&item_id)).await {
+        let neighbor_source = if state.analysis.cross_source { None } else { Some(source_id.as_str()) };
+        match run_analysis(&state, &text, neighbor_source, Some(&item_id)).await {
             Ok(analysis) => {
                 let model = state
                     .analysis

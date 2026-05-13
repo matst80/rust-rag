@@ -2051,7 +2051,8 @@ async fn reanalyze_item(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
 
-    let analysis = run_analysis(&state, &item.text, Some(&item.source_id), Some(&item.id))
+    let neighbor_source = if state.analysis.cross_source { None } else { Some(item.source_id.as_str()) };
+    let analysis = run_analysis(&state, &item.text, neighbor_source, Some(&item.id))
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     let model = state
