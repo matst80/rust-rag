@@ -505,7 +505,11 @@ export function AgentChat() {
 		if (!spawnDialog) return
 		const path = spawnDialog.projectPath.trim()
 		if (!path) return
-		const envelope: AcpEnvelope = { type: "spawn_session", project_path: path }
+		const envelope: AcpEnvelope = {
+			type: "spawn_session",
+			project_path: path,
+			instance: activeInstance,
+		}
 		const cmd = spawnDialog.agentCommand.trim()
 		if (cmd) envelope.agent_command = cmd
 		send(envelope)
@@ -595,33 +599,48 @@ export function AgentChat() {
 						</button>
 					</div>
 				</div>
-				{instances.length > 0 && (
-					<div className="border-b border-border px-3 py-2">
-						<label
-							htmlFor="acp-instance-select"
-							className="block font-mono text-[9px] font-bold uppercase tracking-[2px] text-muted-foreground mb-1"
-						>
-							ACP instance
-						</label>
-						<select
-							id="acp-instance-select"
-							aria-label="ACP instance"
-							value={activeInstance ?? ""}
-							onChange={(e) => void selectInstance(e.target.value)}
-							className="w-full rounded-md border border-input bg-background px-2 py-1 text-xs"
-						>
-							{!activeInstance && <option value="">— pick instance —</option>}
+				{instances.length > 1 && (
+					<div className="border-b border-border bg-muted/30 px-3 py-2">
+						<div className="flex flex-col gap-1">
 							{instances.map((inst) => {
 								const w = workers.find((w) => w.instance_id === inst.name)
-								const dot = w ? (w.connected ? "●" : "○") : "·"
-								const count = w ? ` · ${w.session_count}s` : ""
+								const isSelected = activeInstance === inst.name
+								const isConnected = w?.connected ?? false
 								return (
-									<option key={inst.name} value={inst.name}>
-										{dot} {inst.name} ({inst.host}:{inst.port}){count}
-									</option>
+									<button
+										key={inst.name}
+										onClick={() => void selectInstance(inst.name)}
+										className={cn(
+											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-all",
+											isSelected
+												? "bg-primary text-primary-foreground shadow-sm"
+												: "text-muted-foreground hover:bg-muted hover:text-foreground",
+										)}
+									>
+										<div className="flex items-center gap-2 truncate">
+											<div
+												className={cn(
+													"size-1.5 rounded-full",
+													isConnected
+														? isSelected
+															? "bg-primary-foreground"
+															: "bg-emerald-500"
+														: "bg-muted-foreground/30",
+												)}
+											/>
+											<span className="truncate font-bold uppercase tracking-wider">
+												{inst.name}
+											</span>
+										</div>
+										{w && w.session_count > 0 && (
+											<span className={cn("text-[10px] opacity-70", isSelected ? "text-primary-foreground" : "text-muted-foreground")}>
+												{w.session_count}s
+											</span>
+										)}
+									</button>
 								)
 							})}
-						</select>
+						</div>
 					</div>
 				)}
 				{conn.error && (
@@ -821,6 +840,15 @@ export function AgentChat() {
 							>
 								<X className="size-4" />
 							</button>
+						</div>
+
+						<div className="mb-5 flex items-center justify-between rounded border border-border/50 bg-muted/40 px-2 py-1.5 text-[10px]">
+							<span className="font-bold uppercase tracking-wider text-muted-foreground">
+								Target Instance
+							</span>
+							<span className="font-mono font-bold text-primary">
+								{activeInstance || "—"}
+							</span>
 						</div>
 
 						<div className="mb-3 relative">
