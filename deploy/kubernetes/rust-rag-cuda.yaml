@@ -55,7 +55,7 @@ data:
   RAG_RERANKER_ENABLED: "true"
   RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-base/model_fp16.onnx"
   RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-base/tokenizer.json"
-  RAG_RERANKER_TOP_N: "15"
+  RAG_RERANKER_TOP_N: "25"
   ## Lowered from 512 → 256: cross-encoder attention is O(seq_len²), so
   ## halving the cap is a 4× speedup. Chunks are 500 bge-m3 tokens; the
   ## reranker tokenizer is XLM-R, similar count. With chunk_text fed to
@@ -95,7 +95,7 @@ data:
   ## `POST /admin/ontology/run/{item_id}` (admin auth).
   RAG_ONTOLOGY_ENABLED: "true"
   RAG_ONTOLOGY_CONFIDENCE_THRESHOLD: "0.5"
-  RAG_ONTOLOGY_BATCH_SIZE: "5"
+  RAG_ONTOLOGY_BATCH_SIZE: "2"
   RAG_ONTOLOGY_INTERVAL_SECS: "60"
   RAG_ONTOLOGY_NEIGHBOR_COUNT: "10"
   RAG_ONTOLOGY_TARGET_PREVIEW_CHARS: "800"
