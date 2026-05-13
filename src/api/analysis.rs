@@ -518,60 +518,95 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                         return;
                     }
                 };
-                if let Err(e) = state.store.update_item_analysis(&item_id, &json, &model) {
+                // All VectorStore calls below are sync; on Postgres they call
+                // `runtime.block_on()` internally, which PANICS when invoked
+                // from a tokio runtime worker thread (i.e. from inside this
+                // `tokio::spawn` future). Wrap in `spawn_blocking` so the
+                // sync calls execute on the blocking pool. Without this, the
+                // first `update_item_analysis` panics silently and nothing
+                // gets persisted — even though `run_analysis` succeeded.
+                let store = state.store.clone();
+                let id_owned = item_id.clone();
+                let json_owned = json.clone();
+                let model_owned = model.clone();
+                let persist = tokio::task::spawn_blocking(move || {
+                    store.update_item_analysis(&id_owned, &json_owned, &model_owned)
+                })
+                .await;
+                if let Err(e) = persist.unwrap_or_else(|e| Err(anyhow!("persist join: {e}"))) {
                     tracing::warn!(error=%e, "analysis persist failed");
                     span.record("outcome", "persist_err");
                 } else {
                     // Promote LLM-derived tags onto the item's metadata.tags
                     // so they participate in list/search filtering. Best-effort.
                     if !analysis.tags.is_empty() {
-                        if let Err(e) = state.store.merge_item_tags(&item_id, &analysis.tags) {
+                        let store = state.store.clone();
+                        let id_owned = item_id.clone();
+                        let tags = analysis.tags.clone();
+                        let res = tokio::task::spawn_blocking(move || {
+                            store.merge_item_tags(&id_owned, &tags)
+                        })
+                        .await;
+                        if let Err(e) = res.unwrap_or_else(|e| Err(anyhow!("tag merge join: {e}"))) {
                             tracing::warn!(error=%e, "tag merge failed");
                         }
                     }
 
                     // Create graph edges for high-quality analysis verdicts.
                     for verdict in &analysis.verdicts {
-                        if verdict.relation == "unrelated" {
-                            let input = ManualEdgeInput {
-                                from_item_id: item_id.clone(),
-                                to_item_id: verdict.target_id.clone(),
-                                relation: Some(std::borrow::Cow::Borrowed("unrelated")),
-                                weight: -1.0,
-                                directed: false,
-                                metadata: serde_json::json!({
-                                    "reason": verdict.reason,
-                                    "confidence": verdict.confidence,
-                                    "source": "analysis"
-                                }),
-                            };
-                            if let Err(e) = state.store.add_manual_edge(input) {
-                                tracing::warn!(error=%e, target_id=%verdict.target_id, "failed to create anti-edge");
-                            }
-                        } else if verdict.relation != "unrelated" {
-                            // These are "proven" relationships from the analysis pass (agrees, refines, supersedes, contradicts, duplicates).
-                            // We create a directed edge and mark it as confirmed so it shows up in neighbors.
-                            let input = ManualEdgeInput {
-                                from_item_id: item_id.clone(),
-                                to_item_id: verdict.target_id.clone(),
-                                relation: Some(std::borrow::Cow::Owned(verdict.relation.clone())),
-                                weight: verdict.confidence,
-                                directed: true,
-                                metadata: serde_json::json!({
-                                    "reason": verdict.reason,
-                                    "confidence": verdict.confidence,
-                                    "source": "analysis",
-                                    "status": "confirmed"
-                                }),
-                            };
-                            if let Err(e) = state.store.add_manual_edge(input) {
-                                tracing::warn!(
-                                    error = %e,
-                                    target_id = %verdict.target_id,
-                                    relation = %verdict.relation,
-                                    "failed to create analysis edge"
-                                );
-                            }
+                        let (input, label) = if verdict.relation == "unrelated" {
+                            (
+                                ManualEdgeInput {
+                                    from_item_id: item_id.clone(),
+                                    to_item_id: verdict.target_id.clone(),
+                                    relation: Some(std::borrow::Cow::Borrowed("unrelated")),
+                                    weight: -1.0,
+                                    directed: false,
+                                    metadata: serde_json::json!({
+                                        "reason": verdict.reason,
+                                        "confidence": verdict.confidence,
+                                        "source": "analysis"
+                                    }),
+                                },
+                                "anti-edge",
+                            )
+                        } else {
+                            // "Proven" relationships from the analysis pass
+                            // (agrees / refines / supersedes / contradicts / duplicates).
+                            // Directed + confirmed so the graph UI surfaces them.
+                            (
+                                ManualEdgeInput {
+                                    from_item_id: item_id.clone(),
+                                    to_item_id: verdict.target_id.clone(),
+                                    relation: Some(std::borrow::Cow::Owned(verdict.relation.clone())),
+                                    weight: verdict.confidence,
+                                    directed: true,
+                                    metadata: serde_json::json!({
+                                        "reason": verdict.reason,
+                                        "confidence": verdict.confidence,
+                                        "source": "analysis",
+                                        "status": "confirmed"
+                                    }),
+                                },
+                                "analysis edge",
+                            )
+                        };
+                        let store = state.store.clone();
+                        let target = verdict.target_id.clone();
+                        let relation = verdict.relation.clone();
+                        let res = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
+                            .await;
+                        if let Err(e) = res
+                            .map_err(|e| anyhow!("edge join: {e}"))
+                            .and_then(|r| r.map(|_| ()))
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                target_id = %target,
+                                relation = %relation,
+                                kind = label,
+                                "failed to create graph edge"
+                            );
                         }
                     }
                     tracing::info!(

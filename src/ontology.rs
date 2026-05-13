@@ -358,17 +358,49 @@ async fn process_item(
         tokio::task::spawn_blocking(move || store_clone.list_ontology_predicates(Some(&source_id)))
             .await??;
 
+    // Pre-fetch existing ontology-worker edges involving this target so we
+    // can skip candidates the worker has already evaluated. Saves LLM tokens
+    // and prevents the model from re-asserting (potentially differently) on
+    // pairs that already have a verdict. We over-fetch a bit (search returns
+    // neighbor_count*2) so the filter has room to drop dupes without
+    // shrinking the candidate list too much.
+    let target_id_for_edges = item.id.clone();
+    let store_clone = store.clone();
+    let known_pairs: std::collections::HashSet<String> =
+        tokio::task::spawn_blocking(move || -> Result<std::collections::HashSet<String>> {
+            let edges = store_clone
+                .list_graph_edges(Some(&target_id_for_edges), Some(crate::db::GraphEdgeType::Manual))?;
+            let mut out = std::collections::HashSet::new();
+            for e in edges {
+                if e.metadata.get("source").and_then(|v| v.as_str()) != Some("ontology_worker") {
+                    continue;
+                }
+                let other = if e.from_item_id == target_id_for_edges {
+                    e.to_item_id
+                } else {
+                    e.from_item_id
+                };
+                out.insert(other);
+            }
+            Ok(out)
+        })
+        .await??;
+
     let text = item.text.clone();
     let item_id = item.id.clone();
     let store_clone = store.clone();
     let svc = embedder_svc;
     let neighbor_count = cfg.neighbor_count;
+    let known_pairs_clone = known_pairs.clone();
     let neighbors = tokio::task::spawn_blocking(move || -> Result<Vec<crate::db::SearchHit>> {
         let embedding = svc.embed(&text)?;
-        let hits = store_clone.search(&embedding, neighbor_count + 1, None, None)?;
+        // Over-fetch so we can drop already-evaluated pairs without
+        // collapsing the candidate set below neighbor_count.
+        let hits = store_clone.search(&embedding, neighbor_count * 2 + 1, None, None)?;
         Ok(hits
             .into_iter()
             .filter(|h| h.id != item_id)
+            .filter(|h| !known_pairs_clone.contains(&h.id))
             .take(neighbor_count)
             .collect())
     })
@@ -376,6 +408,13 @@ async fn process_item(
 
     let neighbor_ids: Vec<String> = neighbors.iter().map(|n| n.id.clone()).collect();
     let valid_predicates: Vec<String> = predicates.iter().map(|p| p.name.clone()).collect();
+    if !known_pairs.is_empty() {
+        info!(
+            item_id = %item.id,
+            already_evaluated = known_pairs.len(),
+            "ontology worker: skipping candidates with existing ontology edges to target"
+        );
+    }
 
     if neighbors.is_empty() {
         report.items_skipped_no_neighbors += 1;

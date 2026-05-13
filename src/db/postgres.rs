@@ -158,6 +158,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_ontology_predicates",
         include_str!("../../migrations/0009_ontology_predicates.sql"),
     ),
+    (
+        "0010_documents_ontology_status",
+        include_str!("../../migrations/0010_documents_ontology_status.sql"),
+    ),
+    (
+        "0011_ontology_edge_dedup",
+        include_str!("../../migrations/0011_ontology_edge_dedup.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -1441,19 +1449,15 @@ impl VectorStore for PostgresVectorStore {
         );
         let pool = self.pool.clone();
         let relation_owned = input.relation.map(|r| r.into_owned());
-        let record = GraphEdgeRecord {
-            id: edge_id.clone(),
-            from_item_id: input.from_item_id.clone(),
-            to_item_id: input.to_item_id.clone(),
-            edge_type: GraphEdgeType::Manual,
-            relation: relation_owned.clone(),
-            weight: input.weight,
-            directed: input.directed,
-            metadata: input.metadata.clone(),
-            created_at: timestamp,
-            updated_at: timestamp,
-        };
-        self.block(async move {
+        // Detect ontology-worker source so we can de-dup against the partial
+        // unique index from migration 0011. Other manual edges (human curator)
+        // are not covered by that index and always insert fresh.
+        let from_ontology = input
+            .metadata
+            .get("source")
+            .and_then(|v| v.as_str())
+            == Some("ontology_worker");
+        let record = self.block(async move {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
             // FK in the schema enforces both endpoints exist; surface a
@@ -1466,25 +1470,77 @@ impl VectorStore for PostgresVectorStore {
                     anyhow::bail!("item {endpoint} not found");
                 }
             }
-            tx.execute(
-                "INSERT INTO graph_edges \
-                     (id, from_item_id, to_item_id, edge_type, relation, weight, \
-                      directed, metadata, created_at, updated_at) \
-                 VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8)",
-                &[
-                    &edge_id,
-                    &input.from_item_id,
-                    &input.to_item_id,
-                    &relation_owned,
-                    &input.weight,
-                    &input.directed,
-                    &input.metadata,
-                    &timestamp,
-                ],
-            )
-            .await?;
+            // For ontology-worker edges, an existing row for the same
+            // (from, to, relation) tuple is a no-op — keep the original
+            // verdict (and any HITL approval/rejection state). Return the
+            // existing record so callers can log it consistently.
+            let inserted_row = if from_ontology {
+                tx.query_opt(
+                    "INSERT INTO graph_edges \
+                         (id, from_item_id, to_item_id, edge_type, relation, weight, \
+                          directed, metadata, created_at, updated_at) \
+                     VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8) \
+                     ON CONFLICT (from_item_id, to_item_id, relation) \
+                         WHERE edge_type = 'manual' AND metadata->>'source' = 'ontology_worker' \
+                     DO NOTHING \
+                     RETURNING id, from_item_id, to_item_id, edge_type, relation, weight, \
+                               directed, metadata, created_at, updated_at",
+                    &[
+                        &edge_id,
+                        &input.from_item_id,
+                        &input.to_item_id,
+                        &relation_owned,
+                        &input.weight,
+                        &input.directed,
+                        &input.metadata,
+                        &timestamp,
+                    ],
+                )
+                .await?
+            } else {
+                Some(
+                    tx.query_one(
+                        "INSERT INTO graph_edges \
+                             (id, from_item_id, to_item_id, edge_type, relation, weight, \
+                              directed, metadata, created_at, updated_at) \
+                         VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8) \
+                         RETURNING id, from_item_id, to_item_id, edge_type, relation, weight, \
+                                   directed, metadata, created_at, updated_at",
+                        &[
+                            &edge_id,
+                            &input.from_item_id,
+                            &input.to_item_id,
+                            &relation_owned,
+                            &input.weight,
+                            &input.directed,
+                            &input.metadata,
+                            &timestamp,
+                        ],
+                    )
+                    .await?,
+                )
+            };
+            let final_row = match inserted_row {
+                Some(row) => row,
+                None => {
+                    // Conflict — fetch and return the existing edge so the
+                    // caller's logging stays meaningful.
+                    tx.query_one(
+                        "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                                directed, metadata, created_at, updated_at \
+                         FROM graph_edges \
+                         WHERE edge_type = 'manual' \
+                           AND metadata->>'source' = 'ontology_worker' \
+                           AND from_item_id = $1 AND to_item_id = $2 AND relation IS NOT DISTINCT FROM $3",
+                        &[&input.from_item_id, &input.to_item_id, &relation_owned],
+                    )
+                    .await
+                    .context("fetching existing ontology edge after ON CONFLICT")?
+                }
+            };
+            let existing = row_to_graph_edge(&final_row)?;
             tx.commit().await?;
-            Ok(())
+            Ok(existing)
         })?;
         Ok(record)
     }
@@ -1561,15 +1617,41 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn get_items_pending_ontology(&self, _limit: usize) -> Result<Vec<ItemRecord>> {
-        // Ontology worker is disabled in the Postgres backend until the
-        // status column is ported. Returning empty stops the worker from
-        // consuming cycles.
-        Ok(Vec::new())
+    fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>> {
+        let pool = self.pool.clone();
+        let limit = limit as i64;
+        self.block(async move {
+            let client = pool.get().await?;
+            // Mirrors the SQLite path: oldest pending rows first, capped by limit.
+            // Selects the same column set as row_to_item so a single helper handles both.
+            let rows = client
+                .query(
+                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data \
+                     FROM documents \
+                     WHERE ontology_status = 'pending' \
+                     ORDER BY created_at ASC \
+                     LIMIT $1",
+                    &[&limit],
+                )
+                .await?;
+            rows.iter().map(row_to_item).collect()
+        })
     }
 
-    fn mark_ontology_status(&self, _id: &str, _status: &str) -> Result<()> {
-        Ok(())
+    fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let status = status.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            client
+                .execute(
+                    "UPDATE documents SET ontology_status = $1 WHERE id = $2",
+                    &[&status, &id],
+                )
+                .await?;
+            Ok(())
+        })
     }
 
     fn list_ontology_predicates(&self, source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
