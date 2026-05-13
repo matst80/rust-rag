@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils"
 import { computeCommunities, getNodeTitle } from "./clusters"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { EdgeReviewList } from "./edge-review-list"
+import { RelationItem } from "./relation-item"
 
 function ExpandableMarkdown({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false)
@@ -652,44 +653,59 @@ function GraphViewContent() {
               </div>
             ) : selectedEntry ? (
               <div className="flex flex-col gap-8 animate-in fade-in slide-in-from-right-8 duration-700">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">Metadata Insight</h3>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-8 rounded-full hover:bg-primary/5"
-                    onClick={() => setSelectedNode(null)}
-                  >
-                    <X className="size-4" />
-                  </Button>
-                </div>
-
-                <div className="space-y-2">
+                {selectedEntry.analysis && (<div className="space-y-2">
                   <h4 className="text-xl font-bold tracking-tight">{selectedEntry.id}</h4>
-                  <Badge variant="indigo" className="text-[9px] uppercase font-bold px-2 py-0.5 tracking-widest">
-                    {selectedEntry.source_id}
-                  </Badge>
                 </div>
+                )}
 
-                <div className="bg-background/40 backdrop-blur-sm rounded-3xl border border-muted-foreground/10 p-5 shadow-xl">
-                  <ExpandableMarkdown content={selectedEntry.text} />
-                </div>
+                <Badge variant="indigo" className="text-[9px] uppercase font-bold px-2 py-0.5 tracking-widest">
+                  {selectedEntry.source_id}
+                </Badge>
 
-                <div className="flex gap-2">
+                <ExpandableMarkdown content={selectedEntry.text} />
+
+
+                {selectedEntry.id !== centerNode && (
                   <Button
-                    className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest bg-secondary text-secondary-foreground hover:bg-secondary/80 shadow-md"
-                    onClick={() => router.push(`/entries/${encodeURIComponent(selectedEntry.id)}`)}
-                  >
-                    View Hub
-                  </Button>
-                  <Button
-                    className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest shadow-xl shadow-primary/10"
+                    className="w-full h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest shadow-xl shadow-primary/10 animate-in fade-in slide-in-from-top-2 duration-500"
                     onClick={handleCenterSelectedNode}
-                    disabled={selectedEntry.id === centerNode}
                   >
                     <Compass className="size-4 mr-2" />
-                    Focus
+                    Focus Node in Graph
                   </Button>
+                )}
+
+                <Button
+                  className="w-full h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest bg-secondary text-secondary-foreground hover:bg-secondary/80 shadow-md"
+                  onClick={() => router.push(`/entries/${encodeURIComponent(selectedEntry.id)}`)}
+                >
+                  View Hub
+                </Button>
+
+                <div className="flex flex-col gap-4">
+                  <h4 className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Network Relations</h4>
+                  {selectedEntryEdges.length === 0 ? (
+                    <p className="text-xs text-muted-foreground/50 font-medium italic">
+                      No visible connections at current abstraction level.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {selectedEntryEdges.map((edge) => {
+                        const neighborId =
+                          edge.source_id === selectedEntry.id ? edge.target_id : edge.source_id
+                        const neighborEntry = graphEntries.find((e) => e.id === neighborId)
+                        return (
+                          <RelationItem
+                            key={edge.id}
+                            edge={edge}
+                            neighborId={neighborId}
+                            neighborEntry={neighborEntry}
+                            onDelete={handleDeleteEdge}
+                          />
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-col gap-6 pt-8 border-t border-primary/5">
@@ -834,61 +850,6 @@ function GraphViewContent() {
                     </Button>
                   </div>
                 </div>
-
-                <div className="flex flex-col gap-4">
-                  <h4 className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">Network Relations</h4>
-                  {selectedEntryEdges.length === 0 ? (
-                    <p className="text-xs text-muted-foreground/50 font-medium italic">
-                      No visible connections at current abstraction level.
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      {selectedEntryEdges.map((edge) => {
-                        const neighborId =
-                          edge.source_id === selectedEntry.id ? edge.target_id : edge.source_id
-                        const neighborEntry = graphEntries.find((e) => e.id === neighborId)
-                        return (
-                          <div
-                            key={edge.id}
-                            className="group relative rounded-2xl border border-muted-foreground/10 bg-background/40 backdrop-blur-sm p-4 transition-all hover:border-primary/30 hover:bg-primary/5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] cursor-pointer"
-                            onClick={() => router.push(`/entries/${encodeURIComponent(neighborId)}`)}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <p className="font-bold text-sm text-foreground/90 leading-tight">
-                                  {neighborEntry ? getNodeTitle(neighborEntry) : neighborId}
-                                </p>
-                                <div className="flex flex-wrap items-center gap-2 mt-1.5">
-                                  <Badge variant="outline" className="text-[8px] font-black uppercase py-0 px-1.5 border-primary/20 text-primary/70 bg-primary/5">
-                                    {edge.relationship}
-                                  </Badge>
-                                  <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">
-                                    {edge.edge_type === "similarity"
-                                      ? `Dist: ${edge.distance?.toFixed(3) ?? "N/A"}`
-                                      : `Wt: ${edge.weight?.toFixed(2) ?? "N/A"}`}
-                                  </span>
-                                </div>
-                                {neighborEntry && neighborEntry.id !== getNodeTitle(neighborEntry) && (
-                                  <p className="text-[9px] text-muted-foreground/40 font-mono truncate mt-2">
-                                    {neighborId}
-                                  </p>
-                                )}
-                              </div>
-                              {edge.edge_type === "manual" ? (
-                                <div onClick={(e) => e.stopPropagation()}>
-                                  <ComboButton
-                                    onConfirm={() => handleDeleteEdge(edge.id)}
-                                    className="size-8 rounded-full opacity-0 group-hover:opacity-100"
-                                  />
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
               </div>
             ) : selectedEdgeData ? (
               <div className="flex flex-col gap-8 animate-in fade-in slide-in-from-right-8 duration-700">
@@ -1009,7 +970,10 @@ function GraphViewContent() {
                 <div className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]" />
                 <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-foreground/80">Ontology Review</h4>
               </div>
-              <EdgeReviewList onReviewComplete={mutateNeighborhood} />
+              <EdgeReviewList
+                onReviewComplete={mutateNeighborhood}
+                onFocusNode={handleCenterNodeChange}
+              />
             </div>
           </TabsContent>
         </Tabs>

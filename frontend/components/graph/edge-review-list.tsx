@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Check, X, Info, Network, Zap, ShieldCheck, Play, Loader2 } from "lucide-react"
+import { Check, X, Info, Network, Zap, ShieldCheck, Play, Loader2, Compass } from "lucide-react"
 import { api, OntologyRunReport } from "@/lib/api/client"
 import { Edge } from "@/lib/api/types"
 import { Button } from "@/components/ui/button"
@@ -15,22 +15,24 @@ import { cn } from "@/lib/utils"
 
 interface EdgeReviewListProps {
   onReviewComplete?: () => void
+  onFocusNode?: (nodeId: string) => void
 }
 
-export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
+export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewListProps) {
   const [edges, setEdges] = React.useState<Edge[]>([])
+  const [itemTitles, setItemTitles] = React.useState<Record<string, string>>({})
   const [loading, setLoading] = React.useState(true)
   const [runningBatch, setRunningBatch] = React.useState(false)
   const [runningItem, setRunningItem] = React.useState(false)
   const [itemIdInput, setItemIdInput] = React.useState("")
   const [lastRun, setLastRun] = React.useState<
     | {
-        kind: "batch" | "item"
-        target?: string
-        startedAt: number
-        elapsedMs: number
-        report: OntologyRunReport
-      }
+      kind: "batch" | "item"
+      target?: string
+      startedAt: number
+      elapsedMs: number
+      report: OntologyRunReport
+    }
     | null
   >(null)
 
@@ -53,6 +55,43 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
   React.useEffect(() => {
     fetchSuggestedEdges()
   }, [fetchSuggestedEdges])
+
+  // Fetch titles for unique IDs when edges change
+  React.useEffect(() => {
+    const fetchTitles = async () => {
+      const uniqueIds = Array.from(new Set(edges.flatMap(e => [e.source_id, e.target_id])))
+      const missingIds = uniqueIds.filter(id => !itemTitles[id])
+
+      if (missingIds.length === 0) return
+
+      const titles: Record<string, string> = { ...itemTitles }
+      await Promise.all(missingIds.map(async (id) => {
+        try {
+          const item = await api.items.get(id)
+          const meta = item.metadata ?? {}
+          const explicit = meta.title ?? meta.name ?? meta.label
+          if (typeof explicit === "string" && explicit.trim().length > 0) {
+            titles[id] = explicit.trim().slice(0, 60)
+          } else {
+            const firstLine = (item.text ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean)
+            if (firstLine) {
+              const cleaned = firstLine.replace(/^#+\s*/, "").replace(/^[-*+]\s+/, "")
+              titles[id] = cleaned.slice(0, 60) + (cleaned.length > 60 ? "…" : "")
+            } else {
+              titles[id] = id
+            }
+          }
+        } catch (e) {
+          titles[id] = id
+        }
+      }))
+      setItemTitles(titles)
+    }
+
+    if (edges.length > 0) {
+      fetchTitles()
+    }
+  }, [edges])
 
   const handleApprove = async (edge: Edge) => {
     try {
@@ -91,11 +130,10 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
     const confirmed = report.edges_committed.filter(
       (e) => e.status === "confirmed"
     ).length
-    return `${report.items_processed} item(s) processed · ${report.edges_committed.length} edge(s) (${suggested} suggested, ${confirmed} auto-confirmed)${
-      report.items_skipped_no_neighbors > 0
-        ? ` · ${report.items_skipped_no_neighbors} skipped (no neighbors)`
-        : ""
-    }`
+    return `${report.items_processed} item(s) processed · ${report.edges_committed.length} edge(s) (${suggested} suggested, ${confirmed} auto-confirmed)${report.items_skipped_no_neighbors > 0
+      ? ` · ${report.items_skipped_no_neighbors} skipped (no neighbors)`
+      : ""
+      }`
   }
 
   const handleRunBatch = async () => {
@@ -236,56 +274,119 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
               exit={{ opacity: 0, scale: 0.9, x: -20 }}
               transition={{ duration: 0.2 }}
             >
-              <Card className="overflow-hidden border-primary/10 hover:border-primary/30 transition-colors group">
-                <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 flex gap-1 items-center">
-                        <Zap className="h-3 w-3" />
-                        AI Inferred
-                      </Badge>
-                      <Badge variant="secondary" className="font-mono text-[10px]">
-                        {edge.relationship}
-                      </Badge>
-                      {edge.metadata?.confidence && (
-                        <span className="text-[10px] font-medium text-muted-foreground">
-                          {Math.round((edge.metadata.confidence as number) * 100)}% confidence
-                        </span>
-                      )}
+              <Card className="py-0 overflow-hidden border-primary/10 hover:border-primary/30 transition-all group bg-background/40 backdrop-blur-sm">
+                <div className="flex items-stretch gap-0">
+                  {/* Left Marker */}
+                  <div className={cn(
+                    "w-1 transition-colors",
+                    (edge.metadata?.confidence as number) > 0.8 ? "bg-emerald-500/50" :
+                      (edge.metadata?.confidence as number) > 0.5 ? "bg-amber-500/50" : "bg-primary/30"
+                  )} />
+                  <div className="flex-1 min-w-0 p-4">
+                    <div className="grid grid-cols-[1fr_auto] gap-4 items-start">
+                      <div className="min-w-0 space-y-4">
+                        {/* Header info */}
+                        <div className="flex items-center gap-3">
+                          <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 flex gap-1 items-center px-1.5 py-0 h-5 text-[10px] font-bold uppercase tracking-wider shrink-0">
+                            <Zap className="h-3 w-3" />
+                            AI Inferred
+                          </Badge>
+                          <span className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest truncate">
+                            Confidence: {Math.round((edge.metadata?.confidence as number || 0) * 100)}%
+                          </span>
+                        </div>
+
+                        {/* Relationship Flow - Using Grid to prevent overflow */}
+                        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                          {/* Source Node */}
+                          <div className="min-w-0 bg-muted/20 hover:bg-muted/40 rounded-lg p-2 border border-border/30 transition-colors relative group/node">
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="text-xs font-bold truncate text-foreground/90" title={itemTitles[edge.source_id] || edge.source_id}>
+                                {itemTitles[edge.source_id] || edge.source_id}
+                              </p>
+                              {onFocusNode && (
+                                <Button 
+                                  variant="ghost" 
+                                  size="icon" 
+                                  className="h-5 w-5 shrink-0 opacity-0 group-hover/node:opacity-100 transition-opacity hover:bg-primary/10"
+                                  onClick={() => onFocusNode(edge.source_id)}
+                                >
+                                  <Compass className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </div>
+                            {itemTitles[edge.source_id] && itemTitles[edge.source_id] !== edge.source_id && (
+                              <p className="text-[9px] font-mono text-muted-foreground truncate opacity-50">
+                                {edge.source_id}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Relationship Indicator */}
+                          <div className="flex flex-col items-center px-1 shrink-0">
+                            <Badge variant="secondary" className="font-mono text-[9px] px-1.5 py-0 h-4 bg-background border shadow-sm">
+                              {edge.relationship}
+                            </Badge>
+                            <div className="w-6 h-px bg-primary/20 relative mt-1">
+                              <div className="absolute right-0 top-1/2 -translate-y-1/2 size-0.5 rounded-full bg-primary/40" />
+                            </div>
+                          </div>
+
+                          {/* Target Node */}
+                          <div className="min-w-0 bg-muted/20 hover:bg-muted/40 rounded-lg p-2 border border-border/30 transition-colors relative group/node text-right">
+                            <div className="flex items-center justify-between gap-1 flex-row-reverse">
+                              <p className="text-xs font-bold truncate text-foreground/90" title={itemTitles[edge.target_id] || edge.target_id}>
+                                {itemTitles[edge.target_id] || edge.target_id}
+                              </p>
+                              {onFocusNode && (
+                                <Button 
+                                  variant="ghost" 
+                                  size="icon" 
+                                  className="h-5 w-5 shrink-0 opacity-0 group-hover/node:opacity-100 transition-opacity hover:bg-primary/10"
+                                  onClick={() => onFocusNode(edge.target_id)}
+                                >
+                                  <Compass className="h-3 w-3" />
+                                </Button>
+                              )}
+                            </div>
+                            {itemTitles[edge.target_id] && itemTitles[edge.target_id] !== edge.target_id && (
+                              <p className="text-[9px] font-mono text-muted-foreground truncate opacity-50">
+                                {edge.target_id}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Reasoning */}
+                        {edge.metadata?.reasoning && (
+                          <div className="text-[10px] text-muted-foreground italic leading-snug pl-2 border-l border-primary/20 py-0.5">
+                            &quot;{edge.metadata.reasoning as string}&quot;
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex flex-col gap-2 shrink-0 border-l border-border/40 pl-3">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-destructive hover:bg-destructive/10 rounded-full"
+                          onClick={() => handleDelete(edge.id)}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="default"
+                          className="h-8 w-8 bg-emerald-500 hover:bg-emerald-600 shadow-lg shadow-emerald-500/20 rounded-full"
+                          onClick={() => handleApprove(edge)}
+                        >
+                          <Check className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
-                    <CardTitle className="text-sm font-mono mt-2 flex items-center gap-2">
-                      <span className="text-muted-foreground truncate max-w-[120px]">{edge.source_id}</span>
-                      <Network className="h-3 w-3 text-primary/50" />
-                      <span className="truncate max-w-[120px]">{edge.target_id}</span>
-                    </CardTitle>
                   </div>
-                  <div className="flex gap-2">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8 text-destructive hover:bg-destructive/10"
-                      onClick={() => handleDelete(edge.id)}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="default"
-                      className="h-8 w-8 bg-emerald-500 hover:bg-emerald-600 shadow-lg shadow-emerald-500/20"
-                      onClick={() => handleApprove(edge)}
-                    >
-                      <Check className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  {edge.metadata?.reasoning && (
-                    <div className="mt-2 p-3 rounded-lg bg-muted/40 border border-primary/5 text-xs text-muted-foreground italic relative overflow-hidden group-hover:bg-muted/60 transition-colors">
-                      <Info className="h-3 w-3 absolute top-3 right-3 opacity-20" />
-                      &quot;{edge.metadata.reasoning as string}&quot;
-                    </div>
-                  )}
-                </CardContent>
+                </div>
               </Card>
             </motion.div>
           ))}
