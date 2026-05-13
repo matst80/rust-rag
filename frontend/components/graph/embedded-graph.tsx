@@ -158,12 +158,26 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
     for (const edge of edges) {
       seen.add(`${edge.source_id}::${edge.target_id}`)
       seen.add(`${edge.target_id}::${edge.source_id}`)
+      const relationship = edge.relationship?.toLowerCase()
+      const isUnrelated = relationship === "unrelated"
+      const isContradicts = relationship === "contradicts"
+
+      let fill: string | undefined
+      if (isUnrelated) {
+        fill = "#ef4444" // red
+      } else if (isContradicts) {
+        fill = "#f97316" // orange
+      } else if (edge.edge_type === "manual") {
+        fill = "#3b82f6" // blue
+      }
+
       out.push({
         id: edge.id,
         source: edge.source_id,
         target: edge.target_id,
         label: edge.edge_type === "similarity" ? undefined : edge.relationship,
         size: edge.edge_type === "similarity" ? 1 : 2,
+        fill,
       })
     }
     for (const d of pairwise) {

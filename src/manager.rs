@@ -1344,6 +1344,7 @@ async fn tool_assign_task(
         metadata,
         source_id: cfg.memory_source_id.clone(),
         created_at: current_millis(),
+        updated_at: current_millis(),
         path: None,
         type_name: None,
         data: None,
@@ -1485,6 +1486,7 @@ async fn tool_update_task(state: &AppState, args: &str) -> Result<String> {
         metadata,
         source_id: existing.source_id.clone(),
         created_at: existing.created_at,
+        updated_at: current_millis(),
         path: None,
         type_name: None,
         data: None,
@@ -1617,6 +1619,7 @@ async fn tool_remember(state: &AppState, cfg: &ManagerConfig, args: &str) -> Res
         metadata,
         source_id: source_id.clone(),
         created_at: current_millis(),
+        updated_at: current_millis(),
         path: None,
         type_name: None,
         data: None,
@@ -1682,6 +1685,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
         metadata: existing.metadata.clone(),
         source_id: args.source_id.clone(),
         created_at: existing.created_at,
+        updated_at: current_millis(),
         path: None,
         type_name: None,
         data: None,
@@ -1734,7 +1738,7 @@ async fn tool_search_rag(state: &AppState, args: &str) -> Result<String> {
     let source_id = args.source_id.clone();
     let hits = tokio::task::spawn_blocking(move || -> Result<_> {
         let (embedding, sparse) = embedder.embed_both(&query)?;
-        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref())
+        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref(), None)
     })
     .await??;
     let payload: Vec<Value> = hits
@@ -1799,6 +1803,7 @@ async fn recall_items(
                 &sparse,
                 limit * 2,
                 Some(&source_for_search),
+                None,
             )
         })
         .await??;

@@ -17,7 +17,7 @@
 //! from `store_entry_core` via `spawn_analysis`.
 
 use super::{ApiError, AppState};
-use crate::db::SearchHit;
+use crate::db::{ManualEdgeInput, SearchHit};
 use anyhow::{Result, anyhow};
 use axum::{Json, extract::State};
 use schemars::JsonSchema;
@@ -198,10 +198,10 @@ pub async fn run_analysis(
 
     let user_prompt = build_user_prompt(text, &neighbors);
     let started = std::time::Instant::now();
-    let content = call_llm(state, &user_prompt).await?;
+    let raw = call_llm(state, SYSTEM_PROMPT, &user_prompt).await?;
     span.record("llm_ms", started.elapsed().as_millis() as i64);
 
-    let parsed = parse_analysis(&content);
+    let parsed = parse_analysis(&raw);
     span.record("verdicts", parsed.verdicts.len());
     span.record("tags", parsed.tags.len());
     Ok(parsed)
@@ -233,6 +233,7 @@ async fn fetch_neighbors(
             &sparse,
             max_neighbors + 1,
             owned_source.as_deref(),
+            None,
         )?;
         Ok(hits
             .into_iter()
@@ -282,8 +283,7 @@ fn build_user_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
     out
 }
 
-#[tracing::instrument(name = "analysis.call_llm", skip(state, user_prompt), fields(prompt_len = user_prompt.len(), model = tracing::field::Empty, http_status = tracing::field::Empty, output_len = tracing::field::Empty))]
-async fn call_llm(state: &AppState, user_prompt: &str) -> Result<String> {
+pub(crate) async fn call_llm(state: &AppState, system_prompt: &str, user_prompt: &str) -> Result<String> {
     let cfg = &state.analysis;
     let base_url = cfg
         .base_url
@@ -304,7 +304,7 @@ async fn call_llm(state: &AppState, user_prompt: &str) -> Result<String> {
         "chat_template_kwargs": {"enable_thinking": false},
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     });
@@ -384,7 +384,8 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
         );
         let _g = span.enter();
         let started = std::time::Instant::now();
-        match run_analysis(&state, &text, Some(&source_id), Some(&item_id)).await {
+        let neighbor_source = if state.analysis.cross_source { None } else { Some(source_id.as_str()) };
+        match run_analysis(&state, &text, neighbor_source, Some(&item_id)).await {
             Ok(analysis) => {
                 let model = state
                     .analysis
@@ -409,6 +410,51 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                     if !analysis.tags.is_empty() {
                         if let Err(e) = state.store.merge_item_tags(&item_id, &analysis.tags) {
                             tracing::warn!(error=%e, "tag merge failed");
+                        }
+                    }
+
+                    // Create graph edges for high-quality analysis verdicts.
+                    for verdict in &analysis.verdicts {
+                        if verdict.relation == "unrelated" {
+                            let input = ManualEdgeInput {
+                                from_item_id: item_id.clone(),
+                                to_item_id: verdict.target_id.clone(),
+                                relation: Some(std::borrow::Cow::Borrowed("unrelated")),
+                                weight: -1.0,
+                                directed: false,
+                                metadata: serde_json::json!({
+                                    "reason": verdict.reason,
+                                    "confidence": verdict.confidence,
+                                    "source": "analysis"
+                                }),
+                            };
+                            if let Err(e) = state.store.add_manual_edge(input) {
+                                tracing::warn!(error=%e, target_id=%verdict.target_id, "failed to create anti-edge");
+                            }
+                        } else if verdict.relation != "unrelated" {
+                            // These are "proven" relationships from the analysis pass (agrees, refines, supersedes, contradicts, duplicates).
+                            // We create a directed edge and mark it as confirmed so it shows up in neighbors.
+                            let input = ManualEdgeInput {
+                                from_item_id: item_id.clone(),
+                                to_item_id: verdict.target_id.clone(),
+                                relation: Some(std::borrow::Cow::Owned(verdict.relation.clone())),
+                                weight: verdict.confidence,
+                                directed: true,
+                                metadata: serde_json::json!({
+                                    "reason": verdict.reason,
+                                    "confidence": verdict.confidence,
+                                    "source": "analysis",
+                                    "status": "confirmed"
+                                }),
+                            };
+                            if let Err(e) = state.store.add_manual_edge(input) {
+                                tracing::warn!(
+                                    error = %e,
+                                    target_id = %verdict.target_id,
+                                    relation = %verdict.relation,
+                                    "failed to create analysis edge"
+                                );
+                            }
                         }
                     }
                     tracing::info!(

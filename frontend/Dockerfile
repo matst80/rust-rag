@@ -1,4 +1,4 @@
-FROM node:22-alpine AS deps
+FROM node:22-slim AS deps
 
 RUN corepack enable
 
@@ -12,7 +12,7 @@ WORKDIR /app/frontend
 
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
-FROM node:22-alpine AS builder
+FROM node:22-slim AS builder
 
 RUN corepack enable
 
@@ -31,10 +31,10 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 RUN pnpm build \
 	&& pnpm prune --prod --ignore-scripts
 
-FROM node:22-alpine AS runner
+FROM node:22-slim AS runner
 
-RUN addgroup --system --gid 1001 nodejs \
-	&& adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs \
+	&& useradd --system --uid 1001 --gid 1001 --no-create-home --shell /usr/sbin/nologin nextjs
 
 WORKDIR /app
 

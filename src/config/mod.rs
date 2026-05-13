@@ -215,6 +215,7 @@ pub struct AnalysisConfig {
     pub timeout_secs: u64,
     pub max_neighbors: usize,
     pub neighbor_threshold: f32,
+    pub cross_source: bool,
 }
 
 impl Default for AnalysisConfig {
@@ -227,6 +228,7 @@ impl Default for AnalysisConfig {
             timeout_secs: 30,
             max_neighbors: 8,
             neighbor_threshold: 0.65,
+            cross_source: true,
         }
     }
 }
@@ -234,6 +236,27 @@ impl Default for AnalysisConfig {
 impl AnalysisConfig {
     pub fn is_configured(&self) -> bool {
         self.enabled && self.base_url.is_some() && self.model.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DreamingConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub batch_size: usize,
+    pub source_id: String,
+    pub target_source_id: String,
+}
+
+impl Default for DreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 3600,
+            batch_size: 5,
+            source_id: "memory".to_owned(),
+            target_source_id: "knowledge".to_owned(),
+        }
     }
 }
 
@@ -265,6 +288,7 @@ pub struct AppConfig {
     pub manager: ManagerConfig,
     pub acp_ws: AcpWsConfig,
     pub analysis: AnalysisConfig,
+    pub dreaming: DreamingConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -324,7 +348,7 @@ impl AppConfig {
             graph_build_on_startup: parse_env("RAG_GRAPH_BUILD_ON_STARTUP", "false")?,
             graph_similarity_top_k: parse_env("RAG_GRAPH_K", "5")?,
             graph_similarity_max_distance: parse_env("RAG_GRAPH_MAX_DISTANCE", "0.75")?,
-            graph_cross_source: parse_env("RAG_GRAPH_CROSS_SOURCE", "false")?,
+            graph_cross_source: parse_env("RAG_GRAPH_CROSS_SOURCE", "true")?,
             auth: AuthConfig {
                 enabled: auth_enabled,
                 frontend_api_key,
@@ -410,6 +434,7 @@ impl AppConfig {
                 timeout_secs: parse_env("RAG_ANALYSIS_TIMEOUT_SECS", "30")?,
                 max_neighbors: parse_env("RAG_ANALYSIS_MAX_NEIGHBORS", "8")?,
                 neighbor_threshold: parse_env("RAG_ANALYSIS_NEIGHBOR_THRESHOLD", "0.65")?,
+                cross_source: parse_env("RAG_ANALYSIS_CROSS_SOURCE", "true")?,
             },
             ontology: OntologyConfig {
                 enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,
@@ -419,6 +444,15 @@ impl AppConfig {
                 neighbor_count: parse_env("RAG_ONTOLOGY_NEIGHBOR_COUNT", "8")?,
                 target_preview_chars: parse_env("RAG_ONTOLOGY_TARGET_PREVIEW_CHARS", "600")?,
                 candidate_preview_chars: parse_env("RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS", "300")?,
+            },
+            dreaming: DreamingConfig {
+                enabled: parse_env("RAG_DREAMING_ENABLED", "false")?,
+                interval_secs: parse_env("RAG_DREAMING_INTERVAL_SECS", "3600")?,
+                batch_size: parse_env("RAG_DREAMING_BATCH_SIZE", "5")?,
+                source_id: env::var("RAG_DREAMING_SOURCE_ID")
+                    .unwrap_or_else(|_| "memory".to_owned()),
+                target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
+                    .unwrap_or_else(|_| "knowledge".to_owned()),
             },
         })
     }

@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, convert::Infallible};
+use std::{borrow::Cow, collections::HashMap, convert::Infallible};
 
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const SEARCH_ENTRIES_TOOL: &str = "search_entries";
@@ -972,9 +972,10 @@ async fn search_entries_tool(
                     &sparse,
                     top_k,
                     source_id.as_deref(),
+                    None,
                 )?
             } else {
-                store.search(&embedding, top_k, source_id.as_deref())?
+                store.search(&embedding, top_k, source_id.as_deref(), None)?
             };
 
             Ok(hits
@@ -1337,7 +1338,7 @@ async fn create_graph_edge_tool(
     let input = crate::db::ManualEdgeInput {
         from_item_id: arguments.from_item_id,
         to_item_id: arguments.to_item_id,
-        relation: arguments.relation,
+        relation: arguments.relation.map(Cow::Owned),
         weight: arguments.weight.unwrap_or(1.0),
         directed: arguments.directed.unwrap_or(false),
         metadata: arguments.metadata,
@@ -1562,6 +1563,7 @@ async fn ingest_web_content_tool(
         metadata,
         source_id: arguments.source_id.clone(),
         created_at,
+        updated_at: created_at,
         path: None,
         type_name: None,
         data: None,
@@ -1871,6 +1873,7 @@ mod tests {
             metadata: json!({"kind": "note"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            updated_at: 123,
             path: None,
             type_name: None,
             data: None,

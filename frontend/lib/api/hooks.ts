@@ -138,16 +138,20 @@ export function useEntriesPaths(sourceId?: string) {
 export function useSearch(
   query: string,
   sourceId?: string,
+  typeName?: string,
   hybrid: boolean = true,
   topK: number = 10,
   rerank: boolean | undefined = undefined,
 ) {
   return useSWR<SearchResultsBundle>(
-    query ? ["search", query, sourceId, hybrid, topK, rerank ?? null] : null,
+    (query || sourceId || typeName)
+      ? ["search", query, sourceId, typeName, hybrid, topK, rerank ?? null]
+      : null,
     () =>
       api.search({
         query,
         source_id: sourceId,
+        type: typeName,
         top_k: topK,
         hybrid,
         ...(rerank !== undefined && { rerank }),

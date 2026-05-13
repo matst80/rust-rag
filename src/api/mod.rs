@@ -1,7 +1,7 @@
 use crate::{
     config::{
-        AnalysisConfig, AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig,
-        OpenAiChatConfig,
+        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
+        MultimodalConfig, OpenAiChatConfig,
     },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
@@ -13,6 +13,7 @@ use crate::{
     embedding::EmbeddingService,
 };
 use anyhow::Result;
+use chrono::Utc;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -27,6 +28,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
@@ -37,6 +39,7 @@ use tower_http::{
     services::ServeDir,
     trace::TraceLayer,
 };
+use tracing::error;
 use uuid::Uuid;
 
 pub mod attachments;
@@ -50,8 +53,10 @@ mod query;
 pub mod schemas;
 mod tombstones;
 mod ingest_url;
+mod dreaming;
 
 pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
+pub use dreaming::{run_dreaming_worker, process_dreaming_round};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -117,6 +122,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub analysis: Arc<AnalysisConfig>,
+    pub dreaming: Arc<DreamingConfig>,
     /// Compiled-schema cache for typed-entry validation. Lives for the
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
@@ -168,6 +174,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -175,6 +182,11 @@ impl AppState {
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
         self.analysis = Arc::new(analysis);
+        self
+    }
+
+    pub fn with_dreaming(mut self, dreaming: DreamingConfig) -> Self {
+        self.dreaming = Arc::new(dreaming);
         self
     }
 
@@ -245,6 +257,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -394,6 +407,10 @@ pub struct SearchRequest {
     /// Restrict the search to entries with this source_id (namespace).
     /// Omit to search across every source_id.
     pub source_id: Option<String>,
+    /// Restrict results to entries whose `type` equals this value.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+
     /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
     #[serde(default = "default_hybrid")]
     pub hybrid: bool,
@@ -407,9 +424,6 @@ pub struct SearchRequest {
     /// Maximum distance threshold for results. Default 0.8.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
-    /// Restrict results to entries whose `type` equals this value.
-    #[serde(default, rename = "type")]
-    pub type_name: Option<String>,
 }
 
 fn default_hybrid() -> bool {
@@ -491,6 +505,12 @@ pub struct CreateManualEdgeRequest {
     pub metadata: Value,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateGraphEdgeRequest {
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Value,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StoreResponse {
     pub id: String,
@@ -516,6 +536,7 @@ pub struct SearchResultPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     pub distance: f32,
     /// Stitched context window for chunk results: the matched chunk surrounded by
     /// its immediate neighbours. Null for non-chunk entries.
@@ -575,6 +596,7 @@ pub struct AdminItemPayload {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     /// Token count under the embedding tokenizer, untruncated. Populated only
     /// by endpoints that opt in.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -599,6 +621,16 @@ pub struct AdminItemPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "metadata_schema")]
     pub data: Option<Value>,
+    /// Contextual expansion: similar or related entries (id + title only).
+    /// Populated by `get_entry` to provide immediate navigation context.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub neighbors: Option<Vec<EntryNeighbor>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct EntryNeighbor {
+    pub id: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -944,7 +976,10 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
-        .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .route(
+            "/admin/graph/edges/{id}",
+            axum::routing::patch(update_graph_edge).delete(delete_graph_edge),
+        )
         .route("/api/ingest/image", post(multimodal::ingest_image))
         .route("/api/ingest/url", post(ingest_url::ingest_url))
         .route(
@@ -1009,6 +1044,7 @@ pub fn router(state: AppState) -> Router {
         ]);
     let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
+        .route("/api/dream", post(dreaming_endpoint))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -1284,6 +1320,7 @@ pub(crate) async fn store_entry_core(
                 metadata: request.metadata.clone(),
                 source_id: source_id.clone(),
                 created_at,
+                updated_at: created_at,
                 path: path.clone(),
                 type_name: request.type_name.clone(),
                 data: request.data.clone(),
@@ -1320,6 +1357,7 @@ pub(crate) async fn store_entry_core(
                     metadata: meta,
                     source_id: source_id.clone(),
                     created_at,
+                    updated_at: created_at,
                     path: path.clone(),
                     type_name: None,
                     data: None,
@@ -1347,6 +1385,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            updated_at: created_at,
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
@@ -1384,6 +1423,7 @@ pub(crate) async fn store_entry_core(
             metadata: request.metadata,
             source_id: source_id.clone(),
             created_at,
+            updated_at: created_at,
             path: path.clone(),
             type_name: request.type_name.clone(),
             data: request.data.clone(),
@@ -1478,6 +1518,7 @@ pub(crate) async fn search_core(
     let query = request.query.clone();
     let top_k = request.top_k;
     let source_id = request.source_id;
+    let type_name = request.type_name;
     let max_distance = request.max_distance;
     let now_ms = current_timestamp_millis()?;
     // Reranker is **opt-in**: the cross-encoder adds noticeable latency
@@ -1497,147 +1538,214 @@ pub(crate) async fn search_core(
         top_k
     };
 
-    let (results, related, raw_embedding) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
-            // Hybrid path needs the bge-m3 sparse output too; embed once.
-            let (raw, sparse) = if request.hybrid {
-                embedder.embed_both(&query)?
-            } else {
-                (embedder.embed(&query)?, Vec::new())
-            };
-            let embedding = if let Some(ref interest) = interest_embedding {
-                blend_embeddings(&raw, interest, 0.8)
-            } else {
-                raw.clone()
-            };
-            let hits = if request.hybrid {
-                store.search_hybrid(
-                    &query,
-                    &embedding,
-                    &sparse,
-                    candidate_top_k,
-                    source_id.as_deref(),
-                )?
-            } else {
-                store.search(&embedding, candidate_top_k, source_id.as_deref())?
-            };
-            let mut filtered: Vec<SearchHit> = hits
-                .into_iter()
-                .filter(|hit| hit.distance <= max_distance)
-                .collect();
+    let (results, related, raw_embedding) = if query.trim().is_empty() {
+        let store = state.store.clone();
+        let source_id = source_id.clone();
+        let type_name = type_name.clone();
+        let top_k = top_k;
+        tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+            let (items, _) = store.list_items(ListItemsRequest {
+                source_id,
+                type_name,
+                limit: Some(top_k),
+                sort_order: SortOrder::Desc,
+                ..Default::default()
+            })?;
+            let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
+            // For empty queries, we set retrievers to "recent"
+            for hit in &mut hits {
+                hit.retrievers = vec!["recent".to_owned()];
+            }
+            Ok((hits, Vec::new(), Vec::new()))
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+    } else {
+        tokio::task::spawn_blocking(
+            move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+                // Hybrid path needs the bge-m3 sparse output too; embed once.
+                let (raw, sparse) = if request.hybrid {
+                    embedder.embed_both(&query)?
+                } else {
+                    (embedder.embed(&query)?, Vec::new())
+                };
+                let embedding = if let Some(ref interest) = interest_embedding {
+                    blend_embeddings(&raw, interest, 0.8)
+                } else {
+                    raw.clone()
+                };
+                let hits = if request.hybrid {
+                    store.search_hybrid(
+                        &query,
+                        &embedding,
+                        &sparse,
+                        candidate_top_k,
+                        source_id.as_deref(),
+                        type_name.as_deref(),
+                    )?
+                } else {
+                    store.search(&embedding, candidate_top_k, source_id.as_deref(), type_name.as_deref())?
+                };
+                let mut filtered: Vec<SearchHit> = hits
+                    .into_iter()
+                    .filter(|hit| hit.distance <= max_distance)
+                    .collect();
 
-            // Cross-encoder reranking. Replaces `distance` with
-            // (1 - score) so existing percentage UIs keep working
-            // (lower=better; reranker score 1.0 → distance 0.0).
-            if do_rerank {
-                if let Some(reranker) = reranker.as_ref() {
-                    // Score the matched chunk text when the store
-                    // surfaced it (postgres dense/hybrid). Falls back to
-                    // the document text for stores that don't chunk so
-                    // sqlite-only deployments still rerank.
-                    let passages: Vec<&str> = filtered
-                        .iter()
-                        .map(|h| h.chunk_text.as_deref().unwrap_or(h.text.as_str()))
-                        .collect();
-                    if !passages.is_empty() {
-                        // Rerank can fail under GPU pressure (CUDA OOM in
-                        // BiasGelu/MatMul) or model load issues. Falling
-                        // back to dense ordering keeps search usable
-                        // instead of 500-ing the whole request.
-                        let rerank_started = std::time::Instant::now();
-                        let max_chars = passages.iter().map(|p| p.len()).max().unwrap_or(0);
-                        let total_chars: usize = passages.iter().map(|p| p.len()).sum();
-                        match reranker.rerank(&query, &passages) {
-                            Ok(scores) => {
-                                tracing::info!(
-                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
-                                    candidates = passages.len(),
-                                    max_chars,
-                                    total_chars,
-                                    "reranker ok"
-                                );
-                                for (hit, score) in
-                                    filtered.iter_mut().zip(scores.into_iter())
-                                {
-                                    hit.distance = 1.0 - score;
-                                    if !hit.retrievers.iter().any(|r| r == "rerank") {
-                                        hit.retrievers.push("rerank".to_owned());
+                // Cross-encoder reranking. Replaces `distance` with
+                // (1 - score) so existing percentage UIs keep working
+                // (lower=better; reranker score 1.0 → distance 0.0).
+                if do_rerank {
+                    if let Some(reranker) = reranker.as_ref() {
+                        // Score the matched chunk text when the store
+                        // surfaced it (postgres dense/hybrid). Falls back to
+                        // the document text for stores that don't chunk so
+                        // sqlite-only deployments still rerank.
+                        let passages: Vec<&str> = filtered
+                            .iter()
+                            .map(|h| h.chunk_text.as_deref().unwrap_or(h.text.as_str()))
+                            .collect();
+                        if !passages.is_empty() {
+                            // Rerank can fail under GPU pressure (CUDA OOM in
+                            // BiasGelu/MatMul) or model load issues. Falling
+                            // back to dense ordering keeps search usable
+                            // instead of 500-ing the whole request.
+                            let rerank_started = std::time::Instant::now();
+                            let max_chars = passages.iter().map(|p| p.len()).max().unwrap_or(0);
+                            let total_chars: usize = passages.iter().map(|p| p.len()).sum();
+                            match reranker.rerank(&query, &passages) {
+                                Ok(scores) => {
+                                    tracing::info!(
+                                        elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                        candidates = passages.len(),
+                                        max_chars,
+                                        total_chars,
+                                        "reranker ok"
+                                    );
+                                    for (hit, score) in
+                                        filtered.iter_mut().zip(scores.into_iter())
+                                    {
+                                        hit.distance = 1.0 - score;
+                                        if !hit.retrievers.iter().any(|r| r == "rerank") {
+                                            hit.retrievers.push("rerank".to_owned());
+                                        }
                                     }
+                                    filtered.sort_by(|a, b| {
+                                        a.distance
+                                            .partial_cmp(&b.distance)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
                                 }
-                                filtered.sort_by(|a, b| {
-                                    a.distance
-                                        .partial_cmp(&b.distance)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
-                                    candidates = passages.len(),
-                                    max_chars,
-                                    "reranker failed; falling back to dense ordering"
-                                );
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                        candidates = passages.len(),
+                                        max_chars,
+                                        "reranker failed; falling back to dense ordering"
+                                    );
+                                }
                             }
                         }
+                        filtered.truncate(top_k);
                     }
-                    filtered.truncate(top_k);
                 }
-            }
 
-            // Sort by decay-adjusted score but keep the raw semantic distance for
-            // the response so the reported values remain pure vector/BM25 distances.
-            filtered.sort_by(|a, b| {
-                decay_sort_key(a, now_ms)
-                    .partial_cmp(&decay_sort_key(b, now_ms))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+                // Sort by decay-adjusted score but keep the raw semantic distance for
+                // the response so the reported values remain pure vector/BM25 distances.
+                filtered.sort_by(|a, b| {
+                    decay_sort_key(a, now_ms)
+                        .partial_cmp(&decay_sort_key(b, now_ms))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
 
-            let related = if let Some(top) = filtered.first() {
-                let edges = store
-                    .list_graph_edges(Some(&top.id), Some(GraphEdgeType::Manual))
-                    .ok()
-                    .unwrap_or_default();
-                let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
-                let mut relations: HashMap<String, Option<String>> = HashMap::new();
-                for edge in edges {
-                    let neighbor_id = if edge.from_item_id == top.id {
-                        edge.to_item_id
-                    } else {
-                        edge.from_item_id
-                    };
-                    if neighbor_id == top.id || existing.contains(neighbor_id.as_str()) {
-                        continue;
-                    }
-                    relations.entry(neighbor_id).or_insert(edge.relation);
-                }
-                if relations.is_empty() {
-                    Vec::new()
-                } else {
-                    let ids: Vec<String> = relations.keys().cloned().collect();
-                    let mut hits = store.distances_for_ids(&embedding, &ids)?;
-                    hits.sort_by(|a, b| {
-                        a.distance
-                            .partial_cmp(&b.distance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    hits.into_iter()
-                        .map(|hit| {
-                            let relation = relations.get(&hit.id).and_then(Clone::clone);
-                            (hit, relation)
+                let related = if let Some(top) = filtered.first() {
+                    let top_id = top.id.clone();
+                    let edges = store
+                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
+                        .ok()
+                        .unwrap_or_default();
+
+                    // Identify anti-edges from the top hit (weight < 0.0).
+                    let anti_targets: HashSet<String> = edges
+                        .iter()
+                        .filter(|e| e.weight < 0.0)
+                        .map(|e| {
+                            if e.from_item_id == top_id {
+                                e.to_item_id.clone()
+                            } else {
+                                e.from_item_id.clone()
+                            }
                         })
-                        .collect()
-                }
-            } else {
-                Vec::new()
-            };
+                        .collect();
 
-            Ok((filtered, related, raw))
-        },
-    )
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+                    // If anti-edges exist, penalize those items in the result set and re-sort.
+                    if !anti_targets.is_empty() {
+                        let mut changed = false;
+                        for hit in &mut filtered {
+                            if anti_targets.contains(&hit.id) {
+                                hit.distance += 0.4; // Substantial penalty
+                                if !hit.retrievers.contains(&"penalized".to_owned()) {
+                                    hit.retrievers.push("penalized".to_owned());
+                                }
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            filtered.sort_by(|a, b| {
+                                decay_sort_key(a, now_ms)
+                                    .partial_cmp(&decay_sort_key(b, now_ms))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        }
+                    }
+
+                    let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
+                    let mut relations: HashMap<String, Option<String>> = HashMap::new();
+                    for edge in edges {
+                        // Skip anti-edges for the "Related" panel.
+                        if edge.weight < 0.0 {
+                            continue;
+                        }
+
+                        let neighbor_id = if edge.from_item_id == top_id {
+                            edge.to_item_id
+                        } else {
+                            edge.from_item_id
+                        };
+                        if neighbor_id == top_id || existing.contains(neighbor_id.as_str()) {
+                            continue;
+                        }
+                        relations.entry(neighbor_id).or_insert(edge.relation);
+                    }
+                    if relations.is_empty() {
+                        Vec::new()
+                    } else {
+                        let ids: Vec<String> = relations.keys().cloned().collect();
+                        let mut hits = store.distances_for_ids(&embedding, &ids)?;
+                        hits.sort_by(|a, b| {
+                            a.distance
+                                .partial_cmp(&b.distance)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        hits.into_iter()
+                            .map(|hit| {
+                                let relation = relations.get(&hit.id).and_then(Clone::clone);
+                                (hit, relation)
+                            })
+                            .collect()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                Ok((filtered, related, raw))
+            },
+        )
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+    };
 
     // Fire-and-forget: log the search event and update access counts.
     if let Some(sub) = subject {
@@ -1934,10 +2042,11 @@ async fn get_item(
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     let store = state.store.clone();
     let id_for_lookup = id.clone();
-    let (item, analysis) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || -> Result<_> {
         let item = store.get_item(&id_for_lookup)?;
         let analysis = store.get_item_analysis(&id_for_lookup)?;
-        Ok((item, analysis))
+        let neighborhood = store.graph_neighborhood(&id_for_lookup, 1, 10, None).ok();
+        Ok((item, analysis, neighborhood))
     })
     .await
     .map_err(ApiError::TaskJoin)?
@@ -1949,6 +2058,56 @@ async fn get_item(
         payload.analysis_at = Some(a.analysis_at);
         payload.analysis_model = Some(a.analysis_model);
     }
+
+    if let Some(nbh) = neighborhood {
+        let center_id = id.clone();
+        let neighbors: Vec<EntryNeighbor> = nbh
+            .nodes
+            .into_iter()
+            .filter(|n| {
+                if n.id == center_id {
+                    return false;
+                }
+                // Only include nodes connected by "proven" or "high quality" edges.
+                // Prioritizes confirmed manual edges and extremely close embeddings.
+                nbh.edges.iter().any(|e| {
+                    let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
+                        || (e.from_item_id == center_id && e.to_item_id == n.id);
+                    if !is_connected {
+                        return false;
+                    }
+
+                    match e.edge_type {
+                        GraphEdgeType::Manual => {
+                            let status = e.metadata.get("status").and_then(|v| v.as_str());
+                            let confidence = e.metadata
+                                .get("confidence")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(1.0);
+                            // Include confirmed edges or manual overrides with decent confidence
+                            status == Some("confirmed") || (status.is_none() && confidence >= 0.7)
+                        }
+                        GraphEdgeType::Similarity => {
+                            // "really close" threshold (approx distance < 0.25)
+                            e.weight >= 0.8
+                        }
+                    }
+                })
+            })
+            .map(|n| EntryNeighbor {
+                id: n.id,
+                title: n
+                    .metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned()),
+            })
+            .collect();
+        if !neighbors.is_empty() {
+            payload.neighbors = Some(neighbors);
+        }
+    }
+
     Ok(Json(payload))
 }
 
@@ -1969,7 +2128,8 @@ async fn reanalyze_item(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
 
-    let analysis = run_analysis(&state, &item.text, Some(&item.source_id), Some(&item.id))
+    let neighbor_source = if state.analysis.cross_source { None } else { Some(item.source_id.as_str()) };
+    let analysis = run_analysis(&state, &item.text, neighbor_source, Some(&item.id))
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
     let model = state
@@ -2051,6 +2211,7 @@ async fn update_item(
             metadata: request.metadata,
             source_id: request.source_id,
             created_at: existing.created_at,
+            updated_at: Utc::now().timestamp_millis(),
             path: new_path,
             type_name: type_override.or(existing.type_name),
             data: data_override.or(existing.data),
@@ -2306,6 +2467,7 @@ async fn llm_rechunk_item(
                 metadata,
                 source_id: source_id.clone(),
                 created_at: now,
+                updated_at: now,
                 path: parent_path.clone(),
                 type_name: None,
                 data: None,
@@ -2498,6 +2660,26 @@ async fn smart_store(
     Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
 }
 
+async fn dreaming_endpoint(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    if !state.analysis.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "dreaming requires analysis (LLM) to be configured".to_owned(),
+        ));
+    }
+    
+    // Spawn in background so the HTTP request doesn't timeout
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = dreaming::process_dreaming_round(&state_clone).await {
+            error!("manual dreaming error: {e}");
+        }
+    });
+    
+    Ok(StatusCode::ACCEPTED)
+}
+
 async fn rebuild_graph(
     State(state): State<AppState>,
 ) -> Result<Json<GraphRebuildResponse>, ApiError> {
@@ -2522,7 +2704,7 @@ async fn create_manual_edge(
     let input = ManualEdgeInput {
         from_item_id: request.from_item_id,
         to_item_id: request.to_item_id,
-        relation: request.relation,
+        relation: request.relation.map(Cow::Owned),
         weight: request.weight.unwrap_or(1.0),
         directed: request.directed.unwrap_or(false),
         metadata: request.metadata,
@@ -2534,6 +2716,22 @@ async fn create_manual_edge(
         .map_err(map_graph_error)?;
 
     Ok((StatusCode::CREATED, Json(edge.into())))
+}
+
+async fn update_graph_edge(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateGraphEdgeRequest>,
+) -> Result<Json<GraphEdgePayload>, ApiError> {
+    validate_metadata(&request.metadata)?;
+
+    let store = state.store.clone();
+    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.metadata))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    Ok(Json(edge.into()))
 }
 
 async fn delete_graph_edge(
@@ -3384,6 +3582,7 @@ impl From<SearchHit> for SearchResultPayload {
             metadata: value.metadata,
             source_id: value.source_id,
             created_at: value.created_at,
+            updated_at: value.updated_at,
             distance: value.distance,
             chunk_context: None,
             section_path: value.section_path,
@@ -3410,6 +3609,7 @@ impl From<ItemRecord> for AdminItemPayload {
             metadata: value.metadata,
             source_id: value.source_id,
             created_at: value.created_at,
+            updated_at: value.updated_at,
             token_count: None,
             path: value.path,
             analysis: None,
@@ -3417,6 +3617,7 @@ impl From<ItemRecord> for AdminItemPayload {
             analysis_model: None,
             type_name: value.type_name,
             data: value.data,
+            neighbors: None,
         }
     }
 }
@@ -3556,6 +3757,7 @@ fn map_missing_item(kind: &str, error: anyhow::Error) -> ApiError {
     }
 }
 
+
 pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("graph support is disabled") {
@@ -3572,6 +3774,7 @@ pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
     use axum_test::TestServer;
     use serde_json::json;
     use std::{
@@ -3690,6 +3893,7 @@ mod tests {
             _query_embedding: &[f32],
             _top_k: usize,
             source_id: Option<&str>,
+            _type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
             self.search_source_ids
                 .lock()
@@ -3709,8 +3913,9 @@ mod tests {
             _query_sparse: &[(u32, f32)],
             top_k: usize,
             source_id: Option<&str>,
+            _type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
-            self.search(query_embedding, top_k, source_id)
+            self.search(query_embedding, top_k, source_id, None)
         }
 
         fn distances_for_ids(
@@ -3737,7 +3942,19 @@ mod tests {
                         section_path: Vec::new(),
                         retrievers: Vec::new(),
                         chunk_text: None,
-                        path: None,
+                        path: item.path.clone(),
+                        type_name: item.type_name.clone(),
+                        tags: item
+                            .metadata
+                            .get("tags")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -3974,7 +4191,7 @@ mod tests {
                 from_item_id: input.from_item_id,
                 to_item_id: input.to_item_id,
                 edge_type: GraphEdgeType::Manual,
-                relation: input.relation,
+                relation: input.relation.map(|r| r.into_owned()),
                 weight: input.weight,
                 directed: input.directed,
                 metadata: input.metadata,
@@ -3983,6 +4200,22 @@ mod tests {
             };
             edges.push(edge.clone());
             Ok(edge)
+        }
+
+        fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+            if !self.graph_enabled {
+                anyhow::bail!("graph support is disabled");
+            }
+
+            let mut edges = self.graph_edges.lock().expect("store mutex poisoned");
+            let edge = edges
+                .iter_mut()
+                .find(|edge| edge.id == id)
+                .ok_or_else(|| anyhow!("edge {} not found", id))?;
+
+            edge.metadata = metadata;
+            edge.updated_at += 1;
+            Ok(edge.clone())
         }
 
         fn delete_graph_edge(&self, id: &str) -> Result<bool> {
@@ -4515,6 +4748,8 @@ mod tests {
             retrievers: Vec::new(),
             chunk_text: None,
             path: None,
+            type_name: None,
+            tags: Vec::new(),
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -4566,6 +4801,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4578,6 +4815,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4650,6 +4889,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -4693,6 +4934,8 @@ mod tests {
             retrievers: Vec::new(),
             chunk_text: None,
             path: None,
+            type_name: None,
+            tags: Vec::new(),
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -4751,6 +4994,8 @@ mod tests {
                     retrievers: Vec::new(),
                     chunk_text: None,
                     path: None,
+                    type_name: None,
+                    tags: Vec::new(),
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -4763,6 +5008,8 @@ mod tests {
                     retrievers: Vec::new(),
                     chunk_text: None,
                     path: None,
+                    type_name: None,
+                    tags: Vec::new(),
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -4802,6 +5049,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4814,6 +5063,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5989,4 +6240,37 @@ mod tests {
         assert_eq!(body["code_challenge_methods_supported"], json!(["S256"]));
         assert!(body["authorization_endpoint"].is_string());
     }
+}
+
+pub(crate) async fn append_to_entry_core(
+    state: &AppState,
+    id: String,
+    text_to_append: String,
+) -> Result<StoreResponse, ApiError> {
+    let store = state.store.clone();
+    let target_id = id.clone();
+    let item = tokio::task::spawn_blocking(move || store.get_item(&target_id))
+        .await
+        .map_err(|e| ApiError::TaskJoin(e))?
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("item `{id}` not found")))?;
+
+    let mut new_text = item.text.clone();
+    if !new_text.ends_with('\n') && !text_to_append.starts_with('\n') {
+        new_text.push('\n');
+    }
+    new_text.push_str(&text_to_append);
+
+    let request = StoreRequest {
+        id: Some(id),
+        text: new_text,
+        metadata: item.metadata,
+        source_id: item.source_id,
+        chunk: None,
+        path: item.path,
+        type_name: item.type_name,
+        data: item.data,
+    };
+
+    store_entry_core(state, request, None).await
 }

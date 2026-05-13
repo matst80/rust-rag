@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -26,13 +27,14 @@ use schema::{initialize_schema, register_sqlite_vec};
 /// RRF paper (Cormack et al.) and is the de-facto default across search systems.
 const RRF_K: f32 = 60.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ItemRecord {
     pub id: String,
     pub text: String,
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     /// Wiki-style hierarchical path (slash-separated, e.g. `team/handbook`).
     /// User-asserted, optional. Distinct from chunk-level `section_path`
     /// which is derived from markdown headers by the chunker.
@@ -134,6 +136,7 @@ pub struct SearchHit {
     pub metadata: Value,
     pub source_id: String,
     pub created_at: i64,
+    pub updated_at: i64,
     pub distance: f32,
     /// Header breadcrumb of the chunk that scored best for this document
     /// (e.g. `["Architecture", "Embedding execution"]`). Empty for hits
@@ -154,6 +157,42 @@ pub struct SearchHit {
     /// User-asserted wiki path inherited from the parent entry. `None` if
     /// unset. Distinct from `section_path` (chunker-derived from headers).
     pub path: Option<String>,
+    /// Optional structured-data type name.
+    pub type_name: Option<String>,
+    /// Tags associated with the entry.
+    pub tags: Vec<String>,
+}
+
+impl From<ItemRecord> for SearchHit {
+    fn from(item: ItemRecord) -> Self {
+        let tags: Vec<String> = item
+            .metadata
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self {
+            id: item.id,
+            text: item.text,
+            metadata: item.metadata,
+            source_id: item.source_id,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            distance: 0.0,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: item.path,
+            type_name: item.type_name,
+            tags,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +258,138 @@ pub struct GraphEdgeRecord {
     pub metadata: Value,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OntologyPredicateRecord {
+    pub name: String,
+    pub source_id: Option<String>,
+    pub description: String,
+    pub direction: String,
+    pub example_from: Option<String>,
+    pub example_to: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
+    let now = current_timestamp_millis().unwrap_or(0);
+    vec![
+        OntologyPredicateRecord {
+            name: "is_a".to_owned(),
+            source_id: None,
+            description: "from is a subtype or instance of to".to_owned(),
+            direction: "from is a subtype/instance of to".to_owned(),
+            example_from: Some("HashMap".to_owned()),
+            example_to: Some("data structure".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "part_of".to_owned(),
+            source_id: None,
+            description: "from is a component or part of to".to_owned(),
+            direction: "from is a component of to".to_owned(),
+            example_from: Some("Wheel".to_owned()),
+            example_to: Some("Car".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "caused_by".to_owned(),
+            source_id: None,
+            description: "from is an effect or consequence of to".to_owned(),
+            direction: "from is an effect/consequence of to".to_owned(),
+            example_from: Some("Smoke".to_owned()),
+            example_to: Some("Fire".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "works_for".to_owned(),
+            source_id: None,
+            description: "entity in from is affiliated with or employed by to".to_owned(),
+            direction: "entity in from is affiliated with to".to_owned(),
+            example_from: Some("Musk".to_owned()),
+            example_to: Some("Tesla".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "contradicts".to_owned(),
+            source_id: None,
+            description: "from makes a claim incompatible with or opposing to".to_owned(),
+            direction: "from makes a claim incompatible with to".to_owned(),
+            example_from: Some("Vaccines cause autism".to_owned()),
+            example_to: Some("Vaccines are safe".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "depends_on".to_owned(),
+            source_id: None,
+            description: "from requires to in order to function or exist".to_owned(),
+            direction: "from requires to to function/exist".to_owned(),
+            example_from: Some("TCP".to_owned()),
+            example_to: Some("IP routing".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "contains".to_owned(),
+            source_id: None,
+            description: "from includes, embeds, or contains to as a sub-element".to_owned(),
+            direction: "from includes/embeds to as a sub-element".to_owned(),
+            example_from: Some("News article".to_owned()),
+            example_to: Some("quoted statistic".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "implemented_by".to_owned(),
+            source_id: None,
+            description: "to is the concrete realization, implementation, or instance of from".to_owned(),
+            direction: "to is the concrete realization of from".to_owned(),
+            example_from: Some("Auth spec".to_owned()),
+            example_to: Some("JWT handler".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "supersedes".to_owned(),
+            source_id: None,
+            description: "from replaces, obsoletes, or updates to as the new truth".to_owned(),
+            direction: "from replaces/obsoletes to".to_owned(),
+            example_from: Some("v2 API spec".to_owned()),
+            example_to: Some("v1 API spec".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+    ]
+}
+
+fn seed_default_predicates(connection: &Connection) -> Result<()> {
+    let count: i64 = connection.query_row("SELECT count(*) FROM ontology_predicates", [], |row| row.get(0))?;
+    if count > 0 {
+        return Ok(());
+    }
+    let predicates = default_ontology_predicates();
+    for p in predicates {
+        connection.execute(
+            "INSERT INTO ontology_predicates (name, source_id, description, direction, example_from, example_to, created_at, updated_at)
+             VALUES (?1, '*', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                p.name,
+                p.description,
+                p.direction,
+                p.example_from,
+                p.example_to,
+                p.created_at,
+                p.updated_at,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,7 +578,7 @@ pub struct ListItemsRequest {
 pub struct ManualEdgeInput {
     pub from_item_id: String,
     pub to_item_id: String,
-    pub relation: Option<String>,
+    pub relation: Option<Cow<'static, str>>,
     pub weight: f32,
     pub directed: bool,
     pub metadata: Value,
@@ -615,6 +786,7 @@ pub trait VectorStore: Send + Sync {
         query_embedding: &[f32],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
     fn search_hybrid(
         &self,
@@ -623,6 +795,7 @@ pub trait VectorStore: Send + Sync {
         query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
     /// Persist analysis JSON + model name onto an existing item. Best-effort;
     /// non-existent ids should return `Ok(false)`.
@@ -693,9 +866,24 @@ pub trait VectorStore: Send + Sync {
     ) -> Result<Vec<GraphEdgeRecord>>;
     fn rebuild_similarity_graph(&self) -> Result<usize>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
+    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
     fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
     fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
+
+    /// Ontology predicates management.
+    fn list_ontology_predicates(&self, _source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+        anyhow::bail!("ontology predicates not supported by this store")
+    }
+    fn get_ontology_predicate(&self, _name: &str, _source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+        anyhow::bail!("ontology predicates not supported by this store")
+    }
+    fn upsert_ontology_predicate(&self, _record: OntologyPredicateRecord) -> Result<()> {
+        anyhow::bail!("ontology predicates not supported by this store")
+    }
+    fn delete_ontology_predicate(&self, _name: &str, _source_id: Option<&str>) -> Result<bool> {
+        anyhow::bail!("ontology predicates not supported by this store")
+    }
 
     /// Typed-entry schemas. CRUD on the `schemas` table holding JSON Schema
     /// definitions referenced by `items.type`.
@@ -790,6 +978,7 @@ impl SqliteVectorStore {
             ",
         )?;
         initialize_schema(&connection, embedding_dimension)?;
+        seed_default_predicates(&connection)?;
 
         Ok(Self {
             connection: Mutex::new(Some(connection)),
@@ -853,13 +1042,14 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.execute(
             "
-            INSERT INTO items (id, text, metadata, source_id, created_at, path, type, data)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO items (id, text, metadata, source_id, created_at, updated_at, path, type, data)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE
             SET text = excluded.text,
                 metadata = excluded.metadata,
                 source_id = excluded.source_id,
                 created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
                 path = excluded.path,
                 type = excluded.type,
                 data = excluded.data,
@@ -871,6 +1061,7 @@ impl VectorStore for SqliteVectorStore {
                 metadata_json,
                 item.source_id,
                 item.created_at,
+                item.updated_at,
                 item.path,
                 item.type_name,
                 data_json,
@@ -895,6 +1086,7 @@ impl VectorStore for SqliteVectorStore {
         query_embedding: &[f32],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if top_k == 0 {
             anyhow::bail!("top_k must be greater than zero");
@@ -906,6 +1098,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut results = Vec::new();
+
         if let Some(source_id) = source_id {
             let mut statement = connection.prepare(
                 "
@@ -915,17 +1108,20 @@ impl VectorStore for SqliteVectorStore {
                     items.metadata,
                     items.source_id,
                     items.created_at,
-                    CAST(vec_distance_L2(vec_items.embedding, vec_f32(?2)) AS REAL) AS distance
+                    CAST(vec_distance_L2(vec_items.embedding, vec_f32(?2)) AS REAL) AS distance,
+                    items.path,
+                    items.type
                 FROM items
                 JOIN vec_items ON vec_items.id = items.id
                 WHERE items.source_id = ?1
+                  AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY distance ASC
                 LIMIT ?3
                 ",
             )?;
 
             let rows = statement.query_map(
-                params![source_id, query_embedding_json, top_k as i64],
+                params![source_id, query_embedding_json, top_k as i64, type_name],
                 map_search_row,
             )?;
 
@@ -933,6 +1129,12 @@ impl VectorStore for SqliteVectorStore {
                 results.push(row?);
             }
         } else {
+            // When type_name is provided, we can't use the MATCH index as effectively
+            // if we want to filter by type first. But for simplicity we'll just
+            // filter after joining or include it in the query.
+            // Actually, if type_name is set, we might want to increase k to ensure we get enough hits of that type.
+            let k = if type_name.is_some() { top_k * 5 } else { top_k };
+
             let mut statement = connection.prepare(
                 "
                 WITH matches AS (
@@ -947,16 +1149,22 @@ impl VectorStore for SqliteVectorStore {
                     items.metadata,
                     items.source_id,
                     items.created_at,
-                    CAST(vec_distance_L2(vec_items.embedding, vec_f32(?1)) AS REAL) AS distance
+                    CAST(vec_distance_L2(vec_items.embedding, vec_f32(?1)) AS REAL) AS distance,
+                    items.path,
+                    items.type
                 FROM matches
                 JOIN vec_items ON vec_items.id = matches.id
                 JOIN items ON items.id = matches.id
+                WHERE (?3 IS NULL OR items.type = ?3)
                 ORDER BY distance ASC
+                LIMIT ?4
                 ",
             )?;
 
-            let rows =
-                statement.query_map(params![query_embedding_json, top_k as i64], map_search_row)?;
+            let rows = statement.query_map(
+                params![query_embedding_json, k as i64, type_name, top_k as i64],
+                map_search_row,
+            )?;
 
             for row in rows {
                 results.push(row?);
@@ -973,6 +1181,7 @@ impl VectorStore for SqliteVectorStore {
         _query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if top_k == 0 {
             anyhow::bail!("top_k must be greater than zero");
@@ -981,7 +1190,7 @@ impl VectorStore for SqliteVectorStore {
         // SQLite path has no sparsevec column — sparse query is ignored;
         // dense + FTS5 keyword fusion is the legacy hybrid behavior.
         // 1. Vector Search
-        let vector_hits = self.search(query_embedding, top_k * 2, source_id)?;
+        let vector_hits = self.search(query_embedding, top_k * 2, source_id, type_name)?;
 
         // 2. Keyword Search (FTS5)
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
@@ -1006,18 +1215,21 @@ impl VectorStore for SqliteVectorStore {
                     items.metadata,
                     items.source_id,
                     items.created_at,
-                    COALESCE(bm25(items_fts), 0.0) as score
+                    COALESCE(bm25(items_fts), 0.0) as score,
+                    items.path,
+                    items.type
                 FROM items
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1
                   AND (?2 IS NULL OR items.source_id = ?2)
+                  AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY score ASC
                 LIMIT ?3
                 ",
             )?;
 
             let rows = fts_stmt.query_map(
-                params![fts_query, source_id, (top_k * 2) as i64],
+                params![fts_query, source_id, (top_k * 2) as i64, type_name],
                 map_search_row,
             )?;
 
@@ -1091,7 +1303,9 @@ impl VectorStore for SqliteVectorStore {
                 items.metadata,
                 items.source_id,
                 items.created_at,
-                CAST(vec_distance_L2(vec_items.embedding, vec_f32(?)) AS REAL) AS distance
+                CAST(vec_distance_L2(vec_items.embedding, vec_f32(?)) AS REAL) AS distance,
+                items.path,
+                items.type
             FROM items
             JOIN vec_items ON vec_items.id = items.id
             WHERE items.id IN ({placeholders})
@@ -1611,7 +1825,7 @@ impl VectorStore for SqliteVectorStore {
                 edge_id,
                 input.from_item_id,
                 input.to_item_id,
-                input.relation,
+                input.relation.as_deref(),
                 input.weight,
                 bool_to_sqlite(input.directed),
                 metadata_json,
@@ -1625,7 +1839,7 @@ impl VectorStore for SqliteVectorStore {
             from_item_id: input.from_item_id,
             to_item_id: input.to_item_id,
             edge_type: GraphEdgeType::Manual,
-            relation: input.relation,
+            relation: input.relation.map(|r| r.into_owned()),
             weight: input.weight,
             directed: input.directed,
             metadata: input.metadata,
@@ -1633,6 +1847,44 @@ impl VectorStore for SqliteVectorStore {
             updated_at: timestamp,
         })
     }
+    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("sqlite connection not open"))?;
+
+        let metadata_str = serde_json::to_string(&metadata)?;
+        let now = current_timestamp_millis()?;
+
+        conn.execute(
+            "UPDATE graph_edges SET metadata = ?, updated_at = ? WHERE id = ?",
+            params![metadata_str, now, id],
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at FROM graph_edges WHERE id = ?"
+        )?;
+
+        let edge = stmt.query_row(params![id], |row| {
+            let edge_type_str: String = row.get(3)?;
+            let metadata_str: String = row.get(7)?;
+            Ok(GraphEdgeRecord {
+                id: row.get(0)?,
+                from_item_id: row.get(1)?,
+                to_item_id: row.get(2)?,
+                edge_type: GraphEdgeType::from_str(&edge_type_str).unwrap_or(GraphEdgeType::Manual),
+                relation: row.get(4)?,
+                weight: row.get(5)?,
+                directed: row.get(6)?,
+                metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?;
+
+        Ok(edge)
+    }
+
 
     fn delete_graph_edge(&self, id: &str) -> Result<bool> {
         self.ensure_graph_enabled()?;
@@ -1669,7 +1921,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at, path, type, data
+            "SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
              FROM items
              WHERE ontology_status = 'pending'
              ORDER BY created_at ASC
@@ -1684,13 +1936,14 @@ impl VectorStore for SqliteVectorStore {
                     metadata_str,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at, path, type_name, data_str) = r?;
+                let (id, text, metadata_str, source_id, created_at, updated_at, path, type_name, data_str) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -1698,6 +1951,7 @@ impl VectorStore for SqliteVectorStore {
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                     source_id,
                     created_at,
+                    updated_at,
                     path,
                     type_name,
                     data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
@@ -1717,6 +1971,112 @@ impl VectorStore for SqliteVectorStore {
             params![status, id],
         )?;
         Ok(())
+    }
+    
+    fn list_ontology_predicates(&self, source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let sid = source_id.unwrap_or("*");
+        let mut stmt = connection.prepare(
+            "SELECT name, source_id, description, direction, example_from, example_to, created_at, updated_at
+             FROM ontology_predicates WHERE source_id = ?1 OR source_id = '*'
+             ORDER BY name ASC, source_id DESC",
+        )?;
+        let rows = stmt.query_map(params![sid], |row| {
+            let sid_val: String = row.get(1)?;
+            Ok(OntologyPredicateRecord {
+                name: row.get(0)?,
+                source_id: if sid_val == "*" { None } else { Some(sid_val) },
+                description: row.get(2)?,
+                direction: row.get(3)?,
+                example_from: row.get(4)?,
+                example_to: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        let mut predicates = Vec::new();
+        for row in rows {
+            predicates.push(row?);
+        }
+        // If multiple source_ids for same name (e.g. '*' and 'project:A'), keep the more specific one.
+        // Since we sort by name ASC, source_id DESC, '*' (if it's allowed in PK) would come after other strings?
+        // Actually '*' comes before 'p'.
+        // Let's sort by name, then source_id DESC so specific ones (if they exist) come first.
+        // Wait, '*' < 'p'. So specific ones come first if we sort DESC.
+        predicates.dedup_by(|a, b| a.name == b.name);
+        Ok(predicates)
+    }
+
+    fn get_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let sid = source_id.unwrap_or("*");
+        let mut stmt = connection.prepare(
+            "SELECT name, source_id, description, direction, example_from, example_to, created_at, updated_at
+             FROM ontology_predicates WHERE name = ?1 AND (source_id = ?2 OR source_id = '*')
+             ORDER BY source_id DESC LIMIT 1",
+        )?;
+        let record = stmt.query_row(params![name, sid], |row| {
+            let sid_val: String = row.get(1)?;
+            Ok(OntologyPredicateRecord {
+                name: row.get(0)?,
+                source_id: if sid_val == "*" { None } else { Some(sid_val) },
+                description: row.get(2)?,
+                direction: row.get(3)?,
+                example_from: row.get(4)?,
+                example_to: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        }).optional()?;
+        Ok(record)
+    }
+
+    fn upsert_ontology_predicate(&self, record: OntologyPredicateRecord) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let sid = record.source_id.as_deref().unwrap_or("*");
+        connection.execute(
+            "INSERT INTO ontology_predicates (name, source_id, description, direction, example_from, example_to, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(name, source_id) DO UPDATE SET
+                description = excluded.description,
+                direction = excluded.direction,
+                example_from = excluded.example_from,
+                example_to = excluded.example_to,
+                updated_at = excluded.updated_at",
+            params![
+                record.name,
+                sid,
+                record.description,
+                record.direction,
+                record.example_from,
+                record.example_to,
+                record.created_at,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn delete_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let sid = source_id.unwrap_or("*");
+        let deleted = connection.execute(
+            "DELETE FROM ontology_predicates WHERE name = ?1 AND source_id = ?2",
+            params![name, sid],
+        )?;
+        Ok(deleted > 0)
     }
 
     fn list_schemas(&self) -> Result<Vec<SchemaRecord>> {
@@ -2596,7 +2956,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -2624,7 +2984,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
         FROM items
         WHERE id = ?1
         ",
@@ -2637,32 +2997,48 @@ fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRec
 }
 
 fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
+    let metadata: Value = parse_json_column(row.get::<_, String>(2)?, 2)?;
+    let tags: Vec<String> = metadata
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(SearchHit {
         id: row.get(0)?,
         text: row.get(1)?,
-        metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
+        metadata,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
+        updated_at: row.get(11)?,
         distance: row.get(5)?,
         section_path: Vec::new(),
         retrievers: vec!["dense".to_owned()],
         chunk_text: None,
-        path: None,
+        path: row.get(6).ok(),
+        type_name: row.get(7).ok(),
+        tags,
     })
 }
 
 fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
-    let data_str: Option<String> = row.get(7)?;
+    let data_str: Option<String> = row.get(8)?;
     Ok(ItemRecord {
         id: row.get(0)?,
         text: row.get(1)?,
         metadata: parse_json_column(row.get::<_, String>(2)?, 2)?,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
-        path: row.get(5)?,
-        type_name: row.get(6)?,
+        updated_at: row.get(5)?,
+        path: row.get(6)?,
+        type_name: row.get(7)?,
         data: match data_str {
-            Some(s) => Some(parse_json_column(s, 7)?),
+            Some(s) => Some(parse_json_column(s, 8)?),
             None => None,
         },
     })
@@ -2760,7 +3136,7 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[0.9, 0.1, 0.0], 2, None).unwrap();
+        let results = store.search(&[0.9, 0.1, 0.0], 2, None, None).unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "doc-1");
@@ -2805,7 +3181,7 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[0.0, 1.0, 0.0], 1, None).unwrap();
+        let results = store.search(&[0.0, 1.0, 0.0], 1, None, None).unwrap();
         assert_eq!(results[0].text, "new");
         assert_eq!(results[0].metadata, json!({"version": 2}));
         assert_eq!(results[0].source_id, "memory");
@@ -2847,11 +3223,61 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[1.0, 0.0, 0.0], 5, Some("memory")).unwrap();
+        let results = store.search(&[1.0, 0.0, 0.0], 5, Some("memory"), None).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
         assert_eq!(results[0].source_id, "memory");
+    }
+
+    #[test]
+    fn filters_by_type() {
+        let store = test_store();
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "todo-1".to_owned(),
+                    text: "buy milk".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 1000,
+                    path: None,
+                    type_name: Some("todo".to_owned()),
+                    data: Some(json!({"status": "pending"})),
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .unwrap();
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "note-1".to_owned(),
+                    text: "shopping list".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 2000,
+                    path: None,
+                    type_name: Some("note".to_owned()),
+                    data: None,
+                },
+                &[0.9, 0.1, 0.0],
+            )
+            .unwrap();
+
+        // Search for "todo"
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("todo")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "todo-1");
+
+        // Search for "note"
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("note")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "note-1");
+
+        // Global search
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, None).unwrap();
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
@@ -2944,7 +3370,7 @@ mod tests {
 
         assert!(store.delete_item("doc-1").unwrap());
         assert!(store.get_item("doc-1").unwrap().is_none());
-        assert!(store.search(&[1.0, 0.0, 0.0], 5, None).unwrap().is_empty());
+        assert!(store.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap().is_empty());
         assert!(!store.delete_item("doc-1").unwrap());
     }
 
@@ -3031,7 +3457,7 @@ mod tests {
             .add_manual_edge(ManualEdgeInput {
                 from_item_id: "mem-1".to_owned(),
                 to_item_id: "know-1".to_owned(),
-                relation: Some("supports".to_owned()),
+                relation: Some(Cow::Borrowed("supports")),
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"user": "mats"}),
@@ -3115,7 +3541,7 @@ mod tests {
             .add_manual_edge(ManualEdgeInput {
                 from_item_id: "a".to_owned(),
                 to_item_id: "c".to_owned(),
-                relation: Some("supports".to_owned()),
+                relation: Some(Cow::Borrowed("supports")),
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"kind": "manual"}),

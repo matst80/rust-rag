@@ -8,17 +8,17 @@
 
 use crate::{
     api::{
-        ActiveUserPayload, AdminItemPayload, AdminItemsResponse, AppState, CategoriesResponse,
-        ChannelsResponse, ClearChannelResponse, CreateManualEdgeRequest, DeleteResponse,
-        GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
+        ActiveUserPayload, AdminItemPayload, AppState, ClearChannelResponse,
+        CreateManualEdgeRequest, DeleteResponse, EntryNeighbor, GraphEdgePayload,
+        GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
         GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
-        ListItemsQuery, MessagePayload, MessagesResponse, SearchRequest, SearchResponse,
-        SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema,
-        search_core, store_entry_core,
+        ListItemsQuery, MessagePayload, SearchRequest, SearchResponse, SearchResultPayload,
+        StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema, search_core,
+        store_entry_core,
     },
     db::{
-        GraphEdgeType, ItemRecord, ListItemsRequest, ManualEdgeInput, MessageQuery,
-        MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
+        GraphEdgeType, GraphNeighborhood, ItemRecord, ListItemsRequest, ManualEdgeInput,
+        MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
     },
 };
 use rmcp::{
@@ -35,8 +35,9 @@ use rmcp::{
     },
 };
 use schemars::JsonSchema;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{fmt::Write as _, sync::Arc, time::Duration};
+use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
 const SERVER_NAME: &str = "rust-rag";
 const SERVER_INSTRUCTIONS: &str = "rust-rag retrieval store + cross-agent collaboration surface.\n\
@@ -45,13 +46,71 @@ PERSISTENT CONTEXT: Store decisions, system state, and task context here so any 
 SHARED CHANNELS: Use messaging tools (`send_message`, `list_messages`) for structured hand-offs between agents and humans.\n\
 CROSS-AGENT AWARENESS: Before starting a task, run `search_entries` (omit `source_id` for global search) to check if another agent already covered it. Read entry `agent_collaboration_guide` in source `knowledge` for the full protocol.\n\
 \n\
+FIRST CALL: run `list_memory_conventions` once per session — it returns the canonical `source_id` taxonomy, required metadata fields, default typed schemas (decision/fact/todo/incident/note/recipe/workout/page_component), and the edge-predicate vocabulary used by the ontology worker. The doc is itself a stored entry (`rust_rag_mcp_usage_guide_v1` in `knowledge`) so anyone can refine the conventions via `update_item` / `store_entry` — no redeploy. Use `list_schemas` to inspect schema details before storing typed entries.\n\
+\n\
 NAMESPACES (`source_id`): short lowercase buckets — e.g. `knowledge` (durable facts/architecture), `memory` (per-agent notes), `agent_notes`, or `project:<name>:knowledge` / `project:<name>:todos` for project-scoped work.\n\
 \n\
 TYPICAL FLOW:\n\
 1. `search_entries` to load prior context.\n\
 2. Do work.\n\
-3. `store_entry` (stable id, descriptive metadata.tags + author) to persist outcome.\n\
+3. MANDATORY: `store_entry` (stable id, descriptive metadata.tags + author) to persist every significant outcome. \"If it isn't in the RAG, it didn't happen.\"\n\
 4. `send_message` to hand off, citing the stored entry id.";
+
+/// Stable id of the live, editable usage guide stored in the rust-rag instance
+/// itself. `list_memory_conventions` returns this entry's text when present;
+/// `build_memory_conventions` is the compiled-in fallback used otherwise.
+const MEMORY_CONVENTIONS_ENTRY_ID: &str = "rust_rag_mcp_usage_guide_v1";
+
+/// JSON document returned by the `list_memory_conventions` tool. Authoritative
+/// reference for how agents should structure stored memory.
+fn build_memory_conventions() -> serde_json::Value {
+    serde_json::json!({
+        "stable_id": {
+            "format": "descriptive snake_case, optional version suffix (e.g. `_v2`).",
+            "rules": [
+                "Reusing an existing `id` in `store_entry` replaces the entry (upsert).",
+                "Never use UUIDs or timestamps for `id` — those are auto-generated when omitted.",
+                "Tie versioned successors together via the `decision` schema (`supersedes` / `superseded_by`) or a manual edge."
+            ]
+        },
+        "source_id_taxonomy": {
+            "reserved": {
+                "knowledge": "Durable cross-project facts, architecture, evergreen reference material.",
+                "memory": "Per-agent scratch notes that should survive sessions.",
+                "agent_notes": "Hand-off context between agents working a shared task."
+            },
+            "project_scoped": {
+                "pattern": "project:<slug>:knowledge | project:<slug>:todos",
+                "example": "project:rust-rag:knowledge",
+                "rules": [
+                    "`<slug>` is short, lowercase, kebab-case if needed.",
+                    "Open todos go in `project:<slug>:todos` with metadata `status` and `priority`."
+                ]
+            }
+        },
+        "required_metadata": {
+            "always": ["author", "tags"],
+            "for_todos": ["status", "priority"],
+            "optional_but_recommended": ["doc_type"]
+        },
+        "typed_entries": {
+            "how": "Call `store_entry` with `type` set to one of the registered schemas and `data` carrying the structured payload. Validation is enforced server-side via JSON Schema. Discover schemas with `list_schemas` / `get_schema`.",
+            "default_schemas": {
+                "decision": "ADR-style record: context, decision, consequences, status (proposed/accepted/superseded/rejected).",
+                "fact": "Atomic claim with `source` and `confidence` (0-1). Optional `expires_at` for staleness.",
+                "todo": "Single task with `status` (open/in_progress/done/cancelled) and optional `priority`/`due`.",
+                "incident": "Operational incident: timeline, severity, root_cause, resolution.",
+                "note": "Lightweight titled prose with optional `tags` / `links` — fallback when no better schema fits."
+            },
+            "tip": "If your content fits a schema, prefer typed storage — it composes with `search_entries.type` filtering and the analyze pipeline."
+        },
+        "edge_vocabulary": {
+            "tool": "create_manual_edge",
+            "canonical_predicates": crate::db::default_ontology_predicates().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            "note": "Predicates are now dynamic and project-specific. The list above contains the system defaults. Call `list_ontology_predicates` to see active ones for your context."
+        }
+    })
+}
 
 #[derive(Clone)]
 pub struct RustRagMcpServer {
@@ -81,6 +140,14 @@ impl ServerHandler for RustRagMcpServer {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AppendRequest {
+    /// ID of the entry to append to.
+    pub id: String,
+    /// Text to append to the end of the entry.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct IdParams {
     pub id: String,
 }
@@ -102,6 +169,7 @@ pub struct UpdateItemParams {
     /// Typed payload validated against the schema for `type`. Supply only
     /// when updating; omit to leave existing payload unchanged.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -215,6 +283,7 @@ pub struct WaitForMessageParams {
     /// Subset match against metadata: every key/value pair in the supplied
     /// object must appear (and equal) in the incoming message metadata.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata_match: Option<serde_json::Value>,
     /// Inclusive lower bound on `created_at` (ms). Buffered messages newer
     /// than this that match filters are returned synchronously without
@@ -257,6 +326,7 @@ pub struct AcpSpawnParams {
     #[serde(default)]
     pub agent_command: Option<String>,
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Option<serde_json::Value>,
     /// Target ACP instance id. Omit when only one is registered.
     #[serde(default)]
@@ -346,6 +416,7 @@ pub struct AcpDelegateTaskParams {
     /// label is set via `bind_telegram_thread { name }` after SessionStarted —
     /// metadata is no longer used for topic naming.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Option<serde_json::Value>,
     /// Seconds to wait for SessionStarted before giving up. Default 15.
     #[serde(default)]
@@ -372,6 +443,7 @@ pub struct AcpCommandAck {
     pub sent: String,
     /// Optional context (e.g. echoed `request_id` for permission_response).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "metadata_schema")]
     pub context: Option<serde_json::Value>,
 }
 
@@ -399,7 +471,34 @@ impl RustRagMcpServer {
         Ok(Json(body.0))
     }
 
-    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability. Optional `path` (slash-separated, e.g. 'team/handbook') groups the entry in the wiki tree under its source_id.")]
+    #[tool(
+        description = "Return the canonical conventions for storing memory in this rust-rag instance: stable-id pattern, `source_id` taxonomy (reserved + `project:<slug>:*`), required metadata fields, default typed schemas (decision/fact/todo/incident/note + bundled schemas) with one-line purposes, and the edge-predicate vocabulary used by the ontology worker. \
+LIVE-EDITABLE: the actual document is the entry `rust_rag_mcp_usage_guide_v1` in source `knowledge` — `update_item` (or `store_entry` with the same id) to iterate without redeploying. Falls back to a built-in JSON default when the entry is missing. \
+Run this once at the start of a session before storing anything — it tells you whether your content should be a typed entry (call `list_schemas` to inspect the schema) or free-text, and which predicates to pass to `create_manual_edge`."
+    )]
+    async fn list_memory_conventions(&self) -> Result<CallToolResult, String> {
+        let store = self.state.store.clone();
+        let entry = tokio::task::spawn_blocking(move || store.get_item(MEMORY_CONVENTIONS_ENTRY_ID))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let text = match entry {
+            Some(record) => record.text,
+            None => {
+                let doc = build_memory_conventions();
+                serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. \
+BEFORE STORING: if you have not yet, call `list_memory_conventions` (for taxonomy + required fields) and `list_schemas` (for typed-entry options) — most agents skip this and store mush. \
+SCHEMA-FIRST: if your content fits a registered schema (decision/fact/todo/incident/note/recipe/workout/page_component or any other in `list_schemas`), pass `type` + `data` for server-side JSON Schema validation and structured retrieval (`search_entries.type`, `list_items.type`). Use free-text only when no schema fits. \
+STABLE ID: pass a descriptive `id` like `rust_rag_auth_redesign_v2`. Reusing an existing `id` REPLACES the entry (upsert) — use this for evolving notes; bump a `_vN` suffix when the change is breaking enough that callers should distinguish. Omit `id` only for ephemeral or strictly append-only content. \
+SOURCE_ID: pick from the reserved buckets (`knowledge` / `memory` / `agent_notes`) or use `project:<slug>:knowledge` / `project:<slug>:todos`. Free-form values are allowed but won't compose with other agents' searches — see `list_memory_conventions` first. \
+METADATA: always include `author` and `tags`. For `*:todos` source_ids also include `status` and `priority`. \
+PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in the tree under its source_id; orthogonal to `type`.")]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
@@ -411,7 +510,20 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
+        description = "Append text to an existing entry. This is more token-efficient than `update_item` for adding notes or extending documents. Re-embeds the entire content after appending."
+    )]
+    async fn append_to_entry(
+        &self,
+        Parameters(params): Parameters<AppendRequest>,
+    ) -> Result<Json<StoreResponse>, String> {
+        crate::api::append_to_entry_core(&self.state, params.id, params.text)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
+    #[tool(
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace (see `list_memory_conventions` for the canonical taxonomy). Pass `type` to scope to a single typed-entry schema (see `list_schemas` for what's registered) — useful for retrieving only decisions, only facts, etc. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
@@ -441,38 +553,104 @@ impl RustRagMcpServer {
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or a hand-off message references a specific entry id.")]
+    #[tool(
+        description = "Fetch full text + metadata of a single entry by id. Also returns 'neighbors' (id + title of similar entries) for contextual expansion."
+    )]
     async fn get_entry(
         &self,
         Parameters(IdParams { id }): Parameters<IdParams>,
-    ) -> Result<Json<AdminItemPayload>, String> {
+    ) -> Result<CallToolResult, String> {
         let store = self.state.store.clone();
-        tokio::task::spawn_blocking(move || store.get_item(&id))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?
-            .map(|record| Json(record.into()))
-            .ok_or_else(|| "item not found".to_owned())
+        let target_id = id.clone();
+        let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || {
+            let item = store.get_item(&target_id)?;
+            let analysis = store.get_item_analysis(&target_id).ok().flatten();
+            let neighborhood = store.graph_neighborhood(&target_id, 1, 10, None).ok();
+            Ok::<(Option<ItemRecord>, Option<crate::db::ItemAnalysisRecord>, Option<GraphNeighborhood>), anyhow::Error>((item, analysis, neighborhood))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+        let item = item.ok_or_else(|| "item not found".to_owned())?;
+        let mut payload: AdminItemPayload = item.into();
+
+        if let Some(a) = analysis {
+            payload.analysis = Some(a.analysis);
+            payload.analysis_at = Some(a.analysis_at);
+            payload.analysis_model = Some(a.analysis_model);
+        }
+
+        let mut text = format_item_markdown(&payload);
+
+        if let Some(nbh) = neighborhood {
+            let center_id = id.clone();
+            let neighbors: Vec<EntryNeighbor> = nbh
+                .nodes
+                .into_iter()
+                .filter(|n| {
+                    if n.id == center_id {
+                        return false;
+                    }
+                    nbh.edges.iter().any(|e| {
+                        let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
+                            || (e.from_item_id == center_id && e.to_item_id == n.id);
+                        if !is_connected {
+                            return false;
+                        }
+
+                        match e.edge_type {
+                            GraphEdgeType::Manual => {
+                                let status = e.metadata.get("status").and_then(|v| v.as_str());
+                                let confidence = e.metadata
+                                    .get("confidence")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(1.0);
+                                status == Some("confirmed")
+                                    || (status.is_none() && confidence >= 0.7)
+                            }
+                            GraphEdgeType::Similarity => e.weight >= 0.8
+                        }
+                    })
+                })
+                .map(|n| EntryNeighbor {
+                    id: n.id.clone(),
+                    title: n.metadata.get("title").and_then(|v| v.as_str()).map(|s| s.to_owned()),
+                })
+                .collect();
+            if !neighbors.is_empty() {
+                let _ = writeln!(text, "\n## Contextual Neighbors");
+                for neighbor in neighbors {
+                    let title = neighbor.title.as_deref().unwrap_or("untitled");
+                    let _ = writeln!(text, "- `{}` ({})", neighbor.id, title);
+                }
+            }
+        }
+
+        let value = serde_json::to_value(&payload).unwrap_or_else(|_| serde_json::json!({}));
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(value);
+        Ok(result)
     }
 
-    #[tool(description = "List all source_id categories and their item counts.")]
-    async fn list_categories(&self) -> Result<Json<CategoriesResponse>, String> {
+    #[tool(description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id.")]
+    async fn list_categories(&self) -> Result<String, String> {
         let store = self.state.store.clone();
         let categories = tokio::task::spawn_blocking(move || store.list_categories())
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
-        Ok(Json(CategoriesResponse {
-            categories: categories.into_iter().map(Into::into).collect(),
-        }))
+        Ok(format_categories_markdown(&categories))
     }
 
     #[tool(description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing.")]
     async fn list_items(
         &self,
         Parameters(query): Parameters<ListItemsQuery>,
-    ) -> Result<Json<AdminItemsResponse>, String> {
+    ) -> Result<CallToolResult, String> {
         let store = self.state.store.clone();
+        let limit = query.limit.unwrap_or(50);
+        let offset = query.offset.unwrap_or(0);
         let path_prefix = match query.path_prefix.as_deref() {
             Some(p) => crate::db::normalize_path(p).map_err(|e| e.to_string())?,
             None => None,
@@ -488,14 +666,16 @@ impl RustRagMcpServer {
             path_prefix,
             type_name: query.type_name,
         };
-        let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
+        let (items, total) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
-        Ok(Json(AdminItemsResponse {
-            items: items.into_iter().map(Into::into).collect(),
-            total_count,
-        }))
+
+        let text = format_item_list_markdown(&items, total, limit, offset);
+        let value = serde_json::to_value(&items).unwrap_or_else(|_| serde_json::json!([]));
+        let mut result = CallToolResult::success(vec![Content::text(text)]);
+        result.structured_content = Some(value);
+        Ok(result)
     }
 
     #[tool(description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched.")]
@@ -552,6 +732,7 @@ impl RustRagMcpServer {
                 metadata: request.metadata,
                 source_id: request.source_id,
                 created_at: existing.created_at,
+                updated_at: now_ms(),
                 path: new_path,
                 type_name: type_override.or(existing.type_name),
                 data: data_override.or(existing.data),
@@ -737,7 +918,7 @@ impl RustRagMcpServer {
     async fn list_messages(
         &self,
         Parameters(params): Parameters<ListMessagesParams>,
-    ) -> Result<Json<MessagesResponse>, String> {
+    ) -> Result<String, String> {
         let limit = params.limit.unwrap_or(50).min(500);
         let messages = self.state.messages.clone();
         let query = MessageQuery {
@@ -757,34 +938,23 @@ impl RustRagMcpServer {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let active_users: Vec<ActiveUserPayload> = match params.channel.as_deref() {
-            Some(ch) => self
-                .state
-                .presence
-                .list(ch)
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            None => Vec::new(),
-        };
-        Ok(Json(MessagesResponse {
-            messages: rows.into_iter().map(Into::into).collect(),
-            total_count: total,
-            active_users,
-            deleted_ids: Vec::new(),
-        }))
+
+        let payloads: Vec<MessagePayload> = rows.into_iter().map(Into::into).collect();
+        Ok(format_messages_markdown(
+            &payloads,
+            total,
+            params.channel.as_deref(),
+        ))
     }
 
     #[tool(description = "List all known channels with message counts and last activity timestamp.")]
-    async fn list_channels(&self) -> Result<Json<ChannelsResponse>, String> {
+    async fn list_channels(&self) -> Result<String, String> {
         let messages = self.state.messages.clone();
         let channels = tokio::task::spawn_blocking(move || messages.list_channels())
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        Ok(Json(ChannelsResponse {
-            channels: channels.into_iter().map(Into::into).collect(),
-        }))
+        Ok(format_channels_markdown(&channels))
     }
 
     #[tool(
@@ -994,7 +1164,10 @@ impl RustRagMcpServer {
         Ok(Json(GraphRebuildResponse { rebuilt_edges }))
     }
 
-    #[tool(description = "Create a manual graph edge between two items.")]
+    #[tool(description = "Create a manual graph edge between two items. \
+PREDICATES: use one of the canonical predicates (`is_a`, `part_of`, `caused_by`, `works_for`, `contradicts`, `depends_on`, `contains`, `implemented_by`) so the edge composes with ontology-worker edges, graph traversal, and the analyze pipeline. See `list_memory_conventions` for direction semantics (e.g. `from is_a to` means FROM is a subtype of TO, NOT the reverse). Off-list `relation` strings are accepted but are essentially private to your caller — other agents and the ontology worker will not recognize them. \
+WEIGHT defaults to 1.0; use -1.0 (with `directed: false`) for anti-edges that should DEMOTE the target in graph-related search. \
+DIRECTED defaults to false — set to true when the predicate's direction is meaningful (it always is for the canonical set).")]
     async fn create_manual_edge(
         &self,
         Parameters(request): Parameters<CreateManualEdgeRequest>,
@@ -1003,7 +1176,7 @@ impl RustRagMcpServer {
         let input = ManualEdgeInput {
             from_item_id: request.from_item_id,
             to_item_id: request.to_item_id,
-            relation: request.relation,
+            relation: request.relation.map(Cow::Owned),
             weight: request.weight.unwrap_or(1.0),
             directed: request.directed.unwrap_or(false),
             metadata: request.metadata,
@@ -1030,6 +1203,21 @@ impl RustRagMcpServer {
             return Err(format!("graph edge {id} not found"));
         }
         Ok(Json(DeleteResponse { id, deleted }))
+    }
+
+    #[tool(description = "Update the metadata of an existing graph edge (e.g., to confirm a suggested edge by setting metadata.status = 'confirmed').")]
+    async fn update_graph_edge(
+        &self,
+        Parameters(params): Parameters<UpdateGraphEdgeParams>,
+    ) -> Result<Json<GraphEdgePayload>, String> {
+        let store = self.state.store.clone();
+        let id = params.id.clone();
+        let metadata = params.metadata;
+        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, metadata))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(Json(edge.into()))
     }
 
     #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
@@ -1467,6 +1655,20 @@ impl RustRagMcpServer {
             items_unset: unset,
         }))
     }
+
+    #[tool(description = "Manually trigger a dreaming round to consolidate 'memory' entries. Moves durable facts to 'knowledge', merges duplicates, and prunes transient notes. Returns accepted status immediately; work continues in background.")]
+    async fn dream(&self) -> Result<String, String> {
+        if !self.state.analysis.is_configured() {
+            return Err("dreaming requires analysis (LLM) to be configured".to_owned());
+        }
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::api::process_dreaming_round(&state).await {
+                tracing::error!("mcp dream error: {e}");
+            }
+        });
+        Ok("Dreaming round started in background.".to_owned())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1477,11 +1679,19 @@ pub struct SchemaTypeParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpsertSchemaParams {
     pub type_name: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub json_schema: serde_json::Value,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateGraphEdgeParams {
+    pub id: String,
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1687,6 +1897,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 metadata: related.metadata.clone(),
                 source_id: related.source_id.clone(),
                 created_at: related.created_at,
+                updated_at: related.created_at, // Related hit might not have updated_at in its payload yet
                 distance: related.distance,
                 chunk_context: None,
                 section_path: Vec::new(),
@@ -1711,13 +1922,144 @@ fn write_result_entry(
         Some(r) => format!(" — relation: {r}"),
         None => String::new(),
     };
+    let path_str = hit.path.as_deref().map(|p| format!(" (path: {p})")).unwrap_or_default();
     let _ = writeln!(
         out,
-        "\n### {index}. `{id}` — {relevance}% [{source}]{suffix}",
+        "\n### {index}. `{id}` — {relevance}% [{source}]{path_str}{suffix}",
         id = hit.id,
         source = hit.source_id,
     );
+    let _ = writeln!(out, "> Created: {} | Updated: {}", format_ms(hit.created_at), format_ms(hit.updated_at));
     let _ = writeln!(out, "\n{}", hit.text.trim());
+}
+
+fn format_ms(ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn format_item_markdown(item: &AdminItemPayload) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Entry: `{}`", item.id);
+    let _ = writeln!(out, "\n- **Source**: `{}`", item.source_id);
+    if let Some(path) = &item.path {
+        let _ = writeln!(out, "- **Path**: `{}`", path);
+    }
+    if let Some(type_name) = &item.type_name {
+        let _ = writeln!(out, "- **Type**: `{}`", type_name);
+    }
+    let _ = writeln!(out, "- **Created**: {}", format_ms(item.created_at));
+    let _ = writeln!(out, "- **Updated**: {}", format_ms(item.updated_at));
+    
+    let tags: Vec<&str> = item.metadata.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !tags.is_empty() {
+        let _ = writeln!(out, "- **Tags**: {}", tags.join(", "));
+    }
+
+    if let Some(data) = &item.data {
+        let _ = writeln!(out, "\n## Data (JSON)");
+        let _ = writeln!(out, "```json\n{}\n```", serde_json::to_string_pretty(data).unwrap_or_default());
+    }
+
+    let _ = writeln!(out, "\n## Content\n\n{}", item.text.trim());
+
+    if let Some(analysis) = &item.analysis {
+        let _ = writeln!(out, "\n## Intelligence Analysis");
+        if let Some(model) = &item.analysis_model {
+             let _ = writeln!(out, "> Analyzed by `{}`", model);
+        }
+        let _ = writeln!(out, "\n```json\n{}\n```", serde_json::to_string_pretty(analysis).unwrap_or_default());
+    }
+
+    out
+}
+
+fn format_item_list_markdown(items: &[ItemRecord], total: i64, _limit: usize, offset: usize) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Browse Entries (Total: {})", total);
+    let _ = writeln!(out, "> Showing results {}-{} of {}", offset + 1, offset + items.len(), total);
+    
+    if items.is_empty() {
+        let _ = writeln!(out, "\nNo entries found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| ID | Path | Type | Updated |");
+    let _ = writeln!(out, "|----|------|------|---------|");
+    
+    for item in items {
+        let path = item.path.as_deref().unwrap_or("-");
+        let type_name = item.type_name.as_deref().unwrap_or("-");
+        let updated = format_ms(item.updated_at);
+        let _ = writeln!(out, "| `{}` | `{}` | `{}` | {} |", item.id, path, type_name, updated);
+    }
+
+    let _ = writeln!(out, "\n*Use `get_entry(id)` to see full content and metadata for a specific item.*");
+    
+    out
+}
+
+fn format_messages_markdown(messages: &[MessagePayload], total: i64, channel: Option<&str>) -> String {
+    let mut out = String::new();
+    let chan_suffix = channel.map(|c| format!(" in `{}`", c)).unwrap_or_default();
+    let _ = writeln!(out, "# Messages{} (Total: {})", chan_suffix, total);
+    
+    if messages.is_empty() {
+        let _ = writeln!(out, "\nNo messages found.");
+        return out;
+    }
+
+    for m in messages {
+        let ts = format_ms(m.created_at);
+        let _ = writeln!(out, "\n---");
+        let _ = writeln!(out, "**{}** [{:?}] ({})", m.sender, m.sender_kind, ts);
+        let _ = writeln!(out, "\n{}", m.text.trim());
+    }
+    
+    out
+}
+
+fn format_channels_markdown(channels: &[crate::db::ChannelSummary]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Channels");
+    
+    if channels.is_empty() {
+        let _ = writeln!(out, "\nNo channels found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| Channel | Messages | Last Activity |");
+    let _ = writeln!(out, "|---------|----------|---------------|");
+    
+    for c in channels {
+        let last = format_ms(c.last_message_at);
+        let _ = writeln!(out, "| `{}` | {} | {} |", c.channel, c.message_count, last);
+    }
+    
+    out
+}
+
+fn format_categories_markdown(categories: &[crate::db::CategorySummary]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Categories (Sources)");
+    
+    if categories.is_empty() {
+        let _ = writeln!(out, "\nNo categories found.");
+        return out;
+    }
+
+    let _ = writeln!(out, "\n| Source ID | Item Count |");
+    let _ = writeln!(out, "|-----------|------------|");
+    
+    for c in categories {
+        let _ = writeln!(out, "| `{}` | {} |", c.source_id, c.item_count);
+    }
+    
+    out
 }
 
 /// Build the `StreamableHttpService` tower service that serves MCP traffic.

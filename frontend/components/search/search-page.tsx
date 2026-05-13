@@ -23,6 +23,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const [isAssisted, setIsAssisted] = useState(defaultAssisted)
   const [isHybrid, setIsHybrid] = useState(true)
   const [isRerank, setIsRerank] = useState(true)
+  const [typeFilter, setTypeFilter] = useState<string | null>(null)
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -43,6 +44,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     const hybrid = searchParams.get("hybrid")
     const rerank = searchParams.get("rerank")
     const category = searchParams.get("category")
+    const type = searchParams.get("type")
 
     if (q !== submittedQuery) {
       setSearchQuery(q)
@@ -55,6 +57,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     if (hybrid !== null) setIsHybrid(hybrid === "true")
     if (rerank !== null) setIsRerank(rerank === "true")
     if (category !== null) setCategoryFilter(category === "all" ? null : category)
+    if (type !== null) setTypeFilter(type === "all" ? null : type)
 
     // Auto-trigger search if q is present in URL
     if (q && q !== lastTriggeredQuery.current) {
@@ -74,6 +77,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const { data: basicResults, isLoading: isBasicLoading } = useSearch(
     !isAssisted ? submittedQuery : "",
     categoryFilter ?? undefined,
+    typeFilter ?? undefined,
     isHybrid,
     10,
     isRerank
@@ -90,7 +94,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     abortRef.current = new AbortController()
     try {
       await api.query.assisted(
-        { query: q, top_k: 8 },
+        { query: q, top_k: 8, type: typeFilter ?? undefined, source_id: categoryFilter ?? undefined },
         {
           onQueries: (event) => {
             setQueries(event.queries.map((q, index) => ({ index, query: q, status: "pending" })))
@@ -130,7 +134,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
 
   const handleSubmit = useCallback(() => {
     const q = searchQuery.trim()
-    if (!q) return
+    const hasFilter = !!categoryFilter || !!typeFilter
+    if (!q && !hasFilter) return
 
     // Update URL - this will trigger the useEffect above
     const params = new URLSearchParams(searchParams.toString())
@@ -140,6 +145,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     params.set("rerank", isRerank.toString())
     if (categoryFilter) params.set("category", categoryFilter)
     else params.delete("category")
+    if (typeFilter) params.set("type", typeFilter)
+    else params.delete("type")
     router.push(`${pathname}?${params.toString()}`)
   }, [searchQuery, isAssisted, isHybrid, isRerank, categoryFilter, searchParams, pathname, router])
 
@@ -192,6 +199,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                 onHybridChange={setIsHybrid}
                 isRerank={isRerank}
                 onRerankChange={setIsRerank}
+                typeFilter={typeFilter}
+                onTypeFilterChange={setTypeFilter}
                 onSubmit={handleSubmit}
                 isLoading={isLoading}
               />
@@ -211,6 +220,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                 onHybridChange={setIsHybrid}
                 isRerank={isRerank}
                 onRerankChange={setIsRerank}
+                typeFilter={typeFilter}
+                onTypeFilterChange={setTypeFilter}
                 onSubmit={handleSubmit}
                 isLoading={isLoading}
               />

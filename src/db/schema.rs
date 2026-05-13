@@ -24,7 +24,8 @@ pub(super) fn initialize_schema(
             text TEXT NOT NULL,
             metadata TEXT NOT NULL CHECK (json_valid(metadata)),
             source_id TEXT NOT NULL DEFAULT 'default',
-            created_at INTEGER NOT NULL DEFAULT 0
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_items_source_id ON items(source_id);
@@ -181,6 +182,12 @@ pub(super) fn initialize_schema(
     ensure_column_exists(
         connection,
         "items",
+        "updated_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column_exists(
+        connection,
+        "items",
         "access_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
@@ -205,7 +212,8 @@ pub(super) fn initialize_schema(
     )?;
     // Backfill updated_at = created_at for rows that predate the column.
     connection.execute_batch(
-        "UPDATE messages SET updated_at = created_at WHERE updated_at = 0;
+        "UPDATE items SET updated_at = created_at WHERE updated_at = 0;
+         UPDATE messages SET updated_at = created_at WHERE updated_at = 0;
          CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages(kind);
          CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at DESC);",
     )?;
@@ -233,6 +241,17 @@ pub(super) fn initialize_schema(
              description TEXT,
              created_at INTEGER NOT NULL,
              updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS ontology_predicates (
+             name TEXT NOT NULL,
+             source_id TEXT NOT NULL DEFAULT '*',
+             description TEXT NOT NULL,
+             direction TEXT NOT NULL,
+             example_from TEXT,
+             example_to TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             PRIMARY KEY (name, source_id)
          );",
     )?;
 

@@ -44,6 +44,7 @@ import type {
   UpsertSchemaRequest,
   DeleteSchemaResponse,
   IngestUrlRequest,
+  UpdateEdgeRequest,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -559,6 +560,7 @@ export async function search(data: SearchRequest): Promise<SearchResultsBundle> 
       ...(data.max_distance !== undefined && { max_distance: data.max_distance }),
       ...(data.hybrid !== undefined && { hybrid: data.hybrid }),
       ...(data.rerank !== undefined && { rerank: data.rerank }),
+      ...(data.type && { type: data.type }),
     }),
   })
   return {
@@ -620,6 +622,21 @@ export async function createEdge(data: CreateEdgeRequest): Promise<Edge> {
       metadata: data.metadata,
     }),
   })
+
+  return toEdge(response)
+}
+
+export async function updateEdge(
+  id: string,
+  data: UpdateEdgeRequest
+): Promise<Edge> {
+  const response = await request<RawEdge>(
+    `/admin/graph/edges/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }
+  )
 
   return toEdge(response)
 }
@@ -802,6 +819,7 @@ export const api = {
     listForItem: getEdgesForItem,
     neighborhood: getGraphNeighborhood,
     create: createEdge,
+    update: updateEdge,
     delete: deleteEdge,
   },
   schemas: {

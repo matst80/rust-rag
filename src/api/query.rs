@@ -34,6 +34,8 @@ pub struct AssistedQueryRequest {
     pub max_distance: f32,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +93,7 @@ pub(super) async fn assisted_query(
     let top_k = request.top_k;
     let max_distance = request.max_distance;
     let source_id = request.source_id.clone();
+    let type_name = request.type_name.clone();
 
     let body_stream = Body::from_stream(stream! {
         let sub_queries = match generate_sub_queries(&state, &openai_config, &model, &query).await {
@@ -119,7 +122,16 @@ pub(super) async fn assisted_query(
         let mut seen_ids: HashSet<String> = HashSet::new();
 
         for (index, sub_query) in effective_queries.iter().enumerate() {
-            let results = match run_search(&state, sub_query, source_id.as_deref(), top_k, max_distance).await {
+            let results = match run_search(
+                &state,
+                sub_query,
+                source_id.as_deref(),
+                type_name.as_deref(),
+                top_k,
+                max_distance,
+            )
+            .await
+            {
                 Ok(results) => results,
                 Err(error) => {
                     yield Ok::<_, Infallible>(encode_error_event(&format!(
@@ -298,6 +310,7 @@ async fn run_search(
     state: &AppState,
     query: &str,
     source_id: Option<&str>,
+    type_name: Option<&str>,
     top_k: usize,
     max_distance: f32,
 ) -> anyhow::Result<Vec<SearchResultPayload>> {
@@ -305,6 +318,7 @@ async fn run_search(
     let store = state.store.clone();
     let query_owned = query.to_owned();
     let source_owned = source_id.map(|s| s.to_owned());
+    let type_name_owned = type_name.map(|s| s.to_owned());
 
     let results = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
         let (embedding, sparse) = embedder.embed_both(&query_owned)?;
@@ -314,6 +328,7 @@ async fn run_search(
             &sparse,
             top_k,
             source_owned.as_deref(),
+            type_name_owned.as_deref(),
         )?;
         Ok(hits
             .into_iter()

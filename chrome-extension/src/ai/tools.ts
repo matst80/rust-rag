@@ -79,8 +79,120 @@ export function buildExtensionRagTools(config: Config): ToolDef[] {
         )
       },
     },
+    {
+      name: 'get_page_info',
+      description: 'get_page_info() — gets current tab URL, title, and any text the user has selected.',
+      run: async () => {
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+          if (!tab?.id) return JSON.stringify({ error: 'no active tab' })
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => ({
+              url: window.location.href,
+              title: document.title,
+              selection: window.getSelection()?.toString() || '',
+            }),
+          })
+          return JSON.stringify(results?.[0]?.result ?? { error: 'failed to get info' })
+        } catch (err) {
+          return JSON.stringify({ error: String(err) })
+        }
+      },
+    },
+    {
+      name: 'extract_images',
+      description: 'extract_images() — finds prominent images on the current page. returns src, alt, and dimensions.',
+      run: async () => {
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+          if (!tab?.id) return JSON.stringify({ error: 'no active tab' })
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              const imgs = Array.from(document.querySelectorAll('img'))
+              return imgs
+                .map((img) => ({
+                  src: img.src,
+                  alt: img.alt,
+                  width: img.naturalWidth || img.width,
+                  height: img.naturalHeight || img.height,
+                  area: (img.naturalWidth || img.width) * (img.naturalHeight || img.height),
+                }))
+                .filter((img) => img.src && img.area > 5000 && !img.src.startsWith('data:')) // filter out tiny icons and data urls
+                .sort((a, b) => b.area - a.area)
+                .slice(0, 10)
+            },
+          })
+          return JSON.stringify(results?.[0]?.result ?? [])
+        } catch (err) {
+          return JSON.stringify({ error: String(err) })
+        }
+      },
+    },
+    {
+      name: 'analyze_image',
+      description: 'analyze_image(url: string, prompt?: string) — uses the local multimodal LLM to describe or analyze an image from the page.',
+      run: async (args) => {
+        const url = String(args.url ?? '').trim()
+        if (!url) return JSON.stringify({ error: 'url is required' })
+        const prompt = String(args.prompt ?? 'Describe this image in detail.').trim()
+        
+        try {
+          const { getLlmHelper } = await import('@rust-rag/llm')
+          const helper = getLlmHelper()
+          const description = await helper.generate({
+            prompt,
+            images: [url],
+            maxTokens: 512,
+          })
+          return JSON.stringify({ url, description })
+        } catch (err) {
+          return JSON.stringify({ error: String(err) })
+        }
+      },
+    },
+    {
+      name: 'save_note',
+      description: 'save_note(title: string, text: string, tags?: string[], image_url?: string) — saves a new entry to the knowledge base.',
+      run: async (args) => {
+        const title = String(args.title ?? '').trim()
+        let text = String(args.text ?? '').trim()
+        if (!title || !text) return JSON.stringify({ error: 'title and text are required' })
+        
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+        const source_url = tab?.url || ''
+        
+        if (args.image_url) {
+          text += `\n\n![Main Image](${args.image_url})`
+        }
+
+        const payload = {
+          id: `ext-${Date.now()}`,
+          source_id: 'extension',
+          text: `# ${title}\n\n${text}\n\n---\nSource: ${source_url}`,
+          metadata: {
+            author: 'chrome-extension',
+            tags: Array.isArray(args.tags) ? args.tags : [],
+            source_url,
+          }
+        }
+        
+        try {
+          const res = await authFetch(config, '/api/store', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          })
+          return JSON.stringify(await res.json())
+        } catch (err) {
+          return JSON.stringify({ error: String(err) })
+        }
+      },
+    },
+
   ]
 }
+
 
 export async function postStore(config: Config, body: Record<string, unknown>) {
   const res = await authFetch(config, '/api/store', { method: 'POST', body: JSON.stringify(body) })
