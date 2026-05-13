@@ -52,7 +52,7 @@ NAMESPACES (`source_id`): short lowercase buckets — e.g. `knowledge` (durable 
 TYPICAL FLOW:\n\
 1. `search_entries` to load prior context.\n\
 2. Do work.\n\
-3. `store_entry` — pass `type` + `data` when content fits a registered schema; otherwise free-text with a stable `id`, `metadata.author`, `metadata.tags`.\n\
+3. MANDATORY: `store_entry` (stable id, descriptive metadata.tags + author) to persist every significant outcome. \"If it isn't in the RAG, it didn't happen.\"\n\
 4. `send_message` to hand off, citing the stored entry id.";
 
 /// Stable id of the live, editable usage guide stored in the rust-rag instance

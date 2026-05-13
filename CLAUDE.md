@@ -43,23 +43,19 @@ This project uses its own MCP server as durable cross-session, cross-agent memor
 **Project slug**: `rust-rag`
 **Namespaces**: `project:rust-rag:knowledge`, `project:rust-rag:todos`. Cross-project evergreen facts go in `knowledge`.
 
-**Canonical conventions live in the MCP tool `list_memory_conventions`** (taxonomy, required metadata, edge predicates). The tool is backed by entry `rust_rag_mcp_usage_guide_v1` in source `knowledge` — `update_item` (or `store_entry` with that id) to evolve the guidance without a redeploy. When the entry is missing the tool returns a compiled-in JSON default. Inspect typed schemas with `list_schemas`. Prefer `store_entry` with `type` + `data` when content fits a schema (decision / fact / todo / incident / note / recipe / workout / page_component) over free-text.
+### The RAG Bootstrap (Once per session)
 
-### On task start
+1. `list_memory_conventions` — Fetch project taxonomy, metadata rules, and edge predicates.
+2. `list_schemas` — Discover available typed-entry schemas (decision, todo, etc.).
+3. `search_entries` — Query with `rerank: true`. Omit `source_id` first for global context, then narrow to project namespaces.
+4. Read reference entries: `agent_collaboration_guide`, `rust_rag_project_overview`.
 
-1. `search_entries` with `source_id="project:rust-rag:knowledge"` for project context.
-2. `search_entries` with no `source_id` for cross-project hits.
-3. `list_messages` on `general` (or a project channel) for hand-offs.
+### Storage & Hand-off
 
-### Before finishing a task
-
-1. `store_entry` durable outcomes:
-   - Architecture / decisions → `project:rust-rag:knowledge`.
-   - Open todos → `project:rust-rag:todos` (metadata: `status`, `priority`).
-   - Cross-project lessons → `knowledge`.
-   - Stable descriptive `id` (e.g. `rust_rag_auth_redesign_v2`). No UUIDs.
-   - Metadata: always `author` + `tags`. Optional: `doc_type`, `status`, `priority`.
-2. If handing off, `send_message` citing the entry id.
+1. **Structured First**: Use `type` + `data` in `store_entry` if a schema fits.
+2. **Wiki Paths**: Use `path` (e.g., `features/auth`) for tree organization.
+3. **Graphing**: Link entries via `create_manual_edge` using canonical predicates.
+4. **Handoff**: `store_entry` outcomes with a stable ID, then `send_message` citing that ID.
 
 ### Reference entries (read once, trust them)
 

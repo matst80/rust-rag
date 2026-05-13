@@ -87,6 +87,40 @@ Example tree response:
 
 ---
 
+## Typed Entries and Schemas
+
+Entries can be stored as structured data instead of raw text. This enables schema validation and specialized frontend views.
+
+### List Schemas
+
+`GET /api/schemas`
+
+Returns registered schemas with their `type_name`, `json_schema`, and `item_count`.
+
+### Store Typed Entry
+
+`POST /api/store`
+
+```json
+{
+  "id": "dec_auth_strategy",
+  "text": "Using Zitadel for OAuth2 device flow.",
+  "source_id": "project:rust-rag:knowledge",
+  "type": "decision",
+  "data": {
+    "title": "Auth Strategy",
+    "status": "accepted",
+    "rationale": "Built-in support for device flow and OIDC.",
+    "alternatives": ["Auth0", "Keycloak"]
+  },
+  "metadata": { "author": "mats", "tags": ["auth"] }
+}
+```
+
+When `type` is set, `data` MUST validate against the registered schema for that type.
+
+---
+
 ## Attachments
 
 Files bind to existing entries. On disk under `RAG_UPLOAD_PATH`
