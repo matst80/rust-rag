@@ -179,7 +179,32 @@ async function request<T>(
   })
 
   if (!response.ok) {
-    throw new APIError(response.status, `API error: ${response.statusText}`)
+    // Surface the backend's error body so 4xx/5xx responses carry the actual
+    // reason instead of just the HTTP status text. Backends in this project
+    // return `{"error": "..."}` on failure; fall back to raw text when the
+    // body isn't JSON.
+    let detail = ""
+    try {
+      const body = await response.text()
+      if (body) {
+        try {
+          const parsed = JSON.parse(body)
+          detail =
+            (typeof parsed?.error === "string" && parsed.error) ||
+            (typeof parsed?.message === "string" && parsed.message) ||
+            body
+        } catch {
+          detail = body
+        }
+      }
+    } catch {
+      // ignore — fall back to statusText
+    }
+    const message = detail
+      ? `${response.status} ${response.statusText}: ${detail}`
+      : `API error: ${response.statusText}`
+    console.error("API request failed", endpoint, response.status, detail)
+    throw new APIError(response.status, message)
   }
 
   // Handle empty responses (like DELETE)
@@ -433,6 +458,52 @@ export async function llmRechunkItem(
     method: "POST",
     body: JSON.stringify(config),
   })
+}
+
+export interface OntologyFilterDrops {
+  bad_predicate: number
+  unknown_id: number
+  target_not_involved: number
+  self_loop: number
+  below_threshold: number
+}
+
+export interface OntologyItemDebug {
+  item_id: string
+  neighbors: number
+  neighbor_ids: string[]
+  valid_predicates: string[]
+  raw_llm_output: string | null
+  proposed_edges: number | null
+  filter_drops: OntologyFilterDrops
+  error: string | null
+}
+
+export interface OntologyRunReport {
+  items_processed: number
+  items_skipped_no_neighbors: number
+  edges_committed: Array<{
+    item_id: string
+    from_id: string
+    to_id: string
+    predicate: string
+    confidence: number
+    status: string
+    reasoning: string | null
+  }>
+  estimated_input_tokens_per_item: number
+  debug: OntologyItemDebug[]
+}
+
+export async function runOntologyBatch(): Promise<OntologyRunReport> {
+  return request<OntologyRunReport>("/admin/ontology/run", { method: "POST" })
+}
+
+export async function runOntologyForItem(id: string): Promise<OntologyRunReport> {
+  return request<OntologyRunReport>(
+    `/admin/ontology/run/${encodeURIComponent(id)}`,
+    { method: "POST" }
+  )
 }
 
 export async function createItem(data: StoreRequest): Promise<Entry> {
@@ -821,6 +892,10 @@ export const api = {
     create: createEdge,
     update: updateEdge,
     delete: deleteEdge,
+  },
+  ontology: {
+    runBatch: runOntologyBatch,
+    runForItem: runOntologyForItem,
   },
   schemas: {
     list: listSchemas,

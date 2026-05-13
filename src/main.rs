@@ -19,11 +19,35 @@ use tracing_subscriber::util::SubscriberInitExt;
 use rust_rag::{
     api::{AppState, EmbedderHandle},
     build_app,
-    config::AppConfig,
+    config::{AppConfig, OpenAiChatConfig},
     db::{AuthStore, MessageStore, SqliteVectorStore, UserMemoryStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
     manager, ontology,
 };
+
+/// Effective LLM for the ontology worker. Prefer the analysis endpoint
+/// (typed-output-tuned model, often the same one used for store analysis);
+/// fall back to the chat OpenAI endpoint when analysis isn't configured.
+/// Returning a fully-populated `OpenAiChatConfig` keeps the worker signature
+/// unchanged.
+fn ontology_llm_config(cfg: &AppConfig) -> OpenAiChatConfig {
+    if let (Some(url), Some(model)) = (
+        cfg.analysis.base_url.clone(),
+        cfg.analysis.model.clone(),
+    ) {
+        OpenAiChatConfig {
+            base_url: Some(url),
+            api_key: cfg.analysis.api_key.clone().or_else(|| cfg.openai_chat.api_key.clone()),
+            default_model: Some(model),
+            timeout_secs: cfg.analysis.timeout_secs.max(1),
+            cdp_url: cfg.openai_chat.cdp_url.clone(),
+            retrieval_system_prompt: cfg.openai_chat.retrieval_system_prompt.clone(),
+            query_expansion_prompt: cfg.openai_chat.query_expansion_prompt.clone(),
+        }
+    } else {
+        cfg.openai_chat.clone()
+    }
+}
 
 /// Bundle of OTel providers built from env. Caller shuts each down at exit.
 struct OtelProviders {
@@ -237,7 +261,8 @@ async fn main() -> Result<()> {
     )
     .with_manager(config.manager.clone())
     .with_analysis(config.analysis.clone())
-    .with_dreaming(config.dreaming.clone());
+    .with_dreaming(config.dreaming.clone())
+    .with_ontology(config.ontology.clone(), ontology_llm_config(&config));
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
@@ -396,7 +421,7 @@ async fn main() -> Result<()> {
             store_service.clone(),
             embedder_handle.clone(),
             reqwest::Client::new(),
-            config.openai_chat.clone(),
+            ontology_llm_config(&config),
             config.ontology.clone(),
             shutdown_rx,
         )));

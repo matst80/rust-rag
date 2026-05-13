@@ -73,9 +73,50 @@ pub async fn connect(database_url: &str, max_size: usize) -> Result<PgPool> {
     {
         let client = pool.get().await.context("acquiring postgres connection")?;
         run_migrations(&client).await?;
+        seed_default_ontology_predicates(&client).await?;
     }
 
     Ok(pool)
+}
+
+/// Mirror the SQLite seed path: insert the canonical predicate vocabulary on
+/// first boot so the ontology worker has a schema to filter against.
+/// Without this, every edge the LLM emits gets dropped with
+/// `predicate not in schema`. Idempotent — bails when the table already has rows.
+async fn seed_default_ontology_predicates(client: &tokio_postgres::Client) -> Result<()> {
+    let row = client
+        .query_one("SELECT count(*) FROM ontology_predicates", &[])
+        .await
+        .context("counting ontology_predicates")?;
+    let count: i64 = row.get(0);
+    if count > 0 {
+        return Ok(());
+    }
+
+    use crate::db::default_ontology_predicates;
+    let predicates = default_ontology_predicates();
+    info!("postgres: seeding {} default ontology predicates", predicates.len());
+    for p in predicates {
+        // Stored as source_id='*' so the worker's `WHERE source_id=$1 OR source_id='*'`
+        // query picks them up regardless of which namespace the item lives in.
+        client
+            .execute(
+                "INSERT INTO ontology_predicates \
+                 (name, source_id, description, direction, example_from, example_to) \
+                 VALUES ($1, '*', $2, $3, $4, $5) \
+                 ON CONFLICT (name, source_id) DO NOTHING",
+                &[
+                    &p.name,
+                    &p.description,
+                    &p.direction,
+                    &p.example_from,
+                    &p.example_to,
+                ],
+            )
+            .await
+            .with_context(|| format!("seeding predicate {}", p.name))?;
+    }
+    Ok(())
 }
 
 /// Embedded migrations. Discovered at compile time via `include_str!` so the
@@ -1053,7 +1094,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let rows = client
                 .query(
-                    "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
+                    "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
                             d.path, d.type, d.tags, \
                             MIN(c.dense_embedding <=> $1::vector) AS distance \
                      FROM chunks c JOIN documents d ON d.id = c.document_id \

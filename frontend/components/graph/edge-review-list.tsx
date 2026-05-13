@@ -2,10 +2,11 @@
 
 import * as React from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { Check, X, Info, Network, Zap, ShieldCheck } from "lucide-react"
-import { api } from "@/lib/api/client"
+import { Check, X, Info, Network, Zap, ShieldCheck, Play, Loader2 } from "lucide-react"
+import { api, OntologyRunReport } from "@/lib/api/client"
 import { Edge } from "@/lib/api/types"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -19,6 +20,19 @@ interface EdgeReviewListProps {
 export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
   const [edges, setEdges] = React.useState<Edge[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [runningBatch, setRunningBatch] = React.useState(false)
+  const [runningItem, setRunningItem] = React.useState(false)
+  const [itemIdInput, setItemIdInput] = React.useState("")
+  const [lastRun, setLastRun] = React.useState<
+    | {
+        kind: "batch" | "item"
+        target?: string
+        startedAt: number
+        elapsedMs: number
+        report: OntologyRunReport
+      }
+    | null
+  >(null)
 
   const fetchSuggestedEdges = React.useCallback(async () => {
     try {
@@ -68,6 +82,72 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
     }
   }
 
+  const summarizeReport = (
+    report: Awaited<ReturnType<typeof api.ontology.runBatch>>
+  ) => {
+    const suggested = report.edges_committed.filter(
+      (e) => e.status === "suggested"
+    ).length
+    const confirmed = report.edges_committed.filter(
+      (e) => e.status === "confirmed"
+    ).length
+    return `${report.items_processed} item(s) processed · ${report.edges_committed.length} edge(s) (${suggested} suggested, ${confirmed} auto-confirmed)${
+      report.items_skipped_no_neighbors > 0
+        ? ` · ${report.items_skipped_no_neighbors} skipped (no neighbors)`
+        : ""
+    }`
+  }
+
+  const handleRunBatch = async () => {
+    const startedAt = Date.now()
+    try {
+      setRunningBatch(true)
+      const report = await api.ontology.runBatch()
+      const elapsedMs = Date.now() - startedAt
+      setLastRun({ kind: "batch", startedAt, elapsedMs, report })
+      toast.success(summarizeReport(report))
+      await fetchSuggestedEdges()
+      onReviewComplete?.()
+    } catch (error) {
+      console.error("Failed to run ontology batch:", error)
+      toast.error(
+        error instanceof Error
+          ? `Ontology run failed: ${error.message}`
+          : "Ontology run failed"
+      )
+    } finally {
+      setRunningBatch(false)
+    }
+  }
+
+  const handleRunForItem = async () => {
+    const id = itemIdInput.trim()
+    if (!id) {
+      toast.error("Enter an item id")
+      return
+    }
+    const startedAt = Date.now()
+    try {
+      setRunningItem(true)
+      const report = await api.ontology.runForItem(id)
+      const elapsedMs = Date.now() - startedAt
+      setLastRun({ kind: "item", target: id, startedAt, elapsedMs, report })
+      toast.success(summarizeReport(report))
+      setItemIdInput("")
+      await fetchSuggestedEdges()
+      onReviewComplete?.()
+    } catch (error) {
+      console.error("Failed to run ontology for item:", error)
+      toast.error(
+        error instanceof Error
+          ? `Run failed: ${error.message}`
+          : "Run failed"
+      )
+    } finally {
+      setRunningItem(false)
+    }
+  }
+
   if (loading && edges.length === 0) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -79,12 +159,65 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
   if (edges.length === 0) {
     return (
       <Card className="border-dashed bg-muted/50">
-        <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="h-12 w-12 text-muted-foreground mb-4 opacity-20" />
-          <h3 className="text-lg font-medium">Clear Queue</h3>
-          <p className="text-sm text-muted-foreground max-w-[250px]">
-            No suggested edges awaiting review. The ontology is synchronized.
-          </p>
+        <CardContent className="flex flex-col items-center justify-center py-12 text-center gap-6">
+          <div className="flex flex-col items-center">
+            <ShieldCheck className="h-12 w-12 text-muted-foreground mb-4 opacity-20" />
+            <h3 className="text-lg font-medium">Clear Queue</h3>
+            <p className="text-sm text-muted-foreground max-w-[280px]">
+              No suggested edges awaiting review. The ontology is synchronized.
+            </p>
+          </div>
+
+          <div className="w-full max-w-sm flex flex-col gap-3 border-t border-border/40 pt-6">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              Force a run
+            </p>
+            <Button
+              variant="secondary"
+              onClick={handleRunBatch}
+              disabled={runningBatch || runningItem}
+              className="w-full"
+            >
+              {runningBatch ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Play className="h-4 w-4 mr-2" />
+              )}
+              Run ontology batch
+            </Button>
+            <div className="flex gap-2">
+              <Input
+                placeholder="item id"
+                value={itemIdInput}
+                onChange={(e) => setItemIdInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !runningItem && itemIdInput.trim()) {
+                    e.preventDefault()
+                    handleRunForItem()
+                  }
+                }}
+                disabled={runningItem || runningBatch}
+                className="font-mono text-xs"
+              />
+              <Button
+                variant="outline"
+                onClick={handleRunForItem}
+                disabled={runningItem || runningBatch || !itemIdInput.trim()}
+              >
+                {runningItem ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground text-left">
+              Batch processes pending items. Single-item run force-re-extracts
+              regardless of status.
+            </p>
+          </div>
+
+          {lastRun && <LastRunDebug run={lastRun} />}
         </CardContent>
       </Card>
     )
@@ -159,5 +292,203 @@ export function EdgeReviewList({ onReviewComplete }: EdgeReviewListProps) {
         </AnimatePresence>
       </div>
     </ScrollArea>
+  )
+}
+
+interface LastRunDebugProps {
+  run: {
+    kind: "batch" | "item"
+    target?: string
+    startedAt: number
+    elapsedMs: number
+    report: OntologyRunReport
+  }
+}
+
+function LastRunDebug({ run }: LastRunDebugProps) {
+  const { report, kind, target, elapsedMs, startedAt } = run
+  const noEdges =
+    report.items_processed === 0 && report.items_skipped_no_neighbors === 0
+  return (
+    <div className="w-full max-w-sm border-t border-border/40 pt-4 text-left">
+      <details open className="text-xs">
+        <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none flex items-center justify-between">
+          <span>
+            Last run · {kind === "item" ? "single" : "batch"}
+            {target ? ` · ${target}` : ""}
+          </span>
+          <span className="font-mono text-[10px] opacity-60">
+            {new Date(startedAt).toLocaleTimeString()} · {elapsedMs} ms
+          </span>
+        </summary>
+        <div className="mt-3 space-y-2 font-mono text-[11px]">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            <span className="text-muted-foreground">items processed</span>
+            <span>{report.items_processed}</span>
+            <span className="text-muted-foreground">skipped (no neighbors)</span>
+            <span>{report.items_skipped_no_neighbors}</span>
+            <span className="text-muted-foreground">edges committed</span>
+            <span>{report.edges_committed.length}</span>
+            <span className="text-muted-foreground">~tokens/call</span>
+            <span>{report.estimated_input_tokens_per_item}</span>
+          </div>
+
+          {noEdges && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] text-amber-700 dark:text-amber-300 font-sans not-italic">
+              Worker pulled 0 pending items. Either nothing has
+              <code className="mx-1">ontology_status=pending</code> or the
+              embedder is still warming up. Try the single-item form with a
+              known id to force a re-run.
+            </div>
+          )}
+
+          {report.edges_committed.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground font-sans">
+                Edges
+              </div>
+              <ul className="space-y-1.5">
+                {report.edges_committed.map((e, i) => (
+                  <li
+                    key={`${e.from_id}-${e.predicate}-${e.to_id}-${i}`}
+                    className="rounded bg-muted/40 p-2 space-y-1"
+                  >
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <span className="truncate max-w-[90px]" title={e.from_id}>
+                        {e.from_id}
+                      </span>
+                      <span className="text-muted-foreground">—[</span>
+                      <span className="text-primary">{e.predicate}</span>
+                      <span className="text-muted-foreground">]→</span>
+                      <span className="truncate max-w-[90px]" title={e.to_id}>
+                        {e.to_id}
+                      </span>
+                      <Badge
+                        variant={
+                          e.status === "confirmed" ? "default" : "secondary"
+                        }
+                        className="ml-auto text-[9px] h-4 px-1"
+                      >
+                        {e.status} · {Math.round(e.confidence * 100)}%
+                      </Badge>
+                    </div>
+                    {e.reasoning && (
+                      <div className="text-muted-foreground italic font-sans text-[10px] leading-snug">
+                        &quot;{e.reasoning}&quot;
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {report.debug && report.debug.length > 0 && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground font-sans">
+                Per-item trace
+              </div>
+              <ul className="space-y-2">
+                {report.debug.map((d, i) => {
+                  const drops = d.filter_drops
+                  const totalDropped =
+                    drops.bad_predicate +
+                    drops.unknown_id +
+                    drops.target_not_involved +
+                    drops.self_loop +
+                    drops.below_threshold
+                  return (
+                    <li
+                      key={`${d.item_id}-${i}`}
+                      className="rounded bg-muted/30 p-2 space-y-1.5"
+                    >
+                      <div
+                        className="truncate text-[10px]"
+                        title={d.item_id}
+                      >
+                        {d.item_id}
+                      </div>
+                      {d.error && (
+                        <div className="rounded border border-destructive/30 bg-destructive/5 p-1.5 font-sans text-[10px] text-destructive">
+                          {d.error}
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                        <span className="text-muted-foreground">neighbors</span>
+                        <span>{d.neighbors}</span>
+                        <span className="text-muted-foreground">predicates seeded</span>
+                        <span>{d.valid_predicates.length}</span>
+                        {d.proposed_edges !== null && (
+                          <>
+                            <span className="text-muted-foreground">proposed by LLM</span>
+                            <span>{d.proposed_edges}</span>
+                          </>
+                        )}
+                      </div>
+                      {totalDropped > 0 && (
+                        <div className="space-y-0.5">
+                          <div className="text-[10px] uppercase tracking-wide text-muted-foreground font-sans">
+                            Filtered ({totalDropped})
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px]">
+                            {drops.bad_predicate > 0 && (
+                              <>
+                                <span className="text-muted-foreground">predicate not in schema</span>
+                                <span>{drops.bad_predicate}</span>
+                              </>
+                            )}
+                            {drops.unknown_id > 0 && (
+                              <>
+                                <span className="text-muted-foreground">id hallucinated</span>
+                                <span>{drops.unknown_id}</span>
+                              </>
+                            )}
+                            {drops.target_not_involved > 0 && (
+                              <>
+                                <span className="text-muted-foreground">target not in edge</span>
+                                <span>{drops.target_not_involved}</span>
+                              </>
+                            )}
+                            {drops.self_loop > 0 && (
+                              <>
+                                <span className="text-muted-foreground">self-loop</span>
+                                <span>{drops.self_loop}</span>
+                              </>
+                            )}
+                            {drops.below_threshold > 0 && (
+                              <>
+                                <span className="text-muted-foreground">below confidence threshold</span>
+                                <span>{drops.below_threshold}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {d.valid_predicates.length === 0 && (
+                        <div className="rounded border border-amber-500/30 bg-amber-500/5 p-1.5 font-sans text-[10px] text-amber-700 dark:text-amber-300">
+                          No predicates are seeded for this source_id — every
+                          edge the LLM proposes will be dropped. Seed the
+                          ontology predicate table first.
+                        </div>
+                      )}
+                      {d.raw_llm_output && (
+                        <details className="font-sans text-[10px]">
+                          <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+                            Raw LLM output
+                          </summary>
+                          <pre className="mt-1 max-h-48 overflow-auto rounded bg-muted/60 p-1.5 text-[9px] whitespace-pre-wrap break-all">
+                            {d.raw_llm_output}
+                          </pre>
+                        </details>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
+        </div>
+      </details>
+    </div>
   )
 }

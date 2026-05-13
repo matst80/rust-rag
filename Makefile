@@ -47,16 +47,21 @@ RAG_MULTIMODAL_TIMEOUT_SECS ?= 120
 RAG_UPLOAD_PATH ?= $(CURDIR)/data/uploads
 
 # Ontology worker — tuned for a local LLM with a 65535-token context window.
-# Token budget per call: ~700 (system prompt) + target_preview/4 + neighbors*(candidate_preview/4)
-# With these defaults: ~700 + 500 + 10*375 = ~4950 input tokens, well within 65535.
-# Increase NEIGHBOR_COUNT or preview sizes further if the model handles more context well.
+# Token budget per call (slim prompt + truncated previews for a 4B model):
+# ~300 (system) + target_preview/4 + neighbors*(candidate_preview/4)
+# With these defaults: ~300 + 200 + 10*75 = ~1250 input tokens — broad coverage
+# (10 candidates) at short snippets per candidate. Raise CANDIDATE_PREVIEW_CHARS
+# if the model needs more context per candidate to pick a relation.
+# CONFIDENCE_THRESHOLD=0.5 — keep almost everything the LLM proposes so the
+# HITL review queue stays full. Humans reject the bad ones. Auto-confirm
+# happens at 0.95 in code, so virtually all edges flow through review.
 RAG_ONTOLOGY_ENABLED ?= true
-RAG_ONTOLOGY_CONFIDENCE_THRESHOLD ?= 0.6
+RAG_ONTOLOGY_CONFIDENCE_THRESHOLD ?= 0.5
 RAG_ONTOLOGY_BATCH_SIZE ?= 5
 RAG_ONTOLOGY_INTERVAL_SECS ?= 30
 RAG_ONTOLOGY_NEIGHBOR_COUNT ?= 10
-RAG_ONTOLOGY_TARGET_PREVIEW_CHARS ?= 2000
-RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS ?= 1500
+RAG_ONTOLOGY_TARGET_PREVIEW_CHARS ?= 800
+RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS ?= 300
 
 # Manager worker — autonomous orchestrator. Uses xAI Grok by default.
 RAG_MANAGER_ENABLED ?= true
@@ -319,7 +324,17 @@ run-pg: export-bge-m3
 	RAG_OPENAI_API_KEY="$(RAG_OPENAI_API_KEY)" \
 	RAG_OPENAI_MODEL="$(RAG_OPENAI_MODEL)" \
 	RAG_OPENAI_TIMEOUT_SECS="$(RAG_OPENAI_TIMEOUT_SECS)" \
-	RAG_ONTOLOGY_ENABLED="false" \
+	RAG_ANALYSIS_ENABLED="$(RAG_ANALYSIS_ENABLED)" \
+	RAG_ANALYSIS_BASE_URL="$(RAG_OPENAI_API_BASE_URL)" \
+	RAG_ANALYSIS_MODEL="$(RAG_OPENAI_MODEL)" \
+	RAG_ANALYSIS_API_KEY="$(RAG_OPENAI_API_KEY)" \
+	RAG_ONTOLOGY_ENABLED="$(RAG_ONTOLOGY_ENABLED)" \
+	RAG_ONTOLOGY_CONFIDENCE_THRESHOLD="$(RAG_ONTOLOGY_CONFIDENCE_THRESHOLD)" \
+	RAG_ONTOLOGY_BATCH_SIZE="$(RAG_ONTOLOGY_BATCH_SIZE)" \
+	RAG_ONTOLOGY_INTERVAL_SECS="$(RAG_ONTOLOGY_INTERVAL_SECS)" \
+	RAG_ONTOLOGY_NEIGHBOR_COUNT="$(RAG_ONTOLOGY_NEIGHBOR_COUNT)" \
+	RAG_ONTOLOGY_TARGET_PREVIEW_CHARS="$(RAG_ONTOLOGY_TARGET_PREVIEW_CHARS)" \
+	RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS="$(RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS)" \
 	RAG_MANAGER_ENABLED="false" \
 	RAG_CHUNK_MAX_CHARS="$(RAG_CHUNK_MAX_CHARS)" \
 	RAG_CHUNK_OVERLAP_CHARS="$(RAG_CHUNK_OVERLAP_CHARS)" \

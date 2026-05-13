@@ -1,7 +1,7 @@
 use crate::{
     config::{
         AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
-        MultimodalConfig, OpenAiChatConfig,
+        MultimodalConfig, OntologyConfig, OpenAiChatConfig,
     },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
@@ -48,6 +48,7 @@ mod auth;
 mod chunking;
 mod multimodal;
 mod openai;
+mod ontology;
 mod presence;
 mod query;
 pub mod schemas;
@@ -55,7 +56,9 @@ mod tombstones;
 mod ingest_url;
 mod dreaming;
 
-pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
+pub use analysis::{
+    AnalyzeEntryParams, ChatCompletionRequest, StoreAnalysis, chat_completion_text, run_analysis,
+};
 pub use dreaming::{run_dreaming_worker, process_dreaming_round};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
@@ -123,6 +126,12 @@ pub struct AppState {
     pub multimodal_client: reqwest::Client,
     pub analysis: Arc<AnalysisConfig>,
     pub dreaming: Arc<DreamingConfig>,
+    pub ontology: Arc<OntologyConfig>,
+    /// Effective LLM endpoint for the ontology worker. Prefers
+    /// `RAG_ANALYSIS_*` when fully configured (so analysis + ontology share
+    /// the typed-output-friendly model); otherwise falls back to
+    /// `RAG_OPENAI_*`. `None` when neither is configured.
+    pub ontology_llm: Arc<OpenAiChatConfig>,
     /// Compiled-schema cache for typed-entry validation. Lives for the
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
@@ -175,6 +184,8 @@ impl AppState {
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
             dreaming: Arc::new(DreamingConfig::default()),
+            ontology: Arc::new(OntologyConfig::default()),
+            ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -182,6 +193,12 @@ impl AppState {
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
         self.analysis = Arc::new(analysis);
+        self
+    }
+
+    pub fn with_ontology(mut self, ontology: OntologyConfig, llm: OpenAiChatConfig) -> Self {
+        self.ontology = Arc::new(ontology);
+        self.ontology_llm = Arc::new(llm);
         self
     }
 
@@ -258,6 +275,8 @@ impl AppState {
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
             dreaming: Arc::new(DreamingConfig::default()),
+            ontology: Arc::new(OntologyConfig::default()),
+            ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -976,6 +995,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
+        .route("/admin/ontology/run", post(ontology::run_batch))
+        .route("/admin/ontology/run/{id}", post(ontology::run_for_item))
         .route(
             "/admin/graph/edges/{id}",
             axum::routing::patch(update_graph_edge).delete(delete_graph_edge),

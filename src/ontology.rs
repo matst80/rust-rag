@@ -1,73 +1,156 @@
 use crate::{
-    api::EmbedderHandle,
+    api::{ChatCompletionRequest, EmbedderHandle, chat_completion_text},
     config::{OntologyConfig, OpenAiChatConfig},
-    db::{ManualEdgeInput, VectorStore},
+    db::{GraphEdgeRecord, ItemRecord, ManualEdgeInput, VectorStore},
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
-
-fn get_ontology_system_prompt(predicates: &[crate::db::OntologyPredicateRecord]) -> String {
-    let mut schema_table = String::from("| Predicate | Direction (from → to) | Example |\n|-----------|-----------------------|---------|\n");
-    for p in predicates {
-        let example = match (&p.example_from, &p.example_to) {
-            (Some(f), Some(t)) => format!("\"{}\" {} \"{}\"", f, p.name, t),
-            _ => "...".to_owned(),
-        };
-        schema_table.push_str(&format!(
-            "| {} | {} | {} |\n",
-            p.name,
-            p.direction,
-            example
-        ));
-    }
-    
-    format!(r#"### Role
-You are an Ontology Edge Detector for a knowledge graph. Given a TARGET document and CANDIDATE documents, identify directed semantic relationships between them using a fixed schema.
-
-### Relationship Schema (EXHAUSTIVE — use NO other predicates)
-{}
-
-### Rules
-1. Direction matters: `from_id PREDICATE to_id` means the relationship holds in that direction.
-2. Only create an edge if the relationship is EXPLICIT or STRONGLY implied. When in doubt, omit.
-3. If no predicate from the schema fits a candidate, skip that candidate entirely.
-4. Every edge must involve the TARGET as either from_id or to_id.
-5. Only use IDs that appear verbatim in the input — never invent IDs.
-6. Assign a confidence score (0.0–1.0) to each edge:
-   - 0.9–1.0: explicit, unambiguous statement in the text
-   - 0.7–0.9: strongly implied
-   - 0.5–0.7: reasonably inferred but not stated
-   - below 0.5: do not include the edge
-7. Provide a one-sentence `reasoning` for each edge explaining why the relationship exists.
-8. Output ONLY the JSON object below. No prose, no markdown, no code fences.
-
-### Output Schema
-{{"edges":[{{"from_id":"<id>","predicate":"<predicate>","to_id":"<id>","confidence":<0.0-1.0>,"reasoning":"<one sentence description>"}}]}}
-When no relationships apply: {{"edges":[]}}
-
-### Example
-TARGET: {{"id":"id-A","text":"A HashMap is a hash-table-based associative data structure providing O(1) average-case lookup.","type":"fact","tags":["rust","data-structures"],"source_id":"knowledge"}}
-CANDIDATES:
-- {{"id":"id-B","text":"A data structure is an abstraction for organizing data in memory to enable efficient operations.","type":"concept","tags":["cs-basics"],"source_id":"knowledge"}}
-- {{"id":"id-C","text":"Hashing maps variable-length data to a fixed-size integer index via a hash function.","type":"fact","tags":["algorithms"],"source_id":"knowledge"}}
-
-OUTPUT: {{"edges":[{{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.97,"reasoning":"HashMap is explicitly described as a data structure."}},{{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.91,"reasoning":"HashMap uses hashing as its underlying mechanism for lookups."}}]}}
-"#, schema_table)
+/// One-shot run report returned by [`run_once`] / [`run_for_item`].
+/// Surfaced via the admin endpoints so a caller can verify the worker
+/// without tailing logs.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OntologyRunReport {
+    /// Items the worker pulled and ran the LLM on.
+    pub items_processed: usize,
+    /// Items that had no neighbors (LLM skipped — nothing to compare against).
+    pub items_skipped_no_neighbors: usize,
+    /// Edges actually written to the graph table.
+    pub edges_committed: Vec<CommittedEdge>,
+    /// LLM input-token estimate per item, for context-window debugging.
+    pub estimated_input_tokens_per_item: usize,
+    /// Per-item LLM traces: raw model output + filter-reason breakdown.
+    /// Populated regardless of whether any edges were committed, so a
+    /// "0 edges committed" run still surfaces why.
+    pub debug: Vec<ItemDebug>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemDebug {
+    pub item_id: String,
+    /// Number of neighbors fed to the LLM (max = `RAG_ONTOLOGY_NEIGHBOR_COUNT`).
+    pub neighbors: usize,
+    /// Neighbor ids — handy when the model hallucinates ids that don't match these.
+    pub neighbor_ids: Vec<String>,
+    /// Names of predicates seeded for this item's source_id. Empty list ⇒
+    /// every edge will be filtered (no valid predicates).
+    pub valid_predicates: Vec<String>,
+    /// Raw JSON the LLM emitted, truncated to ~2 KB. `None` if the call
+    /// didn't reach the parse stage (HTTP error, empty body, etc.).
+    pub raw_llm_output: Option<String>,
+    /// Edges the model proposed before filtering. `None` when the LLM call
+    /// itself failed (see `error`).
+    pub proposed_edges: Option<usize>,
+    pub filter_drops: FilterDrops,
+    /// Set when the LLM call or parse failed entirely.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FilterDrops {
+    /// Predicate not in the schema table for this source_id.
+    pub bad_predicate: usize,
+    /// `from_id` or `to_id` not in the candidates + target set.
+    pub unknown_id: usize,
+    /// Edge doesn't include the target as one endpoint.
+    pub target_not_involved: usize,
+    /// `from_id == to_id`.
+    pub self_loop: usize,
+    /// `confidence < threshold`.
+    pub below_threshold: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommittedEdge {
+    pub item_id: String,
+    pub from_id: String,
+    pub to_id: String,
+    pub predicate: String,
+    pub confidence: f32,
+    pub status: String,
+    pub reasoning: Option<String>,
+}
+
+fn committed_edge(item_id: &str, record: &GraphEdgeRecord) -> CommittedEdge {
+    let status = record
+        .metadata
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("suggested")
+        .to_owned();
+    let reasoning = record
+        .metadata
+        .get("reasoning")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    CommittedEdge {
+        item_id: item_id.to_owned(),
+        from_id: record.from_item_id.clone(),
+        to_id: record.to_item_id.clone(),
+        predicate: record.relation.clone().unwrap_or_default(),
+        confidence: record.weight,
+        status,
+        reasoning,
+    }
+}
+
+
+fn get_ontology_system_prompt(predicates: &[crate::db::OntologyPredicateRecord]) -> String {
+    // Flat bullet list keyed by name + description from the DB. Small models
+    // lose alignment in markdown tables, so we deliberately avoid them.
+    let mut relations = String::new();
+    for p in predicates {
+        relations.push_str(&format!("- {}: {}\n", p.name, p.description));
+    }
+
+    format!(
+        r#"You connect a TARGET document to nearby CANDIDATE documents using relations.
+A HUMAN will review every edge you emit and reject the bad ones, so PROPOSE
+PLAUSIBLE RELATIONS even when you're not 100% certain. Recall matters more
+than precision — a missing edge is worse than a rejected one.
+
+Allowed relations (use these exact names, nothing else) — read as `from RELATION to`:
+{}
+"Same topic" / "related work" / "both mention X" is still NOT a relation — those
+add no information. But if a relation is plausibly there, emit it.
+
+Output one line of JSON, nothing else:
+{{"edges":[{{"from":"<id>","rel":"<relation>","to":"<id>","conf":<0.5-1.0>}}]}}
+
+If no relations apply at all: {{"edges":[]}}
+
+Confidence guide:
+- 0.9+ : text explicitly states the relation
+- 0.7-0.9 : strongly implied
+- 0.5-0.7 : plausible but inferred (still emit — the human will judge)
+
+Rules:
+- One endpoint must be the TARGET id.
+- Use ids verbatim from the input. Never invent."#,
+        relations
+    )
+}
+
+/// Edge the LLM emits. Field names use the short form documented in the
+/// system prompt (`from`/`rel`/`to`/`conf`). Serde aliases keep us tolerant
+/// of the legacy `from_id`/`predicate`/`to_id`/`confidence` names in case
+/// a model parrots an old prompt or a cached response sneaks through.
+/// `reasoning` is no longer requested but accepted if a model volunteers one.
 #[derive(Debug, Deserialize)]
 struct OntologyEdge {
-    from_id: String,
-    predicate: String,
-    to_id: String,
-    #[serde(default)]
-    confidence: f32,
+    #[serde(alias = "from_id")]
+    from: String,
+    #[serde(alias = "predicate")]
+    rel: String,
+    #[serde(alias = "to_id")]
+    to: String,
+    #[serde(default, alias = "confidence")]
+    conf: f32,
     #[serde(default)]
     reasoning: Option<String>,
 }
@@ -77,19 +160,12 @@ struct OntologyResponse {
     edges: Vec<OntologyEdge>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatChoice>,
-}
+// (chat envelope parsing now lives in api::analysis::chat_completion_text)
 
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoiceMessage {
-    content: Option<String>,
+/// Token-budget estimate per LLM call. Surfaced in the worker startup log
+/// and in run reports so context-window issues are visible at a glance.
+fn estimate_input_tokens(cfg: &OntologyConfig) -> usize {
+    700 + cfg.target_preview_chars / 4 + cfg.neighbor_count * (cfg.candidate_preview_chars / 4)
 }
 
 pub async fn run_ontology_worker(
@@ -101,20 +177,15 @@ pub async fn run_ontology_worker(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     if !openai.is_configured() {
-        info!("ontology worker: disabled (no OpenAI base URL configured)");
+        info!("ontology worker: disabled (no LLM base URL configured)");
         return;
     }
     let Some(model) = openai.default_model.clone() else {
-        warn!("ontology worker: disabled (RAG_OPENAI_MODEL not set)");
+        warn!("ontology worker: disabled (no LLM model configured)");
         return;
     };
 
-    // Rough token budget estimate: system_prompt≈700 + target≈(target_chars/4) +
-    // neighbors*(candidate_chars/4) + output≤512. Log it so context-window issues
-    // are immediately visible. Set RUST_LOG=rust_rag::ontology=debug for per-item detail.
-    let estimated_input_tokens = 700
-        + ontology_cfg.target_preview_chars / 4
-        + ontology_cfg.neighbor_count * (ontology_cfg.candidate_preview_chars / 4);
+    let estimated_input_tokens = estimate_input_tokens(&ontology_cfg);
     info!(
         "ontology worker: starting — interval={}s batch={} neighbors={} threshold={} \
          ~{estimated_input_tokens} input tokens/call (set RUST_LOG=rust_rag::ontology=debug for per-item logs)",
@@ -128,10 +199,15 @@ pub async fn run_ontology_worker(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(err) =
-                    process_batch(&store, &embedder, &http_client, &openai, &model, &ontology_cfg).await
-                {
-                    error!("ontology worker: batch error: {err}");
+                match run_once(&store, &embedder, &http_client, &openai, &model, &ontology_cfg).await {
+                    Ok(report) if report.items_processed == 0 => {} // idle
+                    Ok(report) => info!(
+                        "ontology worker: tick — processed={} skipped_no_neighbors={} edges_committed={}",
+                        report.items_processed,
+                        report.items_skipped_no_neighbors,
+                        report.edges_committed.len()
+                    ),
+                    Err(err) => error!("ontology worker: batch error: {err}"),
                 }
             }
             _ = shutdown_rx.changed() => {
@@ -144,19 +220,19 @@ pub async fn run_ontology_worker(
     }
 }
 
-async fn process_batch(
+/// Run one pass over items the store marks as pending. Same logic as the
+/// worker tick — exposed so admin endpoints can force a run for verification.
+pub async fn run_once(
     store: &Arc<dyn VectorStore>,
     embedder: &Arc<EmbedderHandle>,
     http_client: &Client,
     openai: &OpenAiChatConfig,
     model: &str,
     cfg: &OntologyConfig,
-) -> Result<()> {
-    // Skip if embedder isn't ready yet — will retry on next tick.
-    let embedder_svc = match embedder.get_ready() {
-        Ok(svc) => svc,
-        Err(_) => return Ok(()),
-    };
+) -> Result<OntologyRunReport> {
+    let embedder_svc = embedder
+        .get_ready()
+        .map_err(|e| anyhow!("embedder not ready: {e}"))?;
 
     let store_clone = store.clone();
     let batch_size = cfg.batch_size;
@@ -164,81 +240,31 @@ async fn process_batch(
         tokio::task::spawn_blocking(move || store_clone.get_items_pending_ontology(batch_size))
             .await??;
 
+    let mut report = OntologyRunReport {
+        estimated_input_tokens_per_item: estimate_input_tokens(cfg),
+        ..Default::default()
+    };
+
     if pending.is_empty() {
-        return Ok(());
+        return Ok(report);
     }
 
     info!("ontology worker: processing {} item(s)", pending.len());
 
     for item in pending {
-        let text = item.text.clone();
-        let item_id = item.id.clone();
-        let source_id = item.source_id.clone();
-        let store_clone = store.clone();
-
-        let predicates = tokio::task::spawn_blocking(move || store_clone.list_ontology_predicates(Some(&source_id)))
-            .await??;
-            
-        let store_clone = store.clone();
-        let svc = embedder_svc.clone();
-
-        let neighbor_count = cfg.neighbor_count;
-        let neighbors =
-            tokio::task::spawn_blocking(move || -> Result<Vec<crate::db::SearchHit>> {
-                let embedding = svc.embed(&text)?;
-                let hits = store_clone.search(&embedding, neighbor_count + 1, None, None)?;
-                Ok(hits
-                    .into_iter()
-                    .filter(|h| h.id != item_id)
-                    .take(neighbor_count)
-                    .collect())
-            })
-            .await??;
-
-        let status = match call_llm_for_edges(
+        let mark_status = match process_item(
+            store,
+            embedder_svc.clone(),
             http_client,
             openai,
             model,
+            cfg,
             &item,
-            &neighbors,
-            &predicates,
-            cfg.confidence_threshold,
-            cfg.target_preview_chars,
-            cfg.candidate_preview_chars,
+            &mut report,
         )
         .await
         {
-            Ok(edges) => {
-                let count = edges.len();
-                for edge in edges {
-                    let store_clone = store.clone();
-                    match tokio::task::spawn_blocking(move || store_clone.add_manual_edge(edge))
-                        .await
-                    {
-                        Err(err) => {
-                            error!("ontology worker: failed to insert edge: {err}");
-                        }
-                        Ok(Err(err)) => {
-                            error!("ontology worker: failed to insert edge: {err}");
-                        }
-                        Ok(Ok(record)) => {
-                            info!(
-                                "ontology worker: added edge: {} --[{}]--> {} (conf: {:.2})",
-                                record.from_item_id,
-                                record.relation.as_deref().unwrap_or("none"),
-                                record.to_item_id,
-                                record.weight
-                            );
-                        }
-                    }
-                }
-                if count > 0 {
-                    info!("ontology worker: item {} → {count} edge(s) committed", item.id);
-                } else {
-                    info!("ontology worker: item {} → no edges (all filtered or empty)", item.id);
-                }
-                "done"
-            }
+            Ok(()) => "done",
             Err(err) => {
                 error!("ontology worker: item {} extraction failed: {err}", item.id);
                 "failed"
@@ -247,14 +273,212 @@ async fn process_batch(
 
         let store_clone = store.clone();
         let id = item.id.clone();
-        let status_to_set = status.to_string();
+        let status_to_set = mark_status.to_string();
         let _ =
             tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
                 .await;
-        info!("ontology worker: marked item {} as {}", item.id, status);
+        info!("ontology worker: marked item {} as {}", item.id, mark_status);
     }
 
+    Ok(report)
+}
+
+/// Force-process a single item by id, ignoring its `ontology_status`. Useful
+/// for re-running ontology extraction from the UI after editing an entry or
+/// after enabling the worker for the first time.
+pub async fn run_for_item(
+    store: &Arc<dyn VectorStore>,
+    embedder: &Arc<EmbedderHandle>,
+    http_client: &Client,
+    openai: &OpenAiChatConfig,
+    model: &str,
+    cfg: &OntologyConfig,
+    item_id: &str,
+) -> Result<OntologyRunReport> {
+    let embedder_svc = embedder
+        .get_ready()
+        .map_err(|e| anyhow!("embedder not ready: {e}"))?;
+
+    let store_clone = store.clone();
+    let id_owned = item_id.to_owned();
+    let item = tokio::task::spawn_blocking(move || store_clone.get_item(&id_owned))
+        .await??
+        .ok_or_else(|| anyhow!("item not found: {item_id}"))?;
+
+    let mut report = OntologyRunReport {
+        estimated_input_tokens_per_item: estimate_input_tokens(cfg),
+        ..Default::default()
+    };
+
+    let process_result = process_item(
+        store,
+        embedder_svc,
+        http_client,
+        openai,
+        model,
+        cfg,
+        &item,
+        &mut report,
+    )
+    .await;
+
+    let mark_status = match &process_result {
+        Ok(()) => "done",
+        Err(err) => {
+            error!("ontology worker: item {} extraction failed: {err:#}", item.id);
+            "failed"
+        }
+    };
+
+    let store_clone = store.clone();
+    let id = item.id.clone();
+    let status_to_set = mark_status.to_string();
+    let _ = tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
+        .await;
+
+    // Bubble the underlying error up so admin callers see the actual cause
+    // (e.g. "LLM returned empty body") instead of a generic wrapper.
+    process_result?;
+    Ok(report)
+}
+
+async fn process_item(
+    store: &Arc<dyn VectorStore>,
+    embedder_svc: Arc<dyn crate::embedding::EmbeddingService>,
+    http_client: &Client,
+    openai: &OpenAiChatConfig,
+    model: &str,
+    cfg: &OntologyConfig,
+    item: &ItemRecord,
+    report: &mut OntologyRunReport,
+) -> Result<()> {
+    let source_id = item.source_id.clone();
+    let store_clone = store.clone();
+    let predicates =
+        tokio::task::spawn_blocking(move || store_clone.list_ontology_predicates(Some(&source_id)))
+            .await??;
+
+    let text = item.text.clone();
+    let item_id = item.id.clone();
+    let store_clone = store.clone();
+    let svc = embedder_svc;
+    let neighbor_count = cfg.neighbor_count;
+    let neighbors = tokio::task::spawn_blocking(move || -> Result<Vec<crate::db::SearchHit>> {
+        let embedding = svc.embed(&text)?;
+        let hits = store_clone.search(&embedding, neighbor_count + 1, None, None)?;
+        Ok(hits
+            .into_iter()
+            .filter(|h| h.id != item_id)
+            .take(neighbor_count)
+            .collect())
+    })
+    .await??;
+
+    let neighbor_ids: Vec<String> = neighbors.iter().map(|n| n.id.clone()).collect();
+    let valid_predicates: Vec<String> = predicates.iter().map(|p| p.name.clone()).collect();
+
+    if neighbors.is_empty() {
+        report.items_skipped_no_neighbors += 1;
+        report.debug.push(ItemDebug {
+            item_id: item.id.clone(),
+            neighbors: 0,
+            neighbor_ids,
+            valid_predicates,
+            raw_llm_output: None,
+            proposed_edges: None,
+            filter_drops: FilterDrops::default(),
+            error: Some("no neighbors".to_owned()),
+        });
+        info!("ontology worker: item {} → no neighbors, skipped", item.id);
+        return Ok(());
+    }
+
+    let call = call_llm_for_edges(
+        http_client,
+        openai,
+        model,
+        item,
+        &neighbors,
+        &predicates,
+        cfg.confidence_threshold,
+        cfg.target_preview_chars,
+        cfg.candidate_preview_chars,
+    )
+    .await;
+
+    let LlmCallResult { parsed, raw_content } = match call {
+        Ok(r) => r,
+        Err(err) => {
+            // Capture the failure in the debug trace so the UI can surface it
+            // even when the LLM call itself blew up.
+            report.debug.push(ItemDebug {
+                item_id: item.id.clone(),
+                neighbors: neighbors.len(),
+                neighbor_ids,
+                valid_predicates,
+                raw_llm_output: None,
+                proposed_edges: None,
+                filter_drops: FilterDrops::default(),
+                error: Some(err.to_string()),
+            });
+            return Err(err);
+        }
+    };
+
+    report.items_processed += 1;
+    let ParsedEdges { edges, proposed, drops } = parsed;
+    let count = edges.len();
+    for edge in edges {
+        let store_clone = store.clone();
+        match tokio::task::spawn_blocking(move || store_clone.add_manual_edge(edge)).await {
+            Err(err) => error!("ontology worker: failed to insert edge: {err}"),
+            Ok(Err(err)) => error!("ontology worker: failed to insert edge: {err}"),
+            Ok(Ok(record)) => {
+                info!(
+                    "ontology worker: added edge: {} --[{}]--> {} (conf: {:.2})",
+                    record.from_item_id,
+                    record.relation.as_deref().unwrap_or("none"),
+                    record.to_item_id,
+                    record.weight
+                );
+                report.edges_committed.push(committed_edge(&item.id, &record));
+            }
+        }
+    }
+    if count > 0 {
+        info!("ontology worker: item {} → {count} edge(s) committed", item.id);
+    } else {
+        info!(
+            item_id = %item.id,
+            proposed = proposed,
+            bad_predicate = drops.bad_predicate,
+            unknown_id = drops.unknown_id,
+            target_not_involved = drops.target_not_involved,
+            self_loop = drops.self_loop,
+            below_threshold = drops.below_threshold,
+            "ontology worker: item → no edges committed (all filtered or empty)"
+        );
+    }
+
+    report.debug.push(ItemDebug {
+        item_id: item.id.clone(),
+        neighbors: neighbors.len(),
+        neighbor_ids,
+        valid_predicates,
+        raw_llm_output: Some(truncate(&raw_content, 2000)),
+        proposed_edges: Some(proposed),
+        filter_drops: drops,
+        error: None,
+    });
+
     Ok(())
+}
+
+pub struct LlmCallResult {
+    pub parsed: ParsedEdges,
+    /// Raw assistant content the model emitted (already extracted from the
+    /// chat envelope, before code-fence stripping). Useful for debugging.
+    pub raw_content: String,
 }
 
 async fn call_llm_for_edges(
@@ -267,46 +491,30 @@ async fn call_llm_for_edges(
     confidence_threshold: f32,
     target_preview_chars: usize,
     candidate_preview_chars: usize,
-) -> Result<Vec<ManualEdgeInput>> {
+) -> Result<LlmCallResult> {
     if neighbors.is_empty() {
-        return Ok(vec![]);
+        return Ok(LlmCallResult {
+            parsed: ParsedEdges { edges: vec![], proposed: 0, drops: FilterDrops::default() },
+            raw_content: String::new(),
+        });
     }
 
     let valid_predicates: HashSet<String> = predicates.iter().map(|p| p.name.clone()).collect();
     let system_prompt = get_ontology_system_prompt(predicates);
 
+    // Plain-text delimited blocks. Empirically gives a 4B model much higher
+    // schema compliance than JSON-on-bullets, because each candidate has
+    // clear visual boundaries. Drops type/tags — they add noise without
+    // affecting relation choice in practice.
     let target_preview: String = target.text.chars().take(target_preview_chars).collect();
-    let target_tags: Vec<String> = target.metadata.get("tags")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-
-    let mut candidates = String::new();
-    for n in neighbors {
-        let preview: String = n.text.chars().take(candidate_preview_chars).collect();
-        candidates.push_str(&format!(
-            "- {}\n",
-            json!({
-                "id": n.id,
-                "text": preview,
-                "type": n.type_name,
-                "tags": n.tags,
-                "source_id": n.source_id,
-            })
-        ));
-    }
-
-    let user_message = format!(
-        "TARGET: {}\n\nCANDIDATES:\n{}",
-        json!({
-            "id": target.id,
-            "text": target_preview,
-            "type": target.type_name,
-            "tags": target_tags,
-            "source_id": target.source_id,
-        }),
-        candidates,
+    let mut user_message = format!(
+        "TARGET id={}\n{}\n\nCANDIDATES:\n\n",
+        target.id, target_preview
     );
+    for (i, n) in neighbors.iter().enumerate() {
+        let preview: String = n.text.chars().take(candidate_preview_chars).collect();
+        user_message.push_str(&format!("[{}] id={}\n{}\n\n", i + 1, n.id, preview));
+    }
 
     tracing::debug!(
         item_id = target.id,
@@ -314,44 +522,81 @@ async fn call_llm_for_edges(
         target_chars = target_preview.len(),
         "ontology worker: calling LLM"
     );
+    // Dump the full prompts at info so the operator can read what's being
+    // sent. Cheap: one ontology call per item, not in a hot loop.
+    info!(
+        item_id = %target.id,
+        system_prompt = %system_prompt,
+        user_prompt = %user_message,
+        "ontology worker: LLM prompts"
+    );
 
-    let payload = json!({
-        "model": model,
-        "temperature": 0,
-        "max_tokens": (1024.0 * 1.5) as usize, // generous limit to avoid truncation issues (will be cut off by OpenAI if it exceeds the model's context window)
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ]
-    });
-
+    // Delegate the HTTP/envelope/thinking-mode plumbing to the same helper
+    // the analysis endpoint uses — keeps both paths on the well-tested code.
     let base_url = openai
         .base_url
         .as_deref()
         .expect("is_configured() already checked");
-    let mut req = http_client
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .json(&payload);
-    if let Some(key) = openai.api_key.as_deref() {
-        req = req.bearer_auth(key);
+    let content = chat_completion_text(
+        http_client,
+        ChatCompletionRequest {
+            base_url,
+            api_key: openai.api_key.as_deref(),
+            model,
+            timeout_secs: openai.timeout_secs,
+            system_prompt: &system_prompt,
+            user_prompt: &user_message,
+            max_tokens: 2048,
+            temperature: 0.0,
+            // No response_format: many llama.cpp builds reject json_object
+            // with non-OpenAI models. We strip code fences in extract_json.
+            response_format_json: false,
+        },
+    )
+    .await?;
+
+    tracing::debug!(
+        item_id = target.id,
+        raw_response = %content,
+        "ontology worker: LLM response"
+    );
+
+    let parsed = parse_ontology_response(
+        &content,
+        &target.id,
+        neighbors,
+        &valid_predicates,
+        confidence_threshold,
+    )
+    .map_err(|e| {
+        // Small models (4B) frequently emit malformed JSON. Log the raw
+        // content so the operator can see exactly what came back.
+        warn!(
+            item_id = %target.id,
+            error = %e,
+            raw_content = %truncate(&content, 1000),
+            "ontology worker: LLM content failed schema parse"
+        );
+        anyhow!("LLM output failed schema parse ({e}); content preview: {}", truncate(&content, 200))
+    })?;
+
+    Ok(LlmCallResult { parsed, raw_content: content })
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.replace('\n', "\\n")
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out.replace('\n', "\\n")
     }
+}
 
-    let response = req.send().await?.error_for_status()?;
-    let chat: ChatCompletionResponse = response.json().await?;
-
-    let content = chat
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .unwrap_or_default();
-
-    tracing::debug!(item_id = target.id, raw_response = %content, "ontology worker: LLM response");
-
-    parse_ontology_response(&content, &target.id, neighbors, &valid_predicates, confidence_threshold)
+pub struct ParsedEdges {
+    pub edges: Vec<ManualEdgeInput>,
+    pub proposed: usize,
+    pub drops: FilterDrops,
 }
 
 fn parse_ontology_response(
@@ -360,7 +605,7 @@ fn parse_ontology_response(
     neighbors: &[crate::db::SearchHit],
     valid_predicates: &HashSet<String>,
     confidence_threshold: f32,
-) -> Result<Vec<ManualEdgeInput>> {
+) -> Result<ParsedEdges> {
     let json_str = extract_json(content);
     let ontology: OntologyResponse = serde_json::from_str(json_str)?;
 
@@ -370,44 +615,58 @@ fn parse_ontology_response(
         .chain(std::iter::once(item_id))
         .collect();
 
-    let edges = ontology
-        .edges
-        .into_iter()
-        .filter(|e| {
-            valid_predicates.contains(&e.predicate)
-                && valid_ids.contains(e.from_id.as_str())
-                && valid_ids.contains(e.to_id.as_str())
-                && (e.from_id == item_id || e.to_id == item_id)
-                && e.from_id != e.to_id
-                && e.confidence >= confidence_threshold
-        })
-        .map(|e| {
-            let relation = Cow::Owned(e.predicate);
+    let mut drops = FilterDrops::default();
+    let proposed = ontology.edges.len();
+    let mut edges = Vec::with_capacity(proposed);
 
-            let status = if e.confidence >= 0.9 {
-                "confirmed"
-            } else {
-                "suggested"
-            };
+    for e in ontology.edges {
+        // Evaluate in priority order — first failed check wins the count
+        // (otherwise the totals over-report when an edge has multiple issues).
+        if !valid_predicates.contains(&e.rel) {
+            drops.bad_predicate += 1;
+            continue;
+        }
+        if !valid_ids.contains(e.from.as_str())
+            || !valid_ids.contains(e.to.as_str())
+        {
+            drops.unknown_id += 1;
+            continue;
+        }
+        if e.from != item_id && e.to != item_id {
+            drops.target_not_involved += 1;
+            continue;
+        }
+        if e.from == e.to {
+            drops.self_loop += 1;
+            continue;
+        }
+        if e.conf < confidence_threshold {
+            drops.below_threshold += 1;
+            continue;
+        }
 
-            ManualEdgeInput {
-                from_item_id: e.from_id,
-                to_item_id: e.to_id,
-                relation: Some(relation),
-                // Confidence becomes the edge weight — queryable and visible in the graph UI.
-                weight: e.confidence,
-                directed: true,
-                metadata: json!({
-                    "source": "ontology_worker",
-                    "confidence": e.confidence,
-                    "reasoning": e.reasoning,
-                    "status": status
-                }),
-            }
-        })
-        .collect();
+        // Auto-confirm bar is high (0.95) so almost everything routes through
+        // the HITL review UI. A 4B model rarely emits >=0.95 on its own, so in
+        // practice the only auto-confirmed edges are the ones the model is
+        // genuinely certain about. Adjust upward if false-positives slip through.
+        let status = if e.conf >= 0.95 { "confirmed" } else { "suggested" };
+        edges.push(ManualEdgeInput {
+            from_item_id: e.from,
+            to_item_id: e.to,
+            relation: Some(Cow::Owned(e.rel)),
+            // Confidence becomes the edge weight — queryable and visible in the graph UI.
+            weight: e.conf,
+            directed: true,
+            metadata: json!({
+                "source": "ontology_worker",
+                "confidence": e.conf,
+                "reasoning": e.reasoning,
+                "status": status
+            }),
+        });
+    }
 
-    Ok(edges)
+    Ok(ParsedEdges { edges, proposed, drops })
 }
 
 /// Strip optional markdown code fences so the JSON can be parsed even when a
@@ -455,7 +714,7 @@ mod tests {
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
         valid.insert("depends_on".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert_eq!(edges.len(), 2);
         assert_eq!(edges[0].relation.as_ref().map(|r| r.as_ref()), Some("is_a"));
         assert!((edges[0].weight - 0.95).abs() < 0.001);
@@ -473,7 +732,7 @@ mod tests {
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
         // threshold 0.7 — 0.5 should be dropped
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 
@@ -483,7 +742,7 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.7}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert_eq!(edges.len(), 1);
     }
 
@@ -494,7 +753,7 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B"}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 
@@ -504,7 +763,7 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"related_to","to_id":"id-B","confidence":0.95}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 
@@ -515,7 +774,7 @@ mod tests {
         let mut valid = HashSet::new();
         valid.insert("contains".to_owned());
         valid.insert("implemented_by".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert_eq!(edges.len(), 2);
     }
 
@@ -525,7 +784,7 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-PHANTOM","confidence":0.9}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 
@@ -536,7 +795,7 @@ mod tests {
             r#"{"edges":[{"from_id":"id-B","predicate":"is_a","to_id":"id-C","confidence":0.9}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 
@@ -546,7 +805,7 @@ mod tests {
         let content = "```json\n{\"edges\":[{\"from_id\":\"id-A\",\"predicate\":\"is_a\",\"to_id\":\"id-B\",\"confidence\":0.9}]}\n```";
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert_eq!(edges.len(), 1);
     }
 
@@ -554,7 +813,7 @@ mod tests {
     fn empty_edges_array_is_ok() {
         let neighbors = vec![hit("id-B", "unrelated")];
         let valid = HashSet::new();
-        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, &valid, 0.7).unwrap();
+        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
         assert!(edges.is_empty());
     }
 }

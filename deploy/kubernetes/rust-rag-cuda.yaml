@@ -88,6 +88,18 @@ data:
   RAG_ANALYSIS_TIMEOUT_SECS: "30"
   RAG_ANALYSIS_MAX_NEIGHBORS: "8"
   RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.65"
+  ## Ontology worker — pulls items with `ontology_status=pending`, embeds
+  ## them, asks the analysis LLM (preferred) or the chat LLM to extract
+  ## typed edges against neighbors, and writes them to the graph table.
+  ## Verify on demand via `POST /admin/ontology/run` or
+  ## `POST /admin/ontology/run/{item_id}` (admin auth).
+  RAG_ONTOLOGY_ENABLED: "true"
+  RAG_ONTOLOGY_CONFIDENCE_THRESHOLD: "0.5"
+  RAG_ONTOLOGY_BATCH_SIZE: "5"
+  RAG_ONTOLOGY_INTERVAL_SECS: "60"
+  RAG_ONTOLOGY_NEIGHBOR_COUNT: "10"
+  RAG_ONTOLOGY_TARGET_PREVIEW_CHARS: "800"
+  RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS: "300"
   ## Manager loop. Drives the cron + mention-triggered orchestrator that
   ## reads `manager` channel + tool-calls into ACP / RAG / message tools.
   ## Uses xAI Grok Fast Reasoning over the public API; api key lands via

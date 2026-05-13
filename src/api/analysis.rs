@@ -283,61 +283,178 @@ fn build_user_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
     out
 }
 
+/// Settings for one `chat/completions` call, independent of `AppState`.
+/// Use this when the caller is outside the API layer (e.g. the ontology
+/// worker) and needs to share the same battle-tested HTTP/parse code as
+/// the analysis endpoint.
+pub struct ChatCompletionRequest<'a> {
+    pub base_url: &'a str,
+    pub api_key: Option<&'a str>,
+    pub model: &'a str,
+    pub timeout_secs: u64,
+    pub system_prompt: &'a str,
+    pub user_prompt: &'a str,
+    pub max_tokens: usize,
+    pub temperature: f32,
+    /// Set the OpenAI `response_format: {type: "json_object"}` so the
+    /// server constrains the model to valid JSON. Some llama.cpp builds
+    /// ignore this — we still strip code fences and fall back to
+    /// reasoning_content in `chat_completion_text` either way.
+    pub response_format_json: bool,
+}
+
+/// POST one chat completion and return the assistant content as a string.
+///
+/// Hardened against:
+/// - non-2xx HTTP (returns an error with status + body preview),
+/// - empty body / non-JSON envelope (errors with preview),
+/// - thinking-mode models that put their answer in `reasoning_content`
+///   instead of `content` — falls back automatically and emits a `warn!`
+///   so the operator knows the upstream `enable_thinking=false` is being
+///   ignored.
+///
+/// Newlines in previews are escaped to `\n` so each log line stays on
+/// one line. Used by both `analyze_endpoint` and the ontology worker.
+pub async fn chat_completion_text(
+    http_client: &reqwest::Client,
+    req: ChatCompletionRequest<'_>,
+) -> Result<String> {
+    let base_url = req.base_url.trim_end_matches('/');
+    tracing::Span::current().record("model", req.model);
+
+    let mut payload = json!({
+        "model": req.model,
+        "stream": false,
+        "temperature": req.temperature,
+        "max_tokens": req.max_tokens,
+        // Hard-off thinking via chat_template_kwargs — llama.cpp ignores
+        // reasoning_effort / thinking_budget flags, this is the only
+        // switch that actually disables it.
+        "chat_template_kwargs": {"enable_thinking": false},
+        "messages": [
+            {"role": "system", "content": req.system_prompt},
+            {"role": "user", "content": req.user_prompt},
+        ],
+    });
+    if req.response_format_json {
+        payload["response_format"] = json!({"type": "json_object"});
+    }
+
+    let mut http_req = http_client
+        .post(format!("{base_url}/chat/completions"))
+        .timeout(std::time::Duration::from_secs(req.timeout_secs.max(1)))
+        .json(&payload);
+    if let Some(key) = req.api_key {
+        http_req = http_req.bearer_auth(key);
+    }
+
+    let resp = http_req.send().await?;
+    let status = resp.status();
+    tracing::Span::current().record("http_status", status.as_u16());
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("LLM read body failed (status {status}): {e}"))?;
+
+    if !status.is_success() {
+        tracing::warn!(
+            status = %status,
+            body_preview = %truncate(&body, 500),
+            "LLM HTTP error"
+        );
+        return Err(anyhow!("LLM HTTP {status}: {}", truncate(&body, 200)));
+    }
+
+    if body.trim().is_empty() {
+        tracing::warn!("LLM returned empty body");
+        return Err(anyhow!("LLM returned empty response body"));
+    }
+
+    let envelope: Value = serde_json::from_str(&body).map_err(|e| {
+        tracing::warn!(
+            error = %e,
+            body_preview = %truncate(&body, 500),
+            "LLM envelope is not valid JSON"
+        );
+        anyhow!("LLM envelope not valid JSON ({e}); preview: {}", truncate(&body, 200))
+    })?;
+
+    let message = envelope
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"));
+    let primary = message
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let (content, source) = if !primary.is_empty() {
+        (primary.to_owned(), "content")
+    } else {
+        let reasoning = message
+            .and_then(|m| m.get("reasoning_content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        (reasoning.to_owned(), "reasoning_content")
+    };
+
+    if content.is_empty() {
+        tracing::warn!(
+            envelope_preview = %truncate(&body, 500),
+            "LLM returned envelope with empty assistant content (and empty reasoning_content)"
+        );
+        return Err(anyhow!("LLM choice has empty content"));
+    }
+
+    if source == "reasoning_content" {
+        tracing::warn!(
+            "model put output in reasoning_content despite enable_thinking=false — falling back"
+        );
+    }
+
+    tracing::Span::current().record("output_len", content.len());
+    Ok(content)
+}
+
+/// Single-line preview helper — replaces newlines so log lines stay tidy.
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.replace('\n', "\\n")
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out.replace('\n', "\\n")
+    }
+}
+
+/// Thin wrapper around [`chat_completion_text`] that pulls config from
+/// `AppState.analysis` — what the `/api/store/analyze` endpoint uses.
 pub(crate) async fn call_llm(state: &AppState, system_prompt: &str, user_prompt: &str) -> Result<String> {
     let cfg = &state.analysis;
     let base_url = cfg
         .base_url
         .as_deref()
-        .ok_or_else(|| anyhow!("analysis base_url missing"))?
-        .trim_end_matches('/');
+        .ok_or_else(|| anyhow!("analysis base_url missing"))?;
     let model = cfg
         .model
         .as_deref()
         .ok_or_else(|| anyhow!("analysis model missing"))?;
-    tracing::Span::current().record("model", model);
-
-    let payload = json!({
-        "model": model,
-        "stream": false,
-        "temperature": 0.05,
-        "max_tokens": 2000,
-        "chat_template_kwargs": {"enable_thinking": false},
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    });
-
-    let mut req = state
-        .http_client
-        .post(format!("{base_url}/chat/completions"))
-        .timeout(std::time::Duration::from_secs(cfg.timeout_secs.max(1)))
-        .json(&payload);
-    if let Some(key) = cfg.api_key.as_deref() {
-        req = req.bearer_auth(key);
-    }
-
-    let resp = req.send().await?;
-    let status = resp.status();
-    tracing::Span::current().record("http_status", status.as_u16());
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_else(|_| status.to_string());
-        tracing::warn!(status = %status, body = %body, "analysis LLM error");
-        return Err(anyhow!("analysis LLM returned {status}: {body}"));
-    }
-    let body: Value = resp.json().await?;
-    let content = body
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    tracing::Span::current().record("output_len", content.len());
-    Ok(content)
+    chat_completion_text(
+        &state.http_client,
+        ChatCompletionRequest {
+            base_url,
+            api_key: cfg.api_key.as_deref(),
+            model,
+            timeout_secs: cfg.timeout_secs,
+            system_prompt,
+            user_prompt,
+            max_tokens: 2000,
+            temperature: 0.05,
+            response_format_json: true,
+        },
+    )
+    .await
 }
 
 pub(crate) fn parse_analysis(raw: &str) -> StoreAnalysis {
