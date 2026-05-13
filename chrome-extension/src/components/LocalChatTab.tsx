@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import {
   runLocalChat,
   formatLoadProgress,
-  useLlmStatus,
+  useLlmHelperStatus,
   isWebGpuAvailable,
   requestPersistentStorage,
   type LocalChatMessage,
@@ -30,7 +30,7 @@ export function LocalChatTab({ config }: Props) {
   const [busy, setBusy] = useState(false)
   const [webgpu, setWebgpu] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
-  const status = useLlmStatus()
+  const status = useLlmHelperStatus()
   const { content: pageContent, refreshContent } = usePageContent()
 
   useEffect(() => { 
@@ -72,6 +72,7 @@ export function LocalChatTab({ config }: Props) {
       await runLocalChat({
         history,
         tools: buildExtensionRagTools(config),
+        engine: 'transformers',
         signal: abortRef.current.signal,
         onUpdate: ({ partialAnswer, toolCalls }) => {
           setMessages((prev) => {
@@ -111,9 +112,9 @@ export function LocalChatTab({ config }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border, #333)', fontSize: 10, fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: 2, color: 'var(--text-2)' }}>
-        Local · Gemma{' '}
+        Local · Gemma (Transformers.js){' '}
         {status.kind === 'loading' && (
-          <span style={{ marginLeft: 8, opacity: 0.7 }}>{formatLoadProgress(status)}</span>
+          <span style={{ marginLeft: 8, opacity: 0.7 }}>{status.progress ? `${Math.round(status.progress)}%` : 'loading...'}</span>
         )}
         {status.kind === 'error' && (
           <span style={{ marginLeft: 8, color: 'tomato' }}>{status.message}</span>
@@ -153,38 +154,55 @@ export function LocalChatTab({ config }: Props) {
           </p>
         )}
         {messages.map((m, i) => (
-          <div key={i} style={{ marginBottom: 12 }}>
+          <div key={i} style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 9, fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: 2, opacity: 0.5, marginBottom: 4 }}>
-              {m.role}
+              {m.role === 'user' ? 'YOU' : 'AI'}
             </div>
             {m.tools && m.tools.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
+              <div style={{ marginBottom: 12 }}>
                 {m.tools.map((t) => (
                   <div
                     key={t.id}
                     style={{
                       fontSize: 10,
                       fontFamily: 'var(--mono)',
-                      padding: '4px 8px',
+                      padding: '8px 12px',
                       border: '1px solid var(--accent, #6366f1)',
                       background: 'rgba(99,102,241,0.08)',
-                      marginBottom: 4,
+                      borderRadius: 4,
+                      marginBottom: 8,
+                      borderLeft: '4px solid var(--accent, #6366f1)',
                     }}
-                    title={t.result ?? t.error ?? ''}
                   >
-                    {t.name}({JSON.stringify(t.args)}) {t.error ? '⚠' : t.result ? '✓' : '…'}
+                    <div style={{ fontWeight: 700, marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
+                      <span>CALL: {t.name}</span>
+                      <span>{t.error ? '⚠' : t.result ? '✓' : '…'}</span>
+                    </div>
+                    <div style={{ opacity: 0.8, fontSize: 9 }}>
+                      ARGS: {JSON.stringify(t.args)}
+                    </div>
+                    {t.result && (
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(99,102,241,0.2)', maxHeight: 100, overflow: 'auto', fontSize: 9, opacity: 0.9 }}>
+                        {t.result}
+                      </div>
+                    )}
+                    {t.error && (
+                      <div style={{ marginTop: 8, color: 'tomato', fontSize: 9 }}>
+                        {t.error}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
             )}
-            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 13, lineHeight: 1.6, color: m.role === 'user' ? 'var(--text-1)' : 'var(--text-2)' }}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content || '…'}</ReactMarkdown>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="search-box" style={{ borderTop: '1px solid var(--border, #333)' }}>
+      <div className="search-box" style={{ borderTop: '1px solid var(--border, #333)', background: 'var(--bg-1)' }}>
         <input
           type="text"
           value={input}
@@ -193,10 +211,19 @@ export function LocalChatTab({ config }: Props) {
           disabled={busy}
           placeholder="Ask Gemma…"
         />
-        <button onClick={busy ? () => abortRef.current?.abort() : send}>
-          {busy ? '×' : '→'}
+        <button onClick={busy ? () => abortRef.current?.abort() : send} style={{ opacity: busy ? 1 : 0.7 }}>
+          {busy ? (
+            <svg viewBox="0 0 24 24" width="16" height="16">
+              <path fill="currentColor" d="M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" width="16" height="16">
+              <path fill="currentColor" d="M2,21L23,12L2,3V10L17,12L2,14V21Z" />
+            </svg>
+          )}
         </button>
       </div>
     </div>
   )
 }
+

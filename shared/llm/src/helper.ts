@@ -84,15 +84,21 @@ export class LlmHelper extends EventTarget {
     this.setStatus({ kind: "generating" })
 
     try {
-      // 1. Prepare Multimodal Prompt
-      let fullPrompt = `<|turn>user\n${opts.prompt}`
-      if (opts.images?.length) {
-        fullPrompt += "\n" + opts.images.map(() => "<|image|>").join("\n")
+      // 1. Prepare Prompt
+      let fullPrompt = opts.prompt
+      
+      // If it's a raw string without turn markers, wrap it.
+      // Otherwise, assume it's already formatted (e.g. from local-chat.ts)
+      if (!fullPrompt.includes("<|turn|>")) {
+        fullPrompt = `<|turn|>user\n${opts.prompt}`
+        if (opts.images?.length) {
+          fullPrompt += "\n" + opts.images.map(() => "<|image|>").join("\n")
+        }
+        if (opts.audios?.length) {
+          fullPrompt += "\n" + opts.audios.map(() => "<|audio|>").join("\n")
+        }
+        fullPrompt += "<|turn|>\n<|turn|>model\n"
       }
-      if (opts.audios?.length) {
-        fullPrompt += "\n" + opts.audios.map(() => "<|audio|>").join("\n")
-      }
-      fullPrompt += "<turn|>\n<|turn>model\n"
 
       // 2. Process Inputs
       const images = opts.images
@@ -139,6 +145,7 @@ export class LlmHelper extends EventTarget {
       throw err
     }
   }
+
 }
 
 // Global instance for simple usage
