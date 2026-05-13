@@ -166,6 +166,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0011_ontology_edge_dedup",
         include_str!("../../migrations/0011_ontology_edge_dedup.sql"),
     ),
+    (
+        "0012_ontology_directed_pair_unique",
+        include_str!("../../migrations/0012_ontology_directed_pair_unique.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -1484,7 +1488,7 @@ impl VectorStore for PostgresVectorStore {
                          (id, from_item_id, to_item_id, edge_type, relation, weight, \
                           directed, metadata, created_at, updated_at) \
                      VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8) \
-                     ON CONFLICT (from_item_id, to_item_id, relation) \
+                     ON CONFLICT (from_item_id, to_item_id) \
                          WHERE edge_type = 'manual' AND metadata->>'source' = 'ontology_worker' \
                      DO NOTHING \
                      RETURNING id, from_item_id, to_item_id, edge_type, relation, weight, \
@@ -1535,8 +1539,8 @@ impl VectorStore for PostgresVectorStore {
                          FROM graph_edges \
                          WHERE edge_type = 'manual' \
                            AND metadata->>'source' = 'ontology_worker' \
-                           AND from_item_id = $1 AND to_item_id = $2 AND relation IS NOT DISTINCT FROM $3",
-                        &[&input.from_item_id, &input.to_item_id, &relation_owned],
+                           AND from_item_id = $1 AND to_item_id = $2",
+                        &[&input.from_item_id, &input.to_item_id],
                     )
                     .await
                     .context("fetching existing ontology edge after ON CONFLICT")?

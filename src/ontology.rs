@@ -63,6 +63,9 @@ pub struct FilterDrops {
     pub self_loop: usize,
     /// `confidence < threshold`.
     pub below_threshold: usize,
+    /// Model hedged with multiple relations for the same (from, to) pair
+    /// in one response. We keep the highest-confidence one and drop the rest.
+    pub duplicate_pair: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -704,6 +707,26 @@ fn parse_ontology_response(
             }),
         });
     }
+
+    // Per-pair dedup: when the model hedges with multiple relations on the
+    // same (from, to) pair (e.g. `part_of` AND `implemented_by`), keep only
+    // the highest-confidence one. The DB also enforces this via the partial
+    // unique index from migration 0012, but doing it here preserves the
+    // better edge instead of letting INSERT-order pick a worse one.
+    use std::collections::HashMap;
+    let mut best: HashMap<(String, String), ManualEdgeInput> = HashMap::new();
+    let total_before = edges.len();
+    for edge in edges {
+        let key = (edge.from_item_id.clone(), edge.to_item_id.clone());
+        match best.get(&key) {
+            Some(existing) if existing.weight >= edge.weight => {} // keep existing (higher or equal conf)
+            _ => {
+                best.insert(key, edge);
+            }
+        }
+    }
+    let edges: Vec<ManualEdgeInput> = best.into_values().collect();
+    drops.duplicate_pair = total_before - edges.len();
 
     Ok(ParsedEdges { edges, proposed, drops })
 }

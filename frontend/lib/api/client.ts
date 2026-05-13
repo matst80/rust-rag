@@ -466,6 +466,7 @@ export interface OntologyFilterDrops {
   target_not_involved: number
   self_loop: number
   below_threshold: number
+  duplicate_pair: number
 }
 
 export interface OntologyItemDebug {

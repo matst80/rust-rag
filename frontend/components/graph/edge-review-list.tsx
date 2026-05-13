@@ -52,7 +52,7 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
 
       if (sortBy === "confidence-desc") return confB - confA
       if (sortBy === "confidence-asc") return confA - confB
-      
+
       if (sortBy === "alpha-asc") return a.relationship.localeCompare(b.relationship)
       if (sortBy === "alpha-desc") return b.relationship.localeCompare(a.relationship)
 
@@ -297,7 +297,6 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
           <Select value={sortBy} onValueChange={setSortBy}>
             <SelectTrigger className="h-8 w-[180px] text-xs bg-background/50 border-primary/10">
               <div className="flex items-center gap-2">
-                <SortDesc className="h-3.5 w-3.5 text-muted-foreground" />
                 <SelectValue placeholder="Sort by" />
               </div>
             </SelectTrigger>
@@ -371,9 +370,9 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
                                 {itemTitles[edge.source_id] || edge.source_id}
                               </p>
                               {onFocusNode && (
-                                <Button 
-                                  variant="ghost" 
-                                  size="icon" 
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
                                   className="h-5 w-5 shrink-0 opacity-0 group-hover/node:opacity-100 transition-opacity hover:bg-primary/10"
                                   onClick={() => onFocusNode(edge.source_id)}
                                 >
@@ -405,9 +404,9 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
                                 {itemTitles[edge.target_id] || edge.target_id}
                               </p>
                               {onFocusNode && (
-                                <Button 
-                                  variant="ghost" 
-                                  size="icon" 
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
                                   className="h-5 w-5 shrink-0 opacity-0 group-hover/node:opacity-100 transition-opacity hover:bg-primary/10"
                                   onClick={() => onFocusNode(edge.target_id)}
                                 >
@@ -563,7 +562,8 @@ function LastRunDebug({ run }: LastRunDebugProps) {
                     drops.unknown_id +
                     drops.target_not_involved +
                     drops.self_loop +
-                    drops.below_threshold
+                    drops.below_threshold +
+                    (drops.duplicate_pair ?? 0)
                   return (
                     <li
                       key={`${d.item_id}-${i}`}
@@ -626,6 +626,12 @@ function LastRunDebug({ run }: LastRunDebugProps) {
                               <>
                                 <span className="text-muted-foreground">below confidence threshold</span>
                                 <span>{drops.below_threshold}</span>
+                              </>
+                            )}
+                            {(drops.duplicate_pair ?? 0) > 0 && (
+                              <>
+                                <span className="text-muted-foreground">duplicate pair (kept highest conf)</span>
+                                <span>{drops.duplicate_pair}</span>
                               </>
                             )}
                           </div>
