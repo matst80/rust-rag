@@ -6,7 +6,7 @@ import { useTheme } from "next-themes"
 import dynamic from "next/dynamic"
 import { darkTheme, lightTheme } from "reagraph"
 import type { GraphCanvasProps, GraphEdge, GraphNode, InternalGraphEdge, InternalGraphNode, Theme } from "reagraph"
-import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, X, Search, ChevronDown } from "lucide-react"
+import { ChevronsRight, Compass, LoaderCircle, Plus, RotateCcw, ShieldAlert, X, Search, ChevronDown, ChevronUp } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Input } from "@/components/ui/input"
@@ -36,6 +36,42 @@ import {
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { computeCommunities, getNodeTitle } from "./clusters"
+import { MarkdownView } from "@/components/entries/markdown-view"
+
+function ExpandableMarkdown({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false)
+  
+  return (
+    <div className="relative group">
+      <div className={cn("overflow-hidden transition-all duration-500", expanded ? "" : "max-h-[300px] relative")}>
+        <MarkdownView content={content} className="text-sm" />
+        {!expanded && (
+          <div className="absolute bottom-0 inset-x-0 h-32 bg-gradient-to-t from-background/90 via-background/50 to-transparent pointer-events-none" />
+        )}
+      </div>
+      <div className="flex justify-center mt-3">
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          onClick={() => setExpanded(!expanded)} 
+          className="rounded-full h-8 px-4 text-[10px] uppercase font-bold tracking-widest hover:bg-primary/10 text-primary/70 transition-colors"
+        >
+          {expanded ? (
+            <>
+              <ChevronUp className="size-3 mr-2" />
+              Collapse
+            </>
+          ) : (
+            <>
+              <ChevronDown className="size-3 mr-2" />
+              Expand Content
+            </>
+          )}
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 const GraphCanvas = dynamic(
   () => import("reagraph").then((m) => m.GraphCanvas),
@@ -318,8 +354,8 @@ function GraphViewContent() {
     () =>
       selectedNode
         ? graphEdges.filter(
-            (edge) => edge.source_id === selectedNode || edge.target_id === selectedNode
-          )
+          (edge) => edge.source_id === selectedNode || edge.target_id === selectedNode
+        )
         : [],
     [graphEdges, selectedNode]
   )
@@ -554,7 +590,7 @@ function GraphViewContent() {
       </div>
 
       {/* Sidebar */}
-      <aside className="w-80 border-l bg-card/10 backdrop-blur-md p-6 overflow-y-auto scrollbar-thin">
+      <aside className="w-120 border-l bg-card/10 backdrop-blur-md p-6 overflow-y-auto scrollbar-thin">
         {neighborhoodError ? (
           <div className="rounded-2xl border border-destructive/20 bg-destructive/5 p-4 text-xs font-semibold text-destructive animate-in slide-in-from-right-4 duration-500">
             {neighborhoodError instanceof Error
@@ -587,10 +623,8 @@ function GraphViewContent() {
               </Badge>
             </div>
 
-            <div className="bg-muted/10 rounded-2xl border border-muted-foreground/10 p-5 shadow-inner">
-              <p className="text-sm leading-relaxed text-muted-foreground italic">
-                {selectedEntry.text}
-              </p>
+            <div className="bg-background/40 backdrop-blur-sm rounded-3xl border border-muted-foreground/10 p-5 shadow-xl">
+              <ExpandableMarkdown content={selectedEntry.text} />
             </div>
 
             <div className="flex gap-2">
@@ -598,15 +632,7 @@ function GraphViewContent() {
                 className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest bg-secondary text-secondary-foreground hover:bg-secondary/80 shadow-md"
                 onClick={() => router.push(`/entries/${encodeURIComponent(selectedEntry.id)}`)}
               >
-                View Hub
-              </Button>
-              <Button
-                className="flex-1 h-11 rounded-2xl font-bold uppercase text-[10px] tracking-widest shadow-xl shadow-primary/10"
-                onClick={handleCenterSelectedNode}
-                disabled={selectedEntry.id === centerNode}
-              >
-                <Compass className="size-4 mr-2" />
-                Focus
+                Open entry
               </Button>
             </div>
 
@@ -717,28 +743,41 @@ function GraphViewContent() {
                   {selectedEntryEdges.map((edge) => {
                     const neighborId =
                       edge.source_id === selectedEntry.id ? edge.target_id : edge.source_id
+                    const neighborEntry = graphEntries.find((e) => e.id === neighborId)
                     return (
                       <div
                         key={edge.id}
-                        className="group rounded-2xl border border-muted-foreground/10 bg-muted/5 p-4 transition-all hover:border-primary/30 hover:shadow-lg"
+                        className="group relative rounded-2xl border border-muted-foreground/10 bg-background/40 backdrop-blur-sm p-4 transition-all hover:border-primary/30 hover:bg-primary/5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] cursor-pointer"
+                        onClick={() => router.push(`/entries/${encodeURIComponent(neighborId)}`)}
                       >
                         <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 space-y-1">
-                            <p className="truncate font-bold text-sm text-foreground/80">{neighborId}</p>
-                            <Badge variant="outline" className="text-[8px] font-black uppercase py-0 px-1 border-primary/20 text-primary/60">
-                              {edge.relationship}
-                            </Badge>
-                            <p className="text-[10px] text-muted-foreground/60">
-                              {edge.edge_type === "similarity"
-                                ? `semantic distance ${edge.distance?.toFixed(3) ?? "n/a"}`
-                                : `manual weight ${edge.weight?.toFixed(2) ?? "n/a"}`}
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <p className="font-bold text-sm text-foreground/90 leading-tight">
+                              {neighborEntry ? getNodeTitle(neighborEntry) : neighborId}
                             </p>
+                            <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                              <Badge variant="outline" className="text-[8px] font-black uppercase py-0 px-1.5 border-primary/20 text-primary/70 bg-primary/5">
+                                {edge.relationship}
+                              </Badge>
+                              <span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50">
+                                {edge.edge_type === "similarity"
+                                  ? `Dist: ${edge.distance?.toFixed(3) ?? "N/A"}`
+                                  : `Wt: ${edge.weight?.toFixed(2) ?? "N/A"}`}
+                              </span>
+                            </div>
+                            {neighborEntry && neighborEntry.id !== getNodeTitle(neighborEntry) && (
+                               <p className="text-[9px] text-muted-foreground/40 font-mono truncate mt-2">
+                                 {neighborId}
+                               </p>
+                            )}
                           </div>
                           {edge.edge_type === "manual" ? (
-                            <ComboButton
-                              onConfirm={() => handleDeleteEdge(edge.id)}
-                              className="size-8 rounded-full opacity-0 group-hover:opacity-100"
-                            />
+                            <div onClick={(e) => e.stopPropagation()}>
+                              <ComboButton
+                                onConfirm={() => handleDeleteEdge(edge.id)}
+                                className="size-8 rounded-full opacity-0 group-hover:opacity-100"
+                              />
+                            </div>
                           ) : null}
                         </div>
                       </div>
