@@ -1594,8 +1594,9 @@ pub(crate) async fn search_core(
             });
 
             let related = if let Some(top) = filtered.first() {
+                let top_id = top.id.clone();
                 let edges = store
-                    .list_graph_edges(Some(&top.id), Some(GraphEdgeType::Manual))
+                    .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
                     .ok()
                     .unwrap_or_default();
 
@@ -1604,7 +1605,7 @@ pub(crate) async fn search_core(
                     .iter()
                     .filter(|e| e.weight < 0.0)
                     .map(|e| {
-                        if e.from_item_id == top.id {
+                        if e.from_item_id == top_id {
                             e.to_item_id.clone()
                         } else {
                             e.from_item_id.clone()
@@ -1641,12 +1642,12 @@ pub(crate) async fn search_core(
                         continue;
                     }
 
-                    let neighbor_id = if edge.from_item_id == top.id {
+                    let neighbor_id = if edge.from_item_id == top_id {
                         edge.to_item_id
                     } else {
                         edge.from_item_id
                     };
-                    if neighbor_id == top.id || existing.contains(neighbor_id.as_str()) {
+                    if neighbor_id == top_id || existing.contains(neighbor_id.as_str()) {
                         continue;
                     }
                     relations.entry(neighbor_id).or_insert(edge.relation);
