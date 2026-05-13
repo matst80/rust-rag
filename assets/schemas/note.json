@@ -1,0 +1,18 @@
+{
+  "type_name": "note",
+  "title": "Note",
+  "description": "Lightweight typed note — a titled blob of prose with optional tags and author. Use when content does not fit a more specific schema but should still be retrievable as a typed entry.",
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["title"],
+    "properties": {
+      "title": { "type": "string", "minLength": 1 },
+      "body": { "type": "string", "description": "Optional structured body. The entry's main `text` field is still the canonical content; `body` is for cases where a typed copy is useful." },
+      "author": { "type": "string" },
+      "tags": { "type": "array", "items": { "type": "string" } },
+      "links": { "type": "array", "items": { "type": "string" }, "description": "Stable ids or URLs of related entries." }
+    },
+    "additionalProperties": false
+  }
+}

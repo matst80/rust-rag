@@ -1,0 +1,23 @@
+{
+  "type_name": "incident",
+  "title": "Incident",
+  "description": "Operational incident record. Captures timeline, current status, and resolution.",
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["title", "started_at", "status", "summary"],
+    "properties": {
+      "title": { "type": "string", "minLength": 1 },
+      "started_at": { "type": "string", "format": "date-time" },
+      "resolved_at": { "type": "string", "format": "date-time" },
+      "status": { "type": "string", "enum": ["active", "monitoring", "resolved", "post_mortem"] },
+      "severity": { "type": "string", "enum": ["sev1", "sev2", "sev3", "sev4"] },
+      "summary": { "type": "string", "minLength": 1 },
+      "root_cause": { "type": "string" },
+      "resolution": { "type": "string" },
+      "affected_services": { "type": "array", "items": { "type": "string" } },
+      "responders": { "type": "array", "items": { "type": "string" } }
+    },
+    "additionalProperties": false
+  }
+}

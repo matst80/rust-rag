@@ -43,6 +43,8 @@ This project uses its own MCP server as durable cross-session, cross-agent memor
 **Project slug**: `rust-rag`
 **Namespaces**: `project:rust-rag:knowledge`, `project:rust-rag:todos`. Cross-project evergreen facts go in `knowledge`.
 
+**Canonical conventions live in the MCP tool `list_memory_conventions`** (taxonomy, required metadata, edge predicates). The tool is backed by entry `rust_rag_mcp_usage_guide_v1` in source `knowledge` — `update_item` (or `store_entry` with that id) to evolve the guidance without a redeploy. When the entry is missing the tool returns a compiled-in JSON default. Inspect typed schemas with `list_schemas`. Prefer `store_entry` with `type` + `data` when content fits a schema (decision / fact / todo / incident / note / recipe / workout / page_component) over free-text.
+
 ### On task start
 
 1. `search_entries` with `source_id="project:rust-rag:knowledge"` for project context.

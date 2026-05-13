@@ -1,0 +1,22 @@
+{
+  "type_name": "decision",
+  "title": "Decision",
+  "description": "Architectural / project decision record (ADR-style). Captures context, the choice made, and consequences.",
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["title", "context", "decision", "consequences", "status"],
+    "properties": {
+      "title": { "type": "string", "minLength": 1 },
+      "context": { "type": "string", "minLength": 1, "description": "What problem or situation prompted the decision." },
+      "decision": { "type": "string", "minLength": 1, "description": "The choice that was made." },
+      "consequences": { "type": "string", "minLength": 1, "description": "Resulting trade-offs, follow-ups, or constraints." },
+      "status": { "type": "string", "enum": ["proposed", "accepted", "superseded", "rejected"] },
+      "supersedes": { "type": "string", "description": "Stable id of an earlier decision this one replaces." },
+      "superseded_by": { "type": "string", "description": "Stable id of a later decision that replaces this one." },
+      "deciders": { "type": "array", "items": { "type": "string" } },
+      "decided_at": { "type": "string", "format": "date" }
+    },
+    "additionalProperties": false
+  }
+}
