@@ -413,7 +413,7 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                         }
                     }
 
-                    // Create "anti-edges" for unrelated verdicts to penalize them in search.
+                    // Create graph edges for high-quality analysis verdicts.
                     for verdict in &analysis.verdicts {
                         if verdict.relation == "unrelated" {
                             let input = ManualEdgeInput {
@@ -430,6 +430,30 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                             };
                             if let Err(e) = state.store.add_manual_edge(input) {
                                 tracing::warn!(error=%e, target_id=%verdict.target_id, "failed to create anti-edge");
+                            }
+                        } else if verdict.relation != "unrelated" {
+                            // These are "proven" relationships from the analysis pass (agrees, refines, supersedes, contradicts, duplicates).
+                            // We create a directed edge and mark it as confirmed so it shows up in neighbors.
+                            let input = ManualEdgeInput {
+                                from_item_id: item_id.clone(),
+                                to_item_id: verdict.target_id.clone(),
+                                relation: Some(std::borrow::Cow::Owned(verdict.relation.clone())),
+                                weight: verdict.confidence,
+                                directed: true,
+                                metadata: serde_json::json!({
+                                    "reason": verdict.reason,
+                                    "confidence": verdict.confidence,
+                                    "source": "analysis",
+                                    "status": "confirmed"
+                                }),
+                            };
+                            if let Err(e) = state.store.add_manual_edge(input) {
+                                tracing::warn!(
+                                    error = %e,
+                                    target_id = %verdict.target_id,
+                                    relation = %verdict.relation,
+                                    "failed to create analysis edge"
+                                );
                             }
                         }
                     }

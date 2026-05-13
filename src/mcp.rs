@@ -560,10 +560,41 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         }
 
         if let Some(nbh) = neighborhood {
+            let center_id = id.clone();
             let neighbors: Vec<EntryNeighbor> = nbh
                 .nodes
                 .into_iter()
-                .filter(|n| n.id != id)
+                .filter(|n| {
+                    if n.id == center_id {
+                        return false;
+                    }
+                    // Only include nodes connected by "proven" or "high quality" edges.
+                    // Prioritizes confirmed manual edges and extremely close embeddings.
+                    nbh.edges.iter().any(|e| {
+                        let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
+                            || (e.from_item_id == center_id && e.to_item_id == n.id);
+                        if !is_connected {
+                            return false;
+                        }
+
+                        match e.edge_type {
+                            GraphEdgeType::Manual => {
+                                let status = e.metadata.get("status").and_then(|v| v.as_str());
+                                let confidence = e.metadata
+                                    .get("confidence")
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(1.0);
+                                // Include confirmed edges or manual overrides with decent confidence
+                                status == Some("confirmed")
+                                    || (status.is_none() && confidence >= 0.7)
+                            }
+                            GraphEdgeType::Similarity => {
+                                // "really close" threshold (approx distance < 0.25)
+                                e.weight >= 0.8
+                            }
+                        }
+                    })
+                })
                 .map(|n| EntryNeighbor {
                     id: n.id,
                     title: n
