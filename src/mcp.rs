@@ -102,6 +102,7 @@ pub struct UpdateItemParams {
     /// Typed payload validated against the schema for `type`. Supply only
     /// when updating; omit to leave existing payload unchanged.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub data: Option<serde_json::Value>,
 }
 
@@ -215,6 +216,7 @@ pub struct WaitForMessageParams {
     /// Subset match against metadata: every key/value pair in the supplied
     /// object must appear (and equal) in the incoming message metadata.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata_match: Option<serde_json::Value>,
     /// Inclusive lower bound on `created_at` (ms). Buffered messages newer
     /// than this that match filters are returned synchronously without
@@ -257,6 +259,7 @@ pub struct AcpSpawnParams {
     #[serde(default)]
     pub agent_command: Option<String>,
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Option<serde_json::Value>,
     /// Target ACP instance id. Omit when only one is registered.
     #[serde(default)]
@@ -346,6 +349,7 @@ pub struct AcpDelegateTaskParams {
     /// label is set via `bind_telegram_thread { name }` after SessionStarted —
     /// metadata is no longer used for topic naming.
     #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
     pub metadata: Option<serde_json::Value>,
     /// Seconds to wait for SessionStarted before giving up. Default 15.
     #[serde(default)]
@@ -372,6 +376,7 @@ pub struct AcpCommandAck {
     pub sent: String,
     /// Optional context (e.g. echoed `request_id` for permission_response).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "metadata_schema")]
     pub context: Option<serde_json::Value>,
 }
 
@@ -1477,6 +1482,7 @@ pub struct SchemaTypeParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpsertSchemaParams {
     pub type_name: String,
+    #[schemars(schema_with = "metadata_schema")]
     pub json_schema: serde_json::Value,
     #[serde(default)]
     pub title: Option<String>,

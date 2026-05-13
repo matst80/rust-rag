@@ -14,6 +14,7 @@ use super::{api_validation_error, ApiError, AppState};
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaPayload {
     pub type_name: String,
+    #[schemars(schema_with = "crate::api::metadata_schema")]
     pub json_schema: Value,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -49,6 +50,7 @@ pub struct SchemaListResponse {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UpsertSchemaRequest {
     pub type_name: Option<String>,
+    #[schemars(schema_with = "crate::api::metadata_schema")]
     pub json_schema: Value,
     pub title: Option<String>,
     pub description: Option<String>,
