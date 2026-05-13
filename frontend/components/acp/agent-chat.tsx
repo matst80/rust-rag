@@ -376,7 +376,7 @@ export function AgentChat() {
 		// Fetch instances first so the initial WS connect can carry
 		// ?instance=. With one worker the backend auto-resolves, so this
 		// only matters once multiple are registered.
-		;(async () => {
+		; (async () => {
 			await refreshInstances()
 			connect()
 		})()
@@ -436,6 +436,10 @@ export function AgentChat() {
 				: [],
 		[activeSessionId, pendingPermissions],
 	)
+
+	const activeSession = useMemo(() => {
+		return sessions[activeSessionId ?? ""]
+	}, [activeSessionId, sessions])
 
 	const draftKey = (sid: string) => `acp:draft:${sid}`
 	const draft = activeSessionId ? drafts[activeSessionId] ?? "" : ""
@@ -570,13 +574,13 @@ export function AgentChat() {
 	const active = activeSessionId ? sessions[activeSessionId] : undefined
 	const statusDot =
 		conn.status === "open" ? "fill-emerald-500 text-emerald-500" :
-		conn.status === "connecting" ? "fill-amber-500 text-amber-500 animate-pulse" :
-		"fill-red-500 text-red-500"
+			conn.status === "connecting" ? "fill-amber-500 text-amber-500 animate-pulse" :
+				"fill-red-500 text-red-500"
 	const sessionStatusColor = (s?: string) =>
 		s === "Prompting" ? "text-amber-500" :
-		s === "Idle" ? "text-emerald-500" :
-		s === "Error" ? "text-red-500" :
-		"text-muted-foreground"
+			s === "Idle" ? "text-emerald-500" :
+				s === "Error" ? "text-red-500" :
+					"text-muted-foreground"
 
 	return (
 		<div className="relative flex h-[calc(100dvh-49px)]">
@@ -793,6 +797,7 @@ export function AgentChat() {
 											sendPrompt()
 										}
 									}}
+									onClick={() => { console.log(activeSession) }}
 									placeholder={`Message session ${activeSessionId.slice(0, 8)}…`}
 									rows={1}
 									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
@@ -1134,15 +1139,15 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 				const toolKind = (fields.kind as string) ?? undefined
 				const locations = Array.isArray(fields.locations)
 					? (fields.locations as unknown[])
-							.map((l) => {
-								if (typeof l === "string") return l
-								if (l && typeof l === "object") {
-									const o = l as { path?: string; line?: number }
-									return o.path ? (o.line ? `${o.path}:${o.line}` : o.path) : ""
-								}
-								return ""
-							})
-							.filter(Boolean)
+						.map((l) => {
+							if (typeof l === "string") return l
+							if (l && typeof l === "object") {
+								const o = l as { path?: string; line?: number }
+								return o.path ? (o.line ? `${o.path}:${o.line}` : o.path) : ""
+							}
+							return ""
+						})
+						.filter(Boolean)
 					: undefined
 
 				if (toolIndex[toolId] !== undefined) {
@@ -1284,14 +1289,14 @@ function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: strin
 	if (block.kind === "tool") {
 		const statusColor =
 			block.status === "completed" ? "text-emerald-500" :
-			block.status === "failed" || block.status === "error" ? "text-red-500" :
-			block.status === "in_progress" ? "text-amber-500" :
-			"text-muted-foreground"
+				block.status === "failed" || block.status === "error" ? "text-red-500" :
+					block.status === "in_progress" ? "text-amber-500" :
+						"text-muted-foreground"
 		const statusBg =
 			block.status === "completed" ? "bg-emerald-500/10 border-emerald-500/30" :
-			block.status === "failed" || block.status === "error" ? "bg-red-500/10 border-red-500/30" :
-			block.status === "in_progress" ? "bg-amber-500/10 border-amber-500/30" :
-			"bg-muted/40 border-border"
+				block.status === "failed" || block.status === "error" ? "bg-red-500/10 border-red-500/30" :
+					block.status === "in_progress" ? "bg-amber-500/10 border-amber-500/30" :
+						"bg-muted/40 border-border"
 		return (
 			<div className="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2.5">
 				<div className="flex items-center gap-2 flex-wrap">
@@ -1344,8 +1349,8 @@ function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: strin
 				<span className={cn(
 					"inline-block size-1.5 rounded-full",
 					block.status === "working" ? "bg-amber-500 animate-pulse" :
-					block.status === "idle" || block.status === "ready" ? "bg-emerald-500" :
-					"bg-muted-foreground",
+						block.status === "idle" || block.status === "ready" ? "bg-emerald-500" :
+							"bg-muted-foreground",
 				)} />
 				<span className="font-mono uppercase tracking-wide">{block.status}</span>
 				<span>· {timeOf(block.ts)}</span>
