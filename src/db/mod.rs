@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -407,7 +408,7 @@ pub struct ListItemsRequest {
 pub struct ManualEdgeInput {
     pub from_item_id: String,
     pub to_item_id: String,
-    pub relation: Option<String>,
+    pub relation: Option<Cow<'static, str>>,
     pub weight: f32,
     pub directed: bool,
     pub metadata: Value,
@@ -1611,7 +1612,7 @@ impl VectorStore for SqliteVectorStore {
                 edge_id,
                 input.from_item_id,
                 input.to_item_id,
-                input.relation,
+                input.relation.as_deref(),
                 input.weight,
                 bool_to_sqlite(input.directed),
                 metadata_json,
@@ -1625,7 +1626,7 @@ impl VectorStore for SqliteVectorStore {
             from_item_id: input.from_item_id,
             to_item_id: input.to_item_id,
             edge_type: GraphEdgeType::Manual,
-            relation: input.relation,
+            relation: input.relation.map(|r| r.into_owned()),
             weight: input.weight,
             directed: input.directed,
             metadata: input.metadata,
@@ -3031,7 +3032,7 @@ mod tests {
             .add_manual_edge(ManualEdgeInput {
                 from_item_id: "mem-1".to_owned(),
                 to_item_id: "know-1".to_owned(),
-                relation: Some("supports".to_owned()),
+                relation: Some(Cow::Borrowed("supports")),
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"user": "mats"}),
@@ -3115,7 +3116,7 @@ mod tests {
             .add_manual_edge(ManualEdgeInput {
                 from_item_id: "a".to_owned(),
                 to_item_id: "c".to_owned(),
-                relation: Some("supports".to_owned()),
+                relation: Some(Cow::Borrowed("supports")),
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"kind": "manual"}),

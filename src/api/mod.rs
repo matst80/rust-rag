@@ -27,6 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
@@ -2563,7 +2564,7 @@ async fn create_manual_edge(
     let input = ManualEdgeInput {
         from_item_id: request.from_item_id,
         to_item_id: request.to_item_id,
-        relation: request.relation,
+        relation: request.relation.map(Cow::Owned),
         weight: request.weight.unwrap_or(1.0),
         directed: request.directed.unwrap_or(false),
         metadata: request.metadata,
@@ -4015,7 +4016,7 @@ mod tests {
                 from_item_id: input.from_item_id,
                 to_item_id: input.to_item_id,
                 edge_type: GraphEdgeType::Manual,
-                relation: input.relation,
+                relation: input.relation.map(|r| r.into_owned()),
                 weight: input.weight,
                 directed: input.directed,
                 metadata: input.metadata,

@@ -7,7 +7,7 @@ use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::HashSet, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
@@ -233,19 +233,25 @@ async fn process_batch(
             Ok(edges) => {
                 let count = edges.len();
                 for edge in edges {
-                    let from = edge.from_item_id.clone();
-                    let to = edge.to_item_id.clone();
-                    let rel = edge.relation.clone().unwrap_or_else(|| "none".to_string());
-                    let conf = edge.weight;
-
                     let store_clone = store.clone();
-                    if let Err(err) =
-                        tokio::task::spawn_blocking(move || store_clone.add_manual_edge(edge))
-                            .await
+                    match tokio::task::spawn_blocking(move || store_clone.add_manual_edge(edge))
+                        .await
                     {
-                        error!("ontology worker: failed to insert edge: {err}");
-                    } else {
-                        info!("ontology worker: added edge: {} --[{}]--> {} (conf: {:.2})", from, rel, to, conf);
+                        Err(err) => {
+                            error!("ontology worker: failed to insert edge: {err}");
+                        }
+                        Ok(Err(err)) => {
+                            error!("ontology worker: failed to insert edge: {err}");
+                        }
+                        Ok(Ok(record)) => {
+                            info!(
+                                "ontology worker: added edge: {} --[{}]--> {} (conf: {:.2})",
+                                record.from_item_id,
+                                record.relation.as_deref().unwrap_or("none"),
+                                record.to_item_id,
+                                record.weight
+                            );
+                        }
                     }
                 }
                 if count > 0 {
@@ -378,17 +384,25 @@ fn parse_ontology_response(
                 && e.from_id != e.to_id
                 && e.confidence >= confidence_threshold
         })
-        .map(|e| ManualEdgeInput {
-            from_item_id: e.from_id,
-            to_item_id: e.to_id,
-            relation: Some(e.predicate),
-            // Confidence becomes the edge weight — queryable and visible in the graph UI.
-            weight: e.confidence,
-            directed: true,
-            metadata: json!({
-                "source": "ontology_worker",
-                "confidence": e.confidence
-            }),
+        .map(|e| {
+            let relation = VALID_PREDICATES
+                .iter()
+                .find(|&&p| p == e.predicate)
+                .map(|&p| Cow::Borrowed(p))
+                .unwrap_or_else(|| Cow::Owned(e.predicate));
+
+            ManualEdgeInput {
+                from_item_id: e.from_id,
+                to_item_id: e.to_id,
+                relation: Some(relation),
+                // Confidence becomes the edge weight — queryable and visible in the graph UI.
+                weight: e.confidence,
+                directed: true,
+                metadata: json!({
+                    "source": "ontology_worker",
+                    "confidence": e.confidence
+                }),
+            }
         })
         .collect();
 
@@ -444,7 +458,7 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.95},{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.88}]}"#;
         let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
         assert_eq!(edges.len(), 2);
-        assert_eq!(edges[0].relation, Some("is_a".to_owned()));
+        assert_eq!(edges[0].relation, Some(Cow::Borrowed("is_a")));
         assert!((edges[0].weight - 0.95).abs() < 0.001);
         assert!(edges[0].directed);
     }
