@@ -211,6 +211,19 @@ function GraphViewContent() {
 
     for (const edge of graphEdges) {
       const isSimilarity = edge.edge_type === "similarity"
+      const relationship = edge.relationship?.toLowerCase()
+      const isUnrelated = relationship === "unrelated"
+      const isContradicts = relationship === "contradicts"
+
+      let fill: string | undefined
+      if (isUnrelated) {
+        fill = "#ef4444" // red
+      } else if (isContradicts) {
+        fill = "#f97316" // orange
+      } else if (edge.edge_type === "manual") {
+        fill = "#3b82f6" // blue
+      }
+
       const key = `${edge.source_id}::${edge.target_id}`
       seen.add(key)
       seen.add(`${edge.target_id}::${edge.source_id}`)
@@ -220,6 +233,7 @@ function GraphViewContent() {
         target: edge.target_id,
         label: isSimilarity ? undefined : edge.relationship,
         size: isSimilarity ? 1 : 2.5,
+        fill,
         data: {
           edgeType: edge.edge_type,
           relationship: edge.relationship,

@@ -1598,9 +1598,49 @@ pub(crate) async fn search_core(
                     .list_graph_edges(Some(&top.id), Some(GraphEdgeType::Manual))
                     .ok()
                     .unwrap_or_default();
+
+                // Identify anti-edges from the top hit (weight < 0.0).
+                let anti_targets: HashSet<String> = edges
+                    .iter()
+                    .filter(|e| e.weight < 0.0)
+                    .map(|e| {
+                        if e.from_item_id == top.id {
+                            e.to_item_id.clone()
+                        } else {
+                            e.from_item_id.clone()
+                        }
+                    })
+                    .collect();
+
+                // If anti-edges exist, penalize those items in the result set and re-sort.
+                if !anti_targets.is_empty() {
+                    let mut changed = false;
+                    for hit in &mut filtered {
+                        if anti_targets.contains(&hit.id) {
+                            hit.distance += 0.4; // Substantial penalty
+                            if !hit.retrievers.contains(&"penalized".to_owned()) {
+                                hit.retrievers.push("penalized".to_owned());
+                            }
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        filtered.sort_by(|a, b| {
+                            decay_sort_key(a, now_ms)
+                                .partial_cmp(&decay_sort_key(b, now_ms))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    }
+                }
+
                 let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
                 let mut relations: HashMap<String, Option<String>> = HashMap::new();
                 for edge in edges {
+                    // Skip anti-edges for the "Related" panel.
+                    if edge.weight < 0.0 {
+                        continue;
+                    }
+
                     let neighbor_id = if edge.from_item_id == top.id {
                         edge.to_item_id
                     } else {
