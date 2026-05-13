@@ -12,59 +12,29 @@ use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
 
-// Exhaustive predicate list — output containing anything else is discarded post-parse.
-// Two predicates added over the original Gemini schema:
-//   contains      — hierarchy within a document (article contains a fact/claim)
-//   implemented_by — links a spec/concept to its concrete realization
-pub const VALID_PREDICATES: &[&str] = &[
-    "is_a",
-    "part_of",
-    "caused_by",
-    "works_for",
-    "contradicts",
-    "depends_on",
-    "contains",
-    "implemented_by",
-];
-
-/// Design notes on determinism:
-///
-/// 1. **Item-ID grounded** — LLM works with concrete item IDs, not free-text entity names.
-///    Eliminates "Apple" vs "Apple Inc." drift entirely.
-///
-/// 2. **Confidence per edge** — LLM rates each edge 0.0–1.0. Only edges above
-///    `confidence_threshold` are committed; lower ones are silently dropped.
-///    This is the key guard against low-quality automated edges.
-///
-/// 3. **Few-shot example** — shows exact input/output including the confidence field
-///    and how to skip an irrelevant candidate. Biggest single driver of output consistency.
-///
-/// 4. **Explicit skip rule** — "if no predicate fits, omit the candidate" removes
-///    pressure to invent `related_to`-style edges.
-///
-/// 5. **Direction table** — each predicate's from→to semantics are shown inline,
-///    preventing the most common direction errors (reversed is_a etc.).
-///
-/// 6. **Hard JSON-only constraint** — combined with temperature=0 makes the output
-///    fully machine-readable in a single parse attempt. `extract_json` handles
-///    models that wrap output in markdown fences despite instructions.
-const ONTOLOGY_SYSTEM_PROMPT: &str = r#"### Role
+fn get_ontology_system_prompt(predicates: &[crate::db::OntologyPredicateRecord]) -> String {
+    let mut schema_table = String::from("| Predicate | Direction (from → to) | Example |\n|-----------|-----------------------|---------|\n");
+    for p in predicates {
+        let example = match (&p.example_from, &p.example_to) {
+            (Some(f), Some(t)) => format!("\"{}\" {} \"{}\"", f, p.name, t),
+            _ => "...".to_owned(),
+        };
+        schema_table.push_str(&format!(
+            "| {} | {} | {} |\n",
+            p.name,
+            p.direction,
+            example
+        ));
+    }
+    
+    format!(r#"### Role
 You are an Ontology Edge Detector for a knowledge graph. Given a TARGET document and CANDIDATE documents, identify directed semantic relationships between them using a fixed schema.
 
 ### Relationship Schema (EXHAUSTIVE — use NO other predicates)
-| Predicate      | Direction (from → to)                    | Example                                                  |
-|----------------|------------------------------------------|----------------------------------------------------------|
-| is_a           | from is a subtype/instance of to         | "HashMap" is_a "data structure"                          |
-| part_of        | from is a component of to                | "Wheel" part_of "Car"                                    |
-| caused_by      | from is an effect/consequence of to      | "Smoke" caused_by "Fire"                                 |
-| works_for      | entity in from is affiliated with to     | "Musk" works_for "Tesla"                                 |
-| contradicts    | from makes a claim incompatible with to  | "Vaccines cause autism" contradicts "Vaccines are safe"  |
-| depends_on     | from requires to to function/exist       | "TCP" depends_on "IP routing"                            |
-| contains       | from includes/embeds to as a sub-element | "News article" contains "quoted statistic"               |
-| implemented_by | to is the concrete realization of from   | "Auth spec" implemented_by "OAuth2 library"              |
+{}
 
 ### Rules
-1. Direction matters: `from_id is_a to_id` means FROM is a subtype of TO, not the reverse.
+1. Direction matters: `from_id PREDICATE to_id` means the relationship holds in that direction.
 2. Only create an edge if the relationship is EXPLICIT or STRONGLY implied. When in doubt, omit.
 3. If no predicate from the schema fits a candidate, skip that candidate entirely.
 4. Every edge must involve the TARGET as either from_id or to_id.
@@ -74,22 +44,22 @@ You are an Ontology Edge Detector for a knowledge graph. Given a TARGET document
    - 0.7–0.9: strongly implied
    - 0.5–0.7: reasonably inferred but not stated
    - below 0.5: do not include the edge
-7. Output ONLY the JSON object below. No prose, no markdown, no code fences.
+7. Provide a one-sentence `reasoning` for each edge explaining why the relationship exists.
+8. Output ONLY the JSON object below. No prose, no markdown, no code fences.
 
 ### Output Schema
-{"edges":[{"from_id":"<id>","predicate":"<predicate>","to_id":"<id>","confidence":<0.0-1.0>}]}
-When no relationships apply: {"edges":[]}
+{{"edges":[{{"from_id":"<id>","predicate":"<predicate>","to_id":"<id>","confidence":<0.0-1.0>,"reasoning":"<one sentence description>"}}]}}
+When no relationships apply: {{"edges":[]}}
 
 ### Example
-TARGET: {"id":"id-A","text":"A HashMap is a hash-table-based associative data structure providing O(1) average-case lookup."}
+TARGET: {{"id":"id-A","text":"A HashMap is a hash-table-based associative data structure providing O(1) average-case lookup.","type":"fact","tags":["rust","data-structures"],"source_id":"knowledge"}}
 CANDIDATES:
-- {"id":"id-B","text":"A data structure is an abstraction for organizing data in memory to enable efficient operations."}
-- {"id":"id-C","text":"Hashing maps variable-length data to a fixed-size integer index via a hash function."}
-- {"id":"id-D","text":"A linked list stores elements in nodes where each node points to the next, giving O(n) lookup."}
+- {{"id":"id-B","text":"A data structure is an abstraction for organizing data in memory to enable efficient operations.","type":"concept","tags":["cs-basics"],"source_id":"knowledge"}}
+- {{"id":"id-C","text":"Hashing maps variable-length data to a fixed-size integer index via a hash function.","type":"fact","tags":["algorithms"],"source_id":"knowledge"}}
 
-OUTPUT: {"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.97},{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.91}]}
-
-Explanation (for your reference only — do not output): HashMap IS A data structure (is_a, explicit). HashMap DEPENDS ON hashing to work (depends_on, strongly implied). id-D is also a data structure but has no direct relationship to id-A worth encoding — skipped."#;
+OUTPUT: {{"edges":[{{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.97,"reasoning":"HashMap is explicitly described as a data structure."}},{{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.91,"reasoning":"HashMap uses hashing as its underlying mechanism for lookups."}}]}}
+"#, schema_table)
+}
 
 #[derive(Debug, Deserialize)]
 struct OntologyEdge {
@@ -98,6 +68,8 @@ struct OntologyEdge {
     to_id: String,
     #[serde(default)]
     confidence: f32,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,6 +173,13 @@ async fn process_batch(
     for item in pending {
         let text = item.text.clone();
         let item_id = item.id.clone();
+        let source_id = item.source_id.clone();
+        let store_clone = store.clone();
+        let svc = embedder_svc.clone();
+
+        let predicates = tokio::task::spawn_blocking(move || store_clone.list_ontology_predicates(Some(&source_id)))
+            .await??;
+            
         let store_clone = store.clone();
         let svc = embedder_svc.clone();
 
@@ -221,9 +200,9 @@ async fn process_batch(
             http_client,
             openai,
             model,
-            &item.id,
-            &item.text,
+            &item,
             &neighbors,
+            &predicates,
             cfg.confidence_threshold,
             cfg.target_preview_chars,
             cfg.candidate_preview_chars,
@@ -283,9 +262,9 @@ async fn call_llm_for_edges(
     http_client: &Client,
     openai: &OpenAiChatConfig,
     model: &str,
-    item_id: &str,
-    item_text: &str,
+    target: &crate::db::ItemRecord,
     neighbors: &[crate::db::SearchHit],
+    predicates: &[crate::db::OntologyPredicateRecord],
     confidence_threshold: f32,
     target_preview_chars: usize,
     candidate_preview_chars: usize,
@@ -294,26 +273,44 @@ async fn call_llm_for_edges(
         return Ok(vec![]);
     }
 
-    let target_preview: String = item_text.chars().take(target_preview_chars).collect();
+    let valid_predicates: HashSet<String> = predicates.iter().map(|p| p.name.clone()).collect();
+    let system_prompt = get_ontology_system_prompt(predicates);
+
+    let target_preview: String = target.text.chars().take(target_preview_chars).collect();
+    let target_tags: Vec<String> = target.metadata.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
     let mut candidates = String::new();
     for n in neighbors {
         let preview: String = n.text.chars().take(candidate_preview_chars).collect();
         candidates.push_str(&format!(
-            "- {{\"id\":{},\"text\":{}}}\n",
-            serde_json::to_string(&n.id)?,
-            serde_json::to_string(&preview)?,
+            "- {}\n",
+            json!({
+                "id": n.id,
+                "text": preview,
+                "type": n.type_name,
+                "tags": n.tags,
+                "source_id": n.source_id,
+            })
         ));
     }
 
     let user_message = format!(
-        "TARGET: {{\"id\":{},\"text\":{}}}\n\nCANDIDATES:\n{}",
-        serde_json::to_string(item_id)?,
-        serde_json::to_string(&target_preview)?,
+        "TARGET: {}\n\nCANDIDATES:\n{}",
+        json!({
+            "id": target.id,
+            "text": target_preview,
+            "type": target.type_name,
+            "tags": target_tags,
+            "source_id": target.source_id,
+        }),
         candidates,
     );
 
     tracing::debug!(
-        item_id,
+        item_id = target.id,
         neighbors = neighbors.len(),
         target_chars = target_preview.len(),
         "ontology worker: calling LLM"
@@ -324,7 +321,7 @@ async fn call_llm_for_edges(
         "temperature": 0,
         "max_tokens": (1024.0 * 1.5) as usize, // generous limit to avoid truncation issues (will be cut off by OpenAI if it exceeds the model's context window)
         "messages": [
-            {"role": "system", "content": ONTOLOGY_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
     });
@@ -353,15 +350,16 @@ async fn call_llm_for_edges(
         .and_then(|c| c.message.content)
         .unwrap_or_default();
 
-    tracing::debug!(item_id, raw_response = %content, "ontology worker: LLM response");
+    tracing::debug!(item_id = target.id, raw_response = %content, "ontology worker: LLM response");
 
-    parse_ontology_response(&content, item_id, neighbors, confidence_threshold)
+    parse_ontology_response(&content, &target.id, neighbors, &valid_predicates, confidence_threshold)
 }
 
 fn parse_ontology_response(
     content: &str,
     item_id: &str,
     neighbors: &[crate::db::SearchHit],
+    valid_predicates: &HashSet<String>,
     confidence_threshold: f32,
 ) -> Result<Vec<ManualEdgeInput>> {
     let json_str = extract_json(content);
@@ -377,7 +375,7 @@ fn parse_ontology_response(
         .edges
         .into_iter()
         .filter(|e| {
-            VALID_PREDICATES.contains(&e.predicate.as_str())
+            valid_predicates.contains(&e.predicate)
                 && valid_ids.contains(e.from_id.as_str())
                 && valid_ids.contains(e.to_id.as_str())
                 && (e.from_id == item_id || e.to_id == item_id)
@@ -385,11 +383,13 @@ fn parse_ontology_response(
                 && e.confidence >= confidence_threshold
         })
         .map(|e| {
-            let relation = VALID_PREDICATES
-                .iter()
-                .find(|&&p| p == e.predicate)
-                .map(|&p| Cow::Borrowed(p))
-                .unwrap_or_else(|| Cow::Owned(e.predicate));
+            let relation = Cow::Owned(e.predicate);
+
+            let status = if e.confidence >= 0.9 {
+                "confirmed"
+            } else {
+                "suggested"
+            };
 
             ManualEdgeInput {
                 from_item_id: e.from_id,
@@ -400,7 +400,9 @@ fn parse_ontology_response(
                 directed: true,
                 metadata: json!({
                     "source": "ontology_worker",
-                    "confidence": e.confidence
+                    "confidence": e.confidence,
+                    "reasoning": e.reasoning,
+                    "status": status
                 }),
             }
         })
@@ -423,14 +425,6 @@ fn extract_json(content: &str) -> &str {
     }
 }
 
-pub fn ontology_system_prompt() -> &'static str {
-    ONTOLOGY_SYSTEM_PROMPT
-}
-
-pub fn valid_predicates() -> &'static [&'static str] {
-    VALID_PREDICATES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,26 +443,37 @@ mod tests {
             retrievers: Vec::new(),
             chunk_text: None,
             path: None,
+            type_name: None,
+            tags: Vec::new(),
         }
     }
 
     #[test]
     fn valid_edges_are_accepted() {
         let neighbors = vec![hit("id-B", "data structure"), hit("id-C", "hashing")];
-        let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.95},{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.88}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.95,"reasoning":"HashMap is a data structure."},{"from_id":"id-A","predicate":"depends_on","to_id":"id-C","confidence":0.88,"reasoning":"HashMap depends on hashing."}]}"#;
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        valid.insert("depends_on".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert_eq!(edges.len(), 2);
-        assert_eq!(edges[0].relation, Some(Cow::Borrowed("is_a")));
+        assert_eq!(edges[0].relation.as_ref().map(|r| r.as_ref()), Some("is_a"));
         assert!((edges[0].weight - 0.95).abs() < 0.001);
         assert!(edges[0].directed);
+        assert_eq!(edges[0].metadata["status"], "confirmed");
+        assert_eq!(edges[0].metadata["reasoning"], "HashMap is a data structure.");
+        assert_eq!(edges[1].metadata["status"], "suggested");
+        assert_eq!(edges[1].metadata["reasoning"], "HashMap depends on hashing.");
     }
 
     #[test]
     fn edge_below_confidence_threshold_is_dropped() {
         let neighbors = vec![hit("id-B", "something")];
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.5}]}"#;
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
         // threshold 0.7 — 0.5 should be dropped
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 
@@ -476,7 +481,9 @@ mod tests {
     fn edge_at_confidence_threshold_is_accepted() {
         let neighbors = vec![hit("id-B", "something")];
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.7}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert_eq!(edges.len(), 1);
     }
 
@@ -485,7 +492,9 @@ mod tests {
         let neighbors = vec![hit("id-B", "something")];
         // confidence defaults to 0.0 when missing — below any sensible threshold
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B"}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 
@@ -493,7 +502,9 @@ mod tests {
     fn invalid_predicate_is_dropped() {
         let neighbors = vec![hit("id-B", "something")];
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"related_to","to_id":"id-B","confidence":0.95}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 
@@ -501,7 +512,10 @@ mod tests {
     fn new_predicates_are_valid() {
         let neighbors = vec![hit("id-B", "something")];
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"contains","to_id":"id-B","confidence":0.9},{"from_id":"id-B","predicate":"implemented_by","to_id":"id-A","confidence":0.85}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("contains".to_owned());
+        valid.insert("implemented_by".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert_eq!(edges.len(), 2);
     }
 
@@ -509,7 +523,9 @@ mod tests {
     fn unknown_id_is_dropped() {
         let neighbors = vec![hit("id-B", "something")];
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-PHANTOM","confidence":0.9}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 
@@ -518,7 +534,9 @@ mod tests {
         let neighbors = vec![hit("id-B", "b"), hit("id-C", "c")];
         let content =
             r#"{"edges":[{"from_id":"id-B","predicate":"is_a","to_id":"id-C","confidence":0.9}]}"#;
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 
@@ -526,14 +544,17 @@ mod tests {
     fn markdown_fence_is_stripped() {
         let neighbors = vec![hit("id-B", "data structure")];
         let content = "```json\n{\"edges\":[{\"from_id\":\"id-A\",\"predicate\":\"is_a\",\"to_id\":\"id-B\",\"confidence\":0.9}]}\n```";
-        let edges = parse_ontology_response(content, "id-A", &neighbors, 0.7).unwrap();
+        let mut valid = HashSet::new();
+        valid.insert("is_a".to_owned());
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert_eq!(edges.len(), 1);
     }
 
     #[test]
     fn empty_edges_array_is_ok() {
         let neighbors = vec![hit("id-B", "unrelated")];
-        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, 0.7).unwrap();
+        let valid = HashSet::new();
+        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, &valid, 0.7).unwrap();
         assert!(edges.is_empty());
     }
 }

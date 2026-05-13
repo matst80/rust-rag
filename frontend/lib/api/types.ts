@@ -22,6 +22,13 @@ export interface Entry {
   type?: string | null
   /** Typed payload conforming to the schema for `type`. */
   data?: Record<string, unknown> | null
+  /** Contextual expansion: similar or related entries (id + title only). */
+  neighbors?: EntryNeighbor[] | null
+}
+
+export interface EntryNeighbor {
+  id: string
+  title?: string | null
 }
 
 export interface SchemaDefinition {
@@ -279,6 +286,10 @@ export interface CreateEdgeRequest {
   directed?: boolean
   weight?: number
   metadata?: EntryMetadata
+}
+
+export interface UpdateEdgeRequest {
+  metadata: EntryMetadata
 }
 
 export interface ChatCompletionToolFunction {

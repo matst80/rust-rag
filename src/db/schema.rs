@@ -233,6 +233,17 @@ pub(super) fn initialize_schema(
              description TEXT,
              created_at INTEGER NOT NULL,
              updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS ontology_predicates (
+             name TEXT NOT NULL,
+             source_id TEXT NOT NULL DEFAULT '*',
+             description TEXT NOT NULL,
+             direction TEXT NOT NULL,
+             example_from TEXT,
+             example_to TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             PRIMARY KEY (name, source_id)
          );",
     )?;
 

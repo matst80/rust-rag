@@ -504,6 +504,12 @@ pub struct CreateManualEdgeRequest {
     pub metadata: Value,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateGraphEdgeRequest {
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Value,
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StoreResponse {
     pub id: String,
@@ -612,6 +618,16 @@ pub struct AdminItemPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     #[schemars(schema_with = "metadata_schema")]
     pub data: Option<Value>,
+    /// Contextual expansion: similar or related entries (id + title only).
+    /// Populated by `get_entry` to provide immediate navigation context.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub neighbors: Option<Vec<EntryNeighbor>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct EntryNeighbor {
+    pub id: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -957,7 +973,10 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
         .route("/admin/graph/edges", post(create_manual_edge))
-        .route("/admin/graph/edges/{id}", delete(delete_graph_edge))
+        .route(
+            "/admin/graph/edges/{id}",
+            axum::routing::patch(update_graph_edge).delete(delete_graph_edge),
+        )
         .route("/api/ingest/image", post(multimodal::ingest_image))
         .route("/api/ingest/url", post(ingest_url::ingest_url))
         .route(
@@ -2016,10 +2035,11 @@ async fn get_item(
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     let store = state.store.clone();
     let id_for_lookup = id.clone();
-    let (item, analysis) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || -> Result<_> {
         let item = store.get_item(&id_for_lookup)?;
         let analysis = store.get_item_analysis(&id_for_lookup)?;
-        Ok((item, analysis))
+        let neighborhood = store.graph_neighborhood(&id_for_lookup, 1, 10, None).ok();
+        Ok((item, analysis, neighborhood))
     })
     .await
     .map_err(ApiError::TaskJoin)?
@@ -2031,6 +2051,26 @@ async fn get_item(
         payload.analysis_at = Some(a.analysis_at);
         payload.analysis_model = Some(a.analysis_model);
     }
+
+    if let Some(nbh) = neighborhood {
+        let neighbors: Vec<EntryNeighbor> = nbh
+            .nodes
+            .into_iter()
+            .filter(|n| n.id != id)
+            .map(|n| EntryNeighbor {
+                id: n.id,
+                title: n
+                    .metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned()),
+            })
+            .collect();
+        if !neighbors.is_empty() {
+            payload.neighbors = Some(neighbors);
+        }
+    }
+
     Ok(Json(payload))
 }
 
@@ -2637,6 +2677,22 @@ async fn create_manual_edge(
         .map_err(map_graph_error)?;
 
     Ok((StatusCode::CREATED, Json(edge.into())))
+}
+
+async fn update_graph_edge(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateGraphEdgeRequest>,
+) -> Result<Json<GraphEdgePayload>, ApiError> {
+    validate_metadata(&request.metadata)?;
+
+    let store = state.store.clone();
+    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.metadata))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    Ok(Json(edge.into()))
 }
 
 async fn delete_graph_edge(
@@ -3676,6 +3732,7 @@ pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
     use axum_test::TestServer;
     use serde_json::json;
     use std::{
@@ -3843,7 +3900,19 @@ mod tests {
                         section_path: Vec::new(),
                         retrievers: Vec::new(),
                         chunk_text: None,
-                        path: None,
+                        path: item.path.clone(),
+                        type_name: item.type_name.clone(),
+                        tags: item
+                            .metadata
+                            .get("tags")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     });
                 }
             }
@@ -4089,6 +4158,22 @@ mod tests {
             };
             edges.push(edge.clone());
             Ok(edge)
+        }
+
+        fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+            if !self.graph_enabled {
+                anyhow::bail!("graph support is disabled");
+            }
+
+            let mut edges = self.graph_edges.lock().expect("store mutex poisoned");
+            let edge = edges
+                .iter_mut()
+                .find(|edge| edge.id == id)
+                .ok_or_else(|| anyhow!("edge {} not found", id))?;
+
+            edge.metadata = metadata;
+            edge.updated_at += 1;
+            Ok(edge.clone())
         }
 
         fn delete_graph_edge(&self, id: &str) -> Result<bool> {
@@ -4621,6 +4706,8 @@ mod tests {
             retrievers: Vec::new(),
             chunk_text: None,
             path: None,
+            type_name: None,
+            tags: Vec::new(),
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -4672,6 +4759,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4684,6 +4773,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4756,6 +4847,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -4799,6 +4892,8 @@ mod tests {
             retrievers: Vec::new(),
             chunk_text: None,
             path: None,
+            type_name: None,
+            tags: Vec::new(),
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -4857,6 +4952,8 @@ mod tests {
                     retrievers: Vec::new(),
                     chunk_text: None,
                     path: None,
+                    type_name: None,
+                    tags: Vec::new(),
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -4869,6 +4966,8 @@ mod tests {
                     retrievers: Vec::new(),
                     chunk_text: None,
                     path: None,
+                    type_name: None,
+                    tags: Vec::new(),
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -4908,6 +5007,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4920,6 +5021,8 @@ mod tests {
                 retrievers: Vec::new(),
                 chunk_text: None,
                 path: None,
+                type_name: None,
+                tags: Vec::new(),
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));

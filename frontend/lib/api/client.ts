@@ -44,6 +44,7 @@ import type {
   UpsertSchemaRequest,
   DeleteSchemaResponse,
   IngestUrlRequest,
+  UpdateEdgeRequest,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -625,6 +626,21 @@ export async function createEdge(data: CreateEdgeRequest): Promise<Edge> {
   return toEdge(response)
 }
 
+export async function updateEdge(
+  id: string,
+  data: UpdateEdgeRequest
+): Promise<Edge> {
+  const response = await request<RawEdge>(
+    `/admin/graph/edges/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }
+  )
+
+  return toEdge(response)
+}
+
 export async function deleteEdge(id: string): Promise<void> {
   await request<void>(`/admin/graph/edges/${encodeURIComponent(id)}`, {
     method: "DELETE",
@@ -803,6 +819,7 @@ export const api = {
     listForItem: getEdgesForItem,
     neighborhood: getGraphNeighborhood,
     create: createEdge,
+    update: updateEdge,
     delete: deleteEdge,
   },
   schemas: {

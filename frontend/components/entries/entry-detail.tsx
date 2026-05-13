@@ -312,6 +312,34 @@ ${(entry.text ?? "").slice(0, 6000)}`
             {/* Analysis */}
             <AnalysisPanel entry={entry} />
 
+            {/* Similar Entries (Contextual Expansion) */}
+            {entry.neighbors && entry.neighbors.length > 0 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-500">
+                <div className="flex items-center gap-2">
+                  <div className="size-1.5 rounded-full bg-primary/60 shadow-[0_0_8px_rgba(var(--primary-rgb),0.3)]" />
+                  <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                    Similar Entries
+                  </h2>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {entry.neighbors.map((neighbor) => (
+                    <Link
+                      key={neighbor.id}
+                      href={`/entries/${encodeURIComponent(neighbor.id)}`}
+                      className="group flex flex-col gap-1 border border-border bg-card p-4 hover:border-primary/40 hover:bg-primary/5 transition-all duration-300"
+                    >
+                      <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors">
+                        {neighbor.id.substring(0, 12)}...
+                      </span>
+                      <div className="text-sm font-medium text-foreground line-clamp-1">
+                        {neighbor.title || "Untitled Fragment"}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Attachments */}
             <AttachmentsPanel itemId={id} />
 

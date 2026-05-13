@@ -10,15 +10,15 @@ use crate::{
     api::{
         ActiveUserPayload, AdminItemPayload, AdminItemsResponse, AppState, CategoriesResponse,
         ChannelsResponse, ClearChannelResponse, CreateManualEdgeRequest, DeleteResponse,
-        GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
-        GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
-        ListItemsQuery, MessagePayload, MessagesResponse, SearchRequest, SearchResponse,
-        SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema,
-        search_core, store_entry_core,
+        EntryNeighbor, GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery,
+        GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse, HealthResponse,
+        ListGraphEdgesQuery, ListItemsQuery, MessagePayload, MessagesResponse, SearchRequest,
+        SearchResponse, SearchResultPayload, StoreRequest, StoreResponse, UpdateItemRequest,
+        metadata_schema, search_core, store_entry_core,
     },
     db::{
-        GraphEdgeType, ItemRecord, ListItemsRequest, ManualEdgeInput, MessageQuery,
-        MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
+        GraphEdgeType, GraphNeighborhood, ItemRecord, ListItemsRequest, ManualEdgeInput,
+        MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
     },
 };
 use rmcp::{
@@ -105,18 +105,8 @@ fn build_memory_conventions() -> serde_json::Value {
         },
         "edge_vocabulary": {
             "tool": "create_manual_edge",
-            "canonical_predicates": crate::ontology::VALID_PREDICATES,
-            "directions": {
-                "is_a": "from is a subtype/instance of to",
-                "part_of": "from is a component of to",
-                "caused_by": "from is an effect/consequence of to",
-                "works_for": "entity in from is affiliated with to",
-                "contradicts": "from makes a claim incompatible with to",
-                "depends_on": "from requires to to function/exist",
-                "contains": "from includes/embeds to as a sub-element",
-                "implemented_by": "to is the concrete realization of from"
-            },
-            "note": "Off-list relations are allowed but won't compose with ontology-worker edges or analyze_entry verdicts. Stick to the canonical set unless you have a reason."
+            "canonical_predicates": crate::db::default_ontology_predicates().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            "note": "Predicates are now dynamic and project-specific. The list above contains the system defaults. Call `list_ontology_predicates` to see active ones for your context."
         }
     })
 }
@@ -541,18 +531,54 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch full text + metadata of a single entry by id. Use after `search_entries` or a hand-off message references a specific entry id.")]
+    #[tool(
+        description = "Fetch full text + metadata of a single entry by id. Also returns 'neighbors' (id + title of similar entries) for contextual expansion."
+    )]
     async fn get_entry(
         &self,
         Parameters(IdParams { id }): Parameters<IdParams>,
     ) -> Result<Json<AdminItemPayload>, String> {
         let store = self.state.store.clone();
-        tokio::task::spawn_blocking(move || store.get_item(&id))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?
-            .map(|record| Json(record.into()))
-            .ok_or_else(|| "item not found".to_owned())
+        let target_id = id.clone();
+        let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || {
+            let item = store.get_item(&target_id)?;
+            let analysis = store.get_item_analysis(&target_id).ok().flatten();
+            let neighborhood = store.graph_neighborhood(&target_id, 1, 10, None).ok();
+            Ok::<(Option<ItemRecord>, Option<crate::db::ItemAnalysisRecord>, Option<GraphNeighborhood>), anyhow::Error>((item, analysis, neighborhood))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+        let item = item.ok_or_else(|| "item not found".to_owned())?;
+        let mut payload: AdminItemPayload = item.into();
+
+        if let Some(a) = analysis {
+            payload.analysis = Some(a.analysis);
+            payload.analysis_at = Some(a.analysis_at);
+            payload.analysis_model = Some(a.analysis_model);
+        }
+
+        if let Some(nbh) = neighborhood {
+            let neighbors: Vec<EntryNeighbor> = nbh
+                .nodes
+                .into_iter()
+                .filter(|n| n.id != id)
+                .map(|n| EntryNeighbor {
+                    id: n.id,
+                    title: n
+                        .metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned()),
+                })
+                .collect();
+            if !neighbors.is_empty() {
+                payload.neighbors = Some(neighbors);
+            }
+        }
+
+        Ok(Json(payload))
     }
 
     #[tool(description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id.")]
@@ -1135,6 +1161,21 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(DeleteResponse { id, deleted }))
     }
 
+    #[tool(description = "Update the metadata of an existing graph edge (e.g., to confirm a suggested edge by setting metadata.status = 'confirmed').")]
+    async fn update_graph_edge(
+        &self,
+        Parameters(params): Parameters<UpdateGraphEdgeParams>,
+    ) -> Result<Json<GraphEdgePayload>, String> {
+        let store = self.state.store.clone();
+        let id = params.id.clone();
+        let metadata = params.metadata;
+        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, metadata))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(Json(edge.into()))
+    }
+
     #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
     async fn attach_url(
         &self,
@@ -1600,6 +1641,13 @@ pub struct UpsertSchemaParams {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateGraphEdgeParams {
+    pub id: String,
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

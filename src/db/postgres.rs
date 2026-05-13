@@ -12,7 +12,7 @@ use super::{
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
     GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
-    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, PathRow,
+    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OntologyPredicateRecord, PathChild, PathRow,
     SchemaRecord, SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
 };
 
@@ -112,6 +112,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0008_typed_entries",
         include_str!("../../migrations/0008_typed_entries.sql"),
+    ),
+    (
+        "0009_ontology_predicates",
+        include_str!("../../migrations/0009_ontology_predicates.sql"),
     ),
 ];
 
@@ -488,7 +492,8 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
-                            ranked.distance, ranked.section_path, ranked.chunk_content \
+                            ranked.distance, ranked.section_path, ranked.chunk_content, \
+                            d.type, d.tags \
                      FROM ( \
                          SELECT DISTINCT ON (c.document_id) \
                                 c.document_id, \
@@ -526,6 +531,8 @@ impl VectorStore for PostgresVectorStore {
                         retrievers: vec!["dense".to_owned()],
                         chunk_text,
                         path: item.path.clone(),
+                        type_name: row.try_get::<_, Option<String>>("type")?,
+                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -643,6 +650,7 @@ impl VectorStore for PostgresVectorStore {
                     FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
                 )
                 SELECT d.id, d.content, d.metadata, d.source_id, d.created_at,
+                       d.type, d.tags,
                        (f.rrf_score
                           * exp(- EXTRACT(EPOCH FROM (now() - d.updated_at))
                                 / (86400.0 * $7::float))
@@ -706,6 +714,8 @@ impl VectorStore for PostgresVectorStore {
                         retrievers,
                         chunk_text,
                         path: item.path.clone(),
+                        type_name: row.try_get::<_, Option<String>>("type")?,
+                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -1040,6 +1050,7 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, \
+                            d.path, d.type, d.tags, \
                             MIN(c.dense_embedding <=> $1::vector) AS distance \
                      FROM chunks c JOIN documents d ON d.id = c.document_id \
                      WHERE d.id = ANY($2) \
@@ -1061,7 +1072,9 @@ impl VectorStore for PostgresVectorStore {
                         section_path: Vec::new(),
                         retrievers: vec!["dense".to_owned()],
                         chunk_text: None,
-                path: None,
+                        path: row.try_get::<_, Option<String>>("path").ok().flatten(),
+                        type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
+                        tags: row.try_get::<_, Option<Vec<String>>>("tags").ok().flatten().unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -1453,6 +1466,55 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+        if !self.graph_config.enabled {
+            anyhow::bail!("graph features are disabled");
+        }
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let timestamp = current_ms();
+        self.block(async move {
+            let mut client = pool.get().await.context("acquiring postgres connection")?;
+            let tx = client.transaction().await?;
+            
+            let row = tx
+                .query_opt("SELECT id FROM graph_edges WHERE id = $1 FOR UPDATE", &[&id])
+                .await?;
+            if row.is_none() {
+                anyhow::bail!("edge {id} not found");
+            }
+
+            tx.execute(
+                "UPDATE graph_edges SET metadata = $1, updated_at = $2 WHERE id = $3",
+                &[&metadata, &timestamp, &id],
+            )
+            .await?;
+
+            let row = tx.query_one(
+                "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at \
+                 FROM graph_edges WHERE id = $1",
+                &[&id],
+            ).await?;
+
+            let edge_type_str: String = row.get(3);
+            let edge = GraphEdgeRecord {
+                id: row.get(0),
+                from_item_id: row.get(1),
+                to_item_id: row.get(2),
+                edge_type: GraphEdgeType::from_str(&edge_type_str).unwrap_or(GraphEdgeType::Manual),
+                relation: row.get(4),
+                weight: row.get(5),
+                directed: row.get(6),
+                metadata: row.get(7),
+                created_at: row.get(8),
+                updated_at: row.get(9),
+            };
+
+            tx.commit().await?;
+            Ok(edge)
+        })
+    }
+
     fn get_items_pending_ontology(&self, _limit: usize) -> Result<Vec<ItemRecord>> {
         // Ontology worker is disabled in the Postgres backend until the
         // status column is ported. Returning empty stops the worker from
@@ -1462,6 +1524,119 @@ impl VectorStore for PostgresVectorStore {
 
     fn mark_ontology_status(&self, _id: &str, _status: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn list_ontology_predicates(&self, source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+        let pool = self.pool.clone();
+        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT name, source_id, description, direction, example_from, example_to, created_at, updated_at
+                     FROM ontology_predicates WHERE source_id = $1 OR source_id = '*'
+                     ORDER BY name ASC, source_id DESC",
+                    &[&sid],
+                )
+                .await?;
+            let mut predicates = rows
+                .into_iter()
+                .map(|row| {
+                    let sid_val: String = row.get("source_id");
+                    let created: DateTime<Utc> = row.get("created_at");
+                    let updated: DateTime<Utc> = row.get("updated_at");
+                    OntologyPredicateRecord {
+                        name: row.get("name"),
+                        source_id: if sid_val == "*" { None } else { Some(sid_val) },
+                        description: row.get("description"),
+                        direction: row.get("direction"),
+                        example_from: row.get("example_from"),
+                        example_to: row.get("example_to"),
+                        created_at: ts_to_ms(created),
+                        updated_at: ts_to_ms(updated),
+                    }
+                })
+                .collect::<Vec<_>>();
+            predicates.dedup_by(|a, b| a.name == b.name);
+            Ok(predicates)
+        })
+    }
+
+    fn get_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+        let pool = self.pool.clone();
+        let name = name.to_owned();
+        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT name, source_id, description, direction, example_from, example_to, created_at, updated_at
+                     FROM ontology_predicates WHERE name = $1 AND (source_id = $2 OR source_id = '*')
+                     ORDER BY source_id DESC LIMIT 1",
+                    &[&name, &sid],
+                )
+                .await?;
+            Ok(row.map(|row| {
+                let sid_val: String = row.get("source_id");
+                let created: DateTime<Utc> = row.get("created_at");
+                let updated: DateTime<Utc> = row.get("updated_at");
+                OntologyPredicateRecord {
+                    name: row.get("name"),
+                    source_id: if sid_val == "*" { None } else { Some(sid_val) },
+                    description: row.get("description"),
+                    direction: row.get("direction"),
+                    example_from: row.get("example_from"),
+                    example_to: row.get("example_to"),
+                    created_at: ts_to_ms(created),
+                    updated_at: ts_to_ms(updated),
+                }
+            }))
+        })
+    }
+
+    fn upsert_ontology_predicate(&self, record: OntologyPredicateRecord) -> Result<()> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await?;
+            let sid = record.source_id.as_deref().unwrap_or("*");
+            client
+                .execute(
+                    "INSERT INTO ontology_predicates (name, source_id, description, direction, example_from, example_to, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+                     ON CONFLICT (name, source_id) DO UPDATE SET
+                         description = EXCLUDED.description,
+                         direction = EXCLUDED.direction,
+                         example_from = EXCLUDED.example_from,
+                         example_to = EXCLUDED.example_to,
+                         updated_at = now()",
+                    &[
+                        &record.name,
+                        &sid,
+                        &record.description,
+                        &record.direction,
+                        &record.example_from,
+                        &record.example_to,
+                    ],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn delete_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<bool> {
+        let pool = self.pool.clone();
+        let name = name.to_owned();
+        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        self.block(async move {
+            let client = pool.get().await?;
+            let n = client
+                .execute(
+                    "DELETE FROM ontology_predicates WHERE name = $1 AND source_id = $2",
+                    &[&name, &sid],
+                )
+                .await?;
+            Ok(n > 0)
+        })
     }
 
     fn list_schemas(&self) -> Result<Vec<SchemaRecord>> {
