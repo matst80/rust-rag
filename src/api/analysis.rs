@@ -418,7 +418,7 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                             let input = ManualEdgeInput {
                                 from_item_id: item_id.clone(),
                                 to_item_id: verdict.target_id.clone(),
-                                relation: Some("unrelated".to_owned()),
+                                relation: Some(std::borrow::Cow::Borrowed("unrelated")),
                                 weight: -1.0,
                                 directed: false,
                                 metadata: serde_json::json!({

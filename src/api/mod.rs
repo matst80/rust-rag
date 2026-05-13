@@ -4016,7 +4016,7 @@ mod tests {
                 from_item_id: input.from_item_id,
                 to_item_id: input.to_item_id,
                 edge_type: GraphEdgeType::Manual,
-                relation: input.relation,
+                relation: input.relation.map(|r| r.into_owned()),
                 weight: input.weight,
                 directed: input.directed,
                 metadata: input.metadata,
