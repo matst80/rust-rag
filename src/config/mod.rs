@@ -238,6 +238,27 @@ impl AnalysisConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct DreamingConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub batch_size: usize,
+    pub source_id: String,
+    pub target_source_id: String,
+}
+
+impl Default for DreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 3600,
+            batch_size: 5,
+            source_id: "memory".to_owned(),
+            target_source_id: "knowledge".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
@@ -265,6 +286,7 @@ pub struct AppConfig {
     pub manager: ManagerConfig,
     pub acp_ws: AcpWsConfig,
     pub analysis: AnalysisConfig,
+    pub dreaming: DreamingConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -419,6 +441,15 @@ impl AppConfig {
                 neighbor_count: parse_env("RAG_ONTOLOGY_NEIGHBOR_COUNT", "8")?,
                 target_preview_chars: parse_env("RAG_ONTOLOGY_TARGET_PREVIEW_CHARS", "600")?,
                 candidate_preview_chars: parse_env("RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS", "300")?,
+            },
+            dreaming: DreamingConfig {
+                enabled: parse_env("RAG_DREAMING_ENABLED", "false")?,
+                interval_secs: parse_env("RAG_DREAMING_INTERVAL_SECS", "3600")?,
+                batch_size: parse_env("RAG_DREAMING_BATCH_SIZE", "5")?,
+                source_id: env::var("RAG_DREAMING_SOURCE_ID")
+                    .unwrap_or_else(|_| "memory".to_owned()),
+                target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
+                    .unwrap_or_else(|_| "knowledge".to_owned()),
             },
         })
     }

@@ -227,6 +227,7 @@ export interface SearchRequest {
   hybrid?: boolean
   /** Cross-encoder reranking on top-N candidates. Has no effect when the server has no reranker loaded. */
   rerank?: boolean
+  type?: string
 }
 
 export interface UpdateItemRequest {
@@ -379,6 +380,7 @@ export interface AssistedQueryRequest {
   top_k?: number
   max_distance?: number
   model?: string
+  type?: string
 }
 
 export interface AssistedQueryRawResult {

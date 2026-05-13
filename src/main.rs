@@ -236,7 +236,8 @@ async fn main() -> Result<()> {
         config.chunking.clone(),
     )
     .with_manager(config.manager.clone())
-    .with_analysis(config.analysis.clone());
+    .with_analysis(config.analysis.clone())
+    .with_dreaming(config.dreaming.clone());
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
@@ -381,6 +382,14 @@ async fn main() -> Result<()> {
         )));
     }
 
+    let mut dreaming_handle = None;
+    if config.dreaming.enabled {
+        dreaming_handle = Some(tokio::spawn(rust_rag::api::run_dreaming_worker(
+            state.clone(),
+            shutdown_rx.clone(),
+        )));
+    }
+
     let mut ontology_handle = None;
     if config.ontology.enabled {
         ontology_handle = Some(tokio::spawn(ontology::run_ontology_worker(
@@ -431,6 +440,11 @@ async fn main() -> Result<()> {
 
     if let Some(handle) = ontology_handle {
         info!("waiting for ontology worker to finish");
+        let _ = handle.await;
+    }
+
+    if let Some(handle) = dreaming_handle {
+        info!("waiting for dreaming worker to finish");
         let _ = handle.await;
     }
 

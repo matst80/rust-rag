@@ -157,6 +157,23 @@ pub struct SearchHit {
     pub path: Option<String>,
 }
 
+impl From<ItemRecord> for SearchHit {
+    fn from(item: ItemRecord) -> Self {
+        Self {
+            id: item.id,
+            text: item.text,
+            metadata: item.metadata,
+            source_id: item.source_id,
+            created_at: item.created_at,
+            distance: 0.0,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: item.path,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CategorySummary {
     pub source_id: String,
@@ -616,6 +633,7 @@ pub trait VectorStore: Send + Sync {
         query_embedding: &[f32],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
     fn search_hybrid(
         &self,
@@ -624,6 +642,7 @@ pub trait VectorStore: Send + Sync {
         query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>>;
     /// Persist analysis JSON + model name onto an existing item. Best-effort;
     /// non-existent ids should return `Ok(false)`.
@@ -896,6 +915,7 @@ impl VectorStore for SqliteVectorStore {
         query_embedding: &[f32],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if top_k == 0 {
             anyhow::bail!("top_k must be greater than zero");
@@ -907,6 +927,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut results = Vec::new();
+
         if let Some(source_id) = source_id {
             let mut statement = connection.prepare(
                 "
@@ -920,13 +941,14 @@ impl VectorStore for SqliteVectorStore {
                 FROM items
                 JOIN vec_items ON vec_items.id = items.id
                 WHERE items.source_id = ?1
+                  AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY distance ASC
                 LIMIT ?3
                 ",
             )?;
 
             let rows = statement.query_map(
-                params![source_id, query_embedding_json, top_k as i64],
+                params![source_id, query_embedding_json, top_k as i64, type_name],
                 map_search_row,
             )?;
 
@@ -934,6 +956,12 @@ impl VectorStore for SqliteVectorStore {
                 results.push(row?);
             }
         } else {
+            // When type_name is provided, we can't use the MATCH index as effectively
+            // if we want to filter by type first. But for simplicity we'll just
+            // filter after joining or include it in the query.
+            // Actually, if type_name is set, we might want to increase k to ensure we get enough hits of that type.
+            let k = if type_name.is_some() { top_k * 5 } else { top_k };
+
             let mut statement = connection.prepare(
                 "
                 WITH matches AS (
@@ -952,12 +980,16 @@ impl VectorStore for SqliteVectorStore {
                 FROM matches
                 JOIN vec_items ON vec_items.id = matches.id
                 JOIN items ON items.id = matches.id
+                WHERE (?3 IS NULL OR items.type = ?3)
                 ORDER BY distance ASC
+                LIMIT ?4
                 ",
             )?;
 
-            let rows =
-                statement.query_map(params![query_embedding_json, top_k as i64], map_search_row)?;
+            let rows = statement.query_map(
+                params![query_embedding_json, k as i64, type_name, top_k as i64],
+                map_search_row,
+            )?;
 
             for row in rows {
                 results.push(row?);
@@ -974,6 +1006,7 @@ impl VectorStore for SqliteVectorStore {
         _query_sparse: &[(u32, f32)],
         top_k: usize,
         source_id: Option<&str>,
+        type_name: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
         if top_k == 0 {
             anyhow::bail!("top_k must be greater than zero");
@@ -982,7 +1015,7 @@ impl VectorStore for SqliteVectorStore {
         // SQLite path has no sparsevec column — sparse query is ignored;
         // dense + FTS5 keyword fusion is the legacy hybrid behavior.
         // 1. Vector Search
-        let vector_hits = self.search(query_embedding, top_k * 2, source_id)?;
+        let vector_hits = self.search(query_embedding, top_k * 2, source_id, type_name)?;
 
         // 2. Keyword Search (FTS5)
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
@@ -1012,13 +1045,14 @@ impl VectorStore for SqliteVectorStore {
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1
                   AND (?2 IS NULL OR items.source_id = ?2)
+                  AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY score ASC
                 LIMIT ?3
                 ",
             )?;
 
             let rows = fts_stmt.query_map(
-                params![fts_query, source_id, (top_k * 2) as i64],
+                params![fts_query, source_id, (top_k * 2) as i64, type_name],
                 map_search_row,
             )?;
 
@@ -2761,7 +2795,7 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[0.9, 0.1, 0.0], 2, None).unwrap();
+        let results = store.search(&[0.9, 0.1, 0.0], 2, None, None).unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "doc-1");
@@ -2806,7 +2840,7 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[0.0, 1.0, 0.0], 1, None).unwrap();
+        let results = store.search(&[0.0, 1.0, 0.0], 1, None, None).unwrap();
         assert_eq!(results[0].text, "new");
         assert_eq!(results[0].metadata, json!({"version": 2}));
         assert_eq!(results[0].source_id, "memory");
@@ -2848,11 +2882,61 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[1.0, 0.0, 0.0], 5, Some("memory")).unwrap();
+        let results = store.search(&[1.0, 0.0, 0.0], 5, Some("memory"), None).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
         assert_eq!(results[0].source_id, "memory");
+    }
+
+    #[test]
+    fn filters_by_type() {
+        let store = test_store();
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "todo-1".to_owned(),
+                    text: "buy milk".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 1000,
+                    path: None,
+                    type_name: Some("todo".to_owned()),
+                    data: Some(json!({"status": "pending"})),
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .unwrap();
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "note-1".to_owned(),
+                    text: "shopping list".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 2000,
+                    path: None,
+                    type_name: Some("note".to_owned()),
+                    data: None,
+                },
+                &[0.9, 0.1, 0.0],
+            )
+            .unwrap();
+
+        // Search for "todo"
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("todo")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "todo-1");
+
+        // Search for "note"
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("note")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "note-1");
+
+        // Global search
+        let results = store.search(&[1.0, 0.0, 0.0], 2, None, None).unwrap();
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
@@ -2945,7 +3029,7 @@ mod tests {
 
         assert!(store.delete_item("doc-1").unwrap());
         assert!(store.get_item("doc-1").unwrap().is_none());
-        assert!(store.search(&[1.0, 0.0, 0.0], 5, None).unwrap().is_empty());
+        assert!(store.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap().is_empty());
         assert!(!store.delete_item("doc-1").unwrap());
     }
 

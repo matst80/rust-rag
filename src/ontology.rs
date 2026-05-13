@@ -208,7 +208,7 @@ async fn process_batch(
         let neighbors =
             tokio::task::spawn_blocking(move || -> Result<Vec<crate::db::SearchHit>> {
                 let embedding = svc.embed(&text)?;
-                let hits = store_clone.search(&embedding, neighbor_count + 1, None)?;
+                let hits = store_clone.search(&embedding, neighbor_count + 1, None, None)?;
                 Ok(hits
                     .into_iter()
                     .filter(|h| h.id != item_id)

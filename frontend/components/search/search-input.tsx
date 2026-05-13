@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useCategories } from "@/lib/api"
+import { useCategories, useSchemas } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 interface SearchInputProps {
@@ -25,6 +25,8 @@ interface SearchInputProps {
   onHybridChange: (enabled: boolean) => void
   isRerank: boolean
   onRerankChange: (enabled: boolean) => void
+  typeFilter: string | null
+  onTypeFilterChange: (type: string | null) => void
   onSubmit: () => void
   isLoading?: boolean
 }
@@ -46,6 +48,8 @@ export function SearchInput({
   onHybridChange,
   isRerank,
   onRerankChange,
+  typeFilter,
+  onTypeFilterChange,
   onSubmit,
   isLoading,
 }: SearchInputProps) {
@@ -54,10 +58,12 @@ export function SearchInput({
 
   const { data: categories } = useCategories()
   const validCategories = categories?.filter((c) => c.id.trim().length > 0)
+  const { data: schemas } = useSchemas()
+  const validSchemas = schemas?.filter((s) => s.type_name.trim().length > 0)
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
-    if (query.trim()) onSubmit()
+    if (query.trim() || categoryFilter || typeFilter) onSubmit()
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -146,6 +152,33 @@ export function SearchInput({
 
             {!isAssisted && (
               <Select
+                value={typeFilter ?? "all"}
+                onValueChange={(v) => onTypeFilterChange(v === "all" ? null : v)}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="border border-border bg-transparent hover:border-primary/40 px-2.5 font-mono text-[10px] uppercase tracking-[1.5px] text-muted-foreground transition-colors focus:ring-0 focus:ring-offset-0 gap-1"
+                >
+                  <span className="opacity-50 mr-0.5">Type:</span>
+                  <SelectValue placeholder="All" />
+                  <ChevronDown className="size-3 opacity-50" />
+                </SelectTrigger>
+                <SelectContent className="font-mono text-[11px]">
+                  <SelectItem value="all">All Types</SelectItem>
+                  {validSchemas?.map((s) => (
+                    <SelectItem key={s.type_name} value={s.type_name}>
+                      {s.title || s.type_name}
+                      {s.item_count !== undefined && s.item_count !== null && (
+                        <span className="opacity-40 ml-1.5">({s.item_count})</span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            {!isAssisted && (
+              <Select
                 value={categoryFilter ?? "all"}
                 onValueChange={(v) => onCategoryFilterChange(v === "all" ? null : v)}
               >
@@ -173,10 +206,10 @@ export function SearchInput({
           <Button
             size="sm"
             onClick={() => handleSubmit()}
-            disabled={isLoading || !query.trim()}
+            disabled={isLoading || (!query.trim() && !categoryFilter && !typeFilter)}
             className={cn(
               "px-4 font-mono text-[10px] font-black uppercase tracking-[2px] transition-all",
-              query.trim()
+              (query.trim() || categoryFilter || typeFilter)
                 ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.3)]"
                 : "bg-muted text-muted-foreground/30 cursor-not-allowed"
             )}

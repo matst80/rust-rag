@@ -1,7 +1,7 @@
 use crate::{
     config::{
-        AnalysisConfig, AuthConfig, ChunkingConfig, ManagerConfig, MultimodalConfig,
-        OpenAiChatConfig,
+        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
+        MultimodalConfig, OpenAiChatConfig,
     },
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
@@ -38,6 +38,7 @@ use tower_http::{
     services::ServeDir,
     trace::TraceLayer,
 };
+use tracing::error;
 use uuid::Uuid;
 
 pub mod attachments;
@@ -51,8 +52,10 @@ mod query;
 pub mod schemas;
 mod tombstones;
 mod ingest_url;
+mod dreaming;
 
 pub use analysis::{AnalyzeEntryParams, StoreAnalysis, run_analysis};
+pub use dreaming::{run_dreaming_worker, process_dreaming_round};
 pub use auth::SessionSubject;
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
@@ -118,6 +121,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub multimodal_client: reqwest::Client,
     pub analysis: Arc<AnalysisConfig>,
+    pub dreaming: Arc<DreamingConfig>,
     /// Compiled-schema cache for typed-entry validation. Lives for the
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
@@ -169,6 +173,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -176,6 +181,11 @@ impl AppState {
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
         self.analysis = Arc::new(analysis);
+        self
+    }
+
+    pub fn with_dreaming(mut self, dreaming: DreamingConfig) -> Self {
+        self.dreaming = Arc::new(dreaming);
         self
     }
 
@@ -246,6 +256,7 @@ impl AppState {
                 .build()
                 .expect("multimodal http client should build"),
             analysis: Arc::new(AnalysisConfig::default()),
+            dreaming: Arc::new(DreamingConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
         }
@@ -395,6 +406,10 @@ pub struct SearchRequest {
     /// Restrict the search to entries with this source_id (namespace).
     /// Omit to search across every source_id.
     pub source_id: Option<String>,
+    /// Restrict results to entries whose `type` equals this value.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+
     /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
     #[serde(default = "default_hybrid")]
     pub hybrid: bool,
@@ -408,9 +423,6 @@ pub struct SearchRequest {
     /// Maximum distance threshold for results. Default 0.8.
     #[serde(default = "default_max_distance")]
     pub max_distance: f32,
-    /// Restrict results to entries whose `type` equals this value.
-    #[serde(default, rename = "type")]
-    pub type_name: Option<String>,
 }
 
 fn default_hybrid() -> bool {
@@ -1010,6 +1022,7 @@ pub fn router(state: AppState) -> Router {
         ]);
     let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
+        .route("/api/dream", post(dreaming_endpoint))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -1479,6 +1492,7 @@ pub(crate) async fn search_core(
     let query = request.query.clone();
     let top_k = request.top_k;
     let source_id = request.source_id;
+    let type_name = request.type_name;
     let max_distance = request.max_distance;
     let now_ms = current_timestamp_millis()?;
     // Reranker is **opt-in**: the cross-encoder adds noticeable latency
@@ -1498,188 +1512,214 @@ pub(crate) async fn search_core(
         top_k
     };
 
-    let (results, related, raw_embedding) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
-            // Hybrid path needs the bge-m3 sparse output too; embed once.
-            let (raw, sparse) = if request.hybrid {
-                embedder.embed_both(&query)?
-            } else {
-                (embedder.embed(&query)?, Vec::new())
-            };
-            let embedding = if let Some(ref interest) = interest_embedding {
-                blend_embeddings(&raw, interest, 0.8)
-            } else {
-                raw.clone()
-            };
-            let hits = if request.hybrid {
-                store.search_hybrid(
-                    &query,
-                    &embedding,
-                    &sparse,
-                    candidate_top_k,
-                    source_id.as_deref(),
-                )?
-            } else {
-                store.search(&embedding, candidate_top_k, source_id.as_deref())?
-            };
-            let mut filtered: Vec<SearchHit> = hits
-                .into_iter()
-                .filter(|hit| hit.distance <= max_distance)
-                .collect();
-
-            // Cross-encoder reranking. Replaces `distance` with
-            // (1 - score) so existing percentage UIs keep working
-            // (lower=better; reranker score 1.0 → distance 0.0).
-            if do_rerank {
-                if let Some(reranker) = reranker.as_ref() {
-                    // Score the matched chunk text when the store
-                    // surfaced it (postgres dense/hybrid). Falls back to
-                    // the document text for stores that don't chunk so
-                    // sqlite-only deployments still rerank.
-                    let passages: Vec<&str> = filtered
-                        .iter()
-                        .map(|h| h.chunk_text.as_deref().unwrap_or(h.text.as_str()))
-                        .collect();
-                    if !passages.is_empty() {
-                        // Rerank can fail under GPU pressure (CUDA OOM in
-                        // BiasGelu/MatMul) or model load issues. Falling
-                        // back to dense ordering keeps search usable
-                        // instead of 500-ing the whole request.
-                        let rerank_started = std::time::Instant::now();
-                        let max_chars = passages.iter().map(|p| p.len()).max().unwrap_or(0);
-                        let total_chars: usize = passages.iter().map(|p| p.len()).sum();
-                        match reranker.rerank(&query, &passages) {
-                            Ok(scores) => {
-                                tracing::info!(
-                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
-                                    candidates = passages.len(),
-                                    max_chars,
-                                    total_chars,
-                                    "reranker ok"
-                                );
-                                for (hit, score) in
-                                    filtered.iter_mut().zip(scores.into_iter())
-                                {
-                                    hit.distance = 1.0 - score;
-                                    if !hit.retrievers.iter().any(|r| r == "rerank") {
-                                        hit.retrievers.push("rerank".to_owned());
-                                    }
-                                }
-                                filtered.sort_by(|a, b| {
-                                    a.distance
-                                        .partial_cmp(&b.distance)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    elapsed_ms = rerank_started.elapsed().as_millis() as u64,
-                                    candidates = passages.len(),
-                                    max_chars,
-                                    "reranker failed; falling back to dense ordering"
-                                );
-                            }
-                        }
-                    }
-                    filtered.truncate(top_k);
-                }
+    let (results, related, raw_embedding) = if query.trim().is_empty() {
+        let store = state.store.clone();
+        let source_id = source_id.clone();
+        let type_name = type_name.clone();
+        let top_k = top_k;
+        tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+            let (items, _) = store.list_items(ListItemsRequest {
+                source_id,
+                type_name,
+                limit: Some(top_k),
+                sort_order: SortOrder::Desc,
+                ..Default::default()
+            })?;
+            let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
+            // For empty queries, we set retrievers to "recent"
+            for hit in &mut hits {
+                hit.retrievers = vec!["recent".to_owned()];
             }
-
-            // Sort by decay-adjusted score but keep the raw semantic distance for
-            // the response so the reported values remain pure vector/BM25 distances.
-            filtered.sort_by(|a, b| {
-                decay_sort_key(a, now_ms)
-                    .partial_cmp(&decay_sort_key(b, now_ms))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let related = if let Some(top) = filtered.first() {
-                let top_id = top.id.clone();
-                let edges = store
-                    .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
-                    .ok()
-                    .unwrap_or_default();
-
-                // Identify anti-edges from the top hit (weight < 0.0).
-                let anti_targets: HashSet<String> = edges
-                    .iter()
-                    .filter(|e| e.weight < 0.0)
-                    .map(|e| {
-                        if e.from_item_id == top_id {
-                            e.to_item_id.clone()
-                        } else {
-                            e.from_item_id.clone()
-                        }
-                    })
+            Ok((hits, Vec::new(), Vec::new()))
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+    } else {
+        tokio::task::spawn_blocking(
+            move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+                // Hybrid path needs the bge-m3 sparse output too; embed once.
+                let (raw, sparse) = if request.hybrid {
+                    embedder.embed_both(&query)?
+                } else {
+                    (embedder.embed(&query)?, Vec::new())
+                };
+                let embedding = if let Some(ref interest) = interest_embedding {
+                    blend_embeddings(&raw, interest, 0.8)
+                } else {
+                    raw.clone()
+                };
+                let hits = if request.hybrid {
+                    store.search_hybrid(
+                        &query,
+                        &embedding,
+                        &sparse,
+                        candidate_top_k,
+                        source_id.as_deref(),
+                        type_name.as_deref(),
+                    )?
+                } else {
+                    store.search(&embedding, candidate_top_k, source_id.as_deref(), type_name.as_deref())?
+                };
+                let mut filtered: Vec<SearchHit> = hits
+                    .into_iter()
+                    .filter(|hit| hit.distance <= max_distance)
                     .collect();
 
-                // If anti-edges exist, penalize those items in the result set and re-sort.
-                if !anti_targets.is_empty() {
-                    let mut changed = false;
-                    for hit in &mut filtered {
-                        if anti_targets.contains(&hit.id) {
-                            hit.distance += 0.4; // Substantial penalty
-                            if !hit.retrievers.contains(&"penalized".to_owned()) {
-                                hit.retrievers.push("penalized".to_owned());
+                // Cross-encoder reranking. Replaces `distance` with
+                // (1 - score) so existing percentage UIs keep working
+                // (lower=better; reranker score 1.0 → distance 0.0).
+                if do_rerank {
+                    if let Some(reranker) = reranker.as_ref() {
+                        // Score the matched chunk text when the store
+                        // surfaced it (postgres dense/hybrid). Falls back to
+                        // the document text for stores that don't chunk so
+                        // sqlite-only deployments still rerank.
+                        let passages: Vec<&str> = filtered
+                            .iter()
+                            .map(|h| h.chunk_text.as_deref().unwrap_or(h.text.as_str()))
+                            .collect();
+                        if !passages.is_empty() {
+                            // Rerank can fail under GPU pressure (CUDA OOM in
+                            // BiasGelu/MatMul) or model load issues. Falling
+                            // back to dense ordering keeps search usable
+                            // instead of 500-ing the whole request.
+                            let rerank_started = std::time::Instant::now();
+                            let max_chars = passages.iter().map(|p| p.len()).max().unwrap_or(0);
+                            let total_chars: usize = passages.iter().map(|p| p.len()).sum();
+                            match reranker.rerank(&query, &passages) {
+                                Ok(scores) => {
+                                    tracing::info!(
+                                        elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                        candidates = passages.len(),
+                                        max_chars,
+                                        total_chars,
+                                        "reranker ok"
+                                    );
+                                    for (hit, score) in
+                                        filtered.iter_mut().zip(scores.into_iter())
+                                    {
+                                        hit.distance = 1.0 - score;
+                                        if !hit.retrievers.iter().any(|r| r == "rerank") {
+                                            hit.retrievers.push("rerank".to_owned());
+                                        }
+                                    }
+                                    filtered.sort_by(|a, b| {
+                                        a.distance
+                                            .partial_cmp(&b.distance)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                    });
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        elapsed_ms = rerank_started.elapsed().as_millis() as u64,
+                                        candidates = passages.len(),
+                                        max_chars,
+                                        "reranker failed; falling back to dense ordering"
+                                    );
+                                }
                             }
-                            changed = true;
+                        }
+                        filtered.truncate(top_k);
+                    }
+                }
+
+                // Sort by decay-adjusted score but keep the raw semantic distance for
+                // the response so the reported values remain pure vector/BM25 distances.
+                filtered.sort_by(|a, b| {
+                    decay_sort_key(a, now_ms)
+                        .partial_cmp(&decay_sort_key(b, now_ms))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let related = if let Some(top) = filtered.first() {
+                    let top_id = top.id.clone();
+                    let edges = store
+                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
+                        .ok()
+                        .unwrap_or_default();
+
+                    // Identify anti-edges from the top hit (weight < 0.0).
+                    let anti_targets: HashSet<String> = edges
+                        .iter()
+                        .filter(|e| e.weight < 0.0)
+                        .map(|e| {
+                            if e.from_item_id == top_id {
+                                e.to_item_id.clone()
+                            } else {
+                                e.from_item_id.clone()
+                            }
+                        })
+                        .collect();
+
+                    // If anti-edges exist, penalize those items in the result set and re-sort.
+                    if !anti_targets.is_empty() {
+                        let mut changed = false;
+                        for hit in &mut filtered {
+                            if anti_targets.contains(&hit.id) {
+                                hit.distance += 0.4; // Substantial penalty
+                                if !hit.retrievers.contains(&"penalized".to_owned()) {
+                                    hit.retrievers.push("penalized".to_owned());
+                                }
+                                changed = true;
+                            }
+                        }
+                        if changed {
+                            filtered.sort_by(|a, b| {
+                                decay_sort_key(a, now_ms)
+                                    .partial_cmp(&decay_sort_key(b, now_ms))
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
                         }
                     }
-                    if changed {
-                        filtered.sort_by(|a, b| {
-                            decay_sort_key(a, now_ms)
-                                .partial_cmp(&decay_sort_key(b, now_ms))
+
+                    let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
+                    let mut relations: HashMap<String, Option<String>> = HashMap::new();
+                    for edge in edges {
+                        // Skip anti-edges for the "Related" panel.
+                        if edge.weight < 0.0 {
+                            continue;
+                        }
+
+                        let neighbor_id = if edge.from_item_id == top_id {
+                            edge.to_item_id
+                        } else {
+                            edge.from_item_id
+                        };
+                        if neighbor_id == top_id || existing.contains(neighbor_id.as_str()) {
+                            continue;
+                        }
+                        relations.entry(neighbor_id).or_insert(edge.relation);
+                    }
+                    if relations.is_empty() {
+                        Vec::new()
+                    } else {
+                        let ids: Vec<String> = relations.keys().cloned().collect();
+                        let mut hits = store.distances_for_ids(&embedding, &ids)?;
+                        hits.sort_by(|a, b| {
+                            a.distance
+                                .partial_cmp(&b.distance)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
+                        hits.into_iter()
+                            .map(|hit| {
+                                let relation = relations.get(&hit.id).and_then(Clone::clone);
+                                (hit, relation)
+                            })
+                            .collect()
                     }
-                }
-
-                let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
-                let mut relations: HashMap<String, Option<String>> = HashMap::new();
-                for edge in edges {
-                    // Skip anti-edges for the "Related" panel.
-                    if edge.weight < 0.0 {
-                        continue;
-                    }
-
-                    let neighbor_id = if edge.from_item_id == top_id {
-                        edge.to_item_id
-                    } else {
-                        edge.from_item_id
-                    };
-                    if neighbor_id == top_id || existing.contains(neighbor_id.as_str()) {
-                        continue;
-                    }
-                    relations.entry(neighbor_id).or_insert(edge.relation);
-                }
-                if relations.is_empty() {
-                    Vec::new()
                 } else {
-                    let ids: Vec<String> = relations.keys().cloned().collect();
-                    let mut hits = store.distances_for_ids(&embedding, &ids)?;
-                    hits.sort_by(|a, b| {
-                        a.distance
-                            .partial_cmp(&b.distance)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    hits.into_iter()
-                        .map(|hit| {
-                            let relation = relations.get(&hit.id).and_then(Clone::clone);
-                            (hit, relation)
-                        })
-                        .collect()
-                }
-            } else {
-                Vec::new()
-            };
+                    Vec::new()
+                };
 
-            Ok((filtered, related, raw))
-        },
-    )
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+                Ok((filtered, related, raw))
+            },
+        )
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?
+    };
 
     // Fire-and-forget: log the search event and update access counts.
     if let Some(sub) = subject {
@@ -2538,6 +2578,26 @@ async fn smart_store(
     }
 
     Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
+}
+
+async fn dreaming_endpoint(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    if !state.analysis.is_configured() {
+        return Err(ApiError::ServiceUnavailable(
+            "dreaming requires analysis (LLM) to be configured".to_owned(),
+        ));
+    }
+    
+    // Spawn in background so the HTTP request doesn't timeout
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = dreaming::process_dreaming_round(&state_clone).await {
+            error!("manual dreaming error: {e}");
+        }
+    });
+    
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn rebuild_graph(
@@ -3598,6 +3658,7 @@ fn map_missing_item(kind: &str, error: anyhow::Error) -> ApiError {
     }
 }
 
+
 pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("graph support is disabled") {
@@ -3732,6 +3793,7 @@ mod tests {
             _query_embedding: &[f32],
             _top_k: usize,
             source_id: Option<&str>,
+            _type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
             self.search_source_ids
                 .lock()
@@ -3751,8 +3813,9 @@ mod tests {
             _query_sparse: &[(u32, f32)],
             top_k: usize,
             source_id: Option<&str>,
+            _type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
-            self.search(query_embedding, top_k, source_id)
+            self.search(query_embedding, top_k, source_id, None)
         }
 
         fn distances_for_ids(
