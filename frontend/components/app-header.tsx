@@ -27,7 +27,7 @@ import {
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme-toggle"
 
-const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
+// const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
 const navigation = [
   { name: "Search", href: "/", icon: Search },
@@ -42,7 +42,7 @@ const navigation = [
 
 const navigationRight = [
   { name: "Docs", href: "/start-guide", icon: BookOpen },
-  { name: "Settings", href: "/settings", icon: Cog },
+  // { name: "Settings", href: "/settings", icon: Cog },
 ]
 
 interface SessionResponse {
@@ -149,9 +149,6 @@ export function AppHeader() {
                   <KeyRound className="size-3.5" aria-hidden="true" />
                   <span className="hidden sm:inline">Tokens</span>
                 </Link>
-                <span className="hidden items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground md:flex">
-
-                </span>
                 <a
                   href="/auth/logout"
                   aria-label="Sign out"

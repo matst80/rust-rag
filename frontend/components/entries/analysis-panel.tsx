@@ -2,9 +2,9 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { 
-  RefreshCw, Sparkles, Plus, X, Save, GitBranch, Terminal, AlertTriangle, 
-  CheckCircle2, Zap, ArrowUpCircle, AlertCircle, Copy, Ghost, Activity 
+import {
+  RefreshCw, Sparkles, Plus, X, Save, GitBranch, Terminal, AlertTriangle,
+  CheckCircle2, Zap, ArrowUpCircle, AlertCircle, Copy, Ghost, Activity
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -160,7 +160,7 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
             <span>{at}</span>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-2">
           <Button
             size="sm"
@@ -328,7 +328,7 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
                 <div
                   key={`${v.target_id}-${idx}`}
                   className={cn(
-                    "relative group flex flex-col gap-3 rounded-xl border p-4 transition-all hover:shadow-lg dark:hover:shadow-primary/5",
+                    "relative group flex flex-col gap-3 border p-4 transition-all hover:shadow-lg dark:hover:shadow-primary/5",
                     config.color
                   )}
                 >
@@ -343,8 +343,8 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="w-20 h-1 bg-current/10 rounded-full overflow-hidden hidden sm:block">
-                        <div 
-                          className="h-full bg-current transition-all duration-1000" 
+                        <div
+                          className="h-full bg-current transition-all duration-1000"
                           style={{ width: `${v.confidence * 100}%` }}
                         />
                       </div>

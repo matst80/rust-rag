@@ -15,7 +15,7 @@ interface RelationItemProps {
   onDelete?: (edgeId: string) => void
 }
 
-const RELATION_STYLES: Record<string, string> = {
+export const RELATION_STYLES: Record<string, string> = {
   // Canonical predicates from analysis UI
   agrees: "text-emerald-500 border-emerald-500/30 bg-emerald-500/5",
   refines: "text-sky-500 border-sky-500/30 bg-sky-500/5",
@@ -23,7 +23,7 @@ const RELATION_STYLES: Record<string, string> = {
   contradicts: "text-red-500 border-red-500/30 bg-red-500/5",
   duplicates: "text-fuchsia-500 border-fuchsia-500/30 bg-fuchsia-500/5",
   unrelated: "text-muted-foreground border-border bg-muted/5",
-  
+
   // Graph-specific canonical predicates
   is_a: "text-indigo-500 border-indigo-500/30 bg-indigo-500/5",
   part_of: "text-indigo-500 border-indigo-500/30 bg-indigo-500/5",

@@ -335,6 +335,7 @@ fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
         path: row.try_get("path").ok(),
         type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
         data: row.try_get::<_, Option<Value>>("data").ok().flatten(),
+        analysis: row.try_get::<_, Option<Value>>("analysis_json").ok().flatten(),
     })
 }
 
@@ -544,7 +545,7 @@ impl VectorStore for PostgresVectorStore {
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
                             ranked.distance, ranked.section_path, ranked.chunk_content, \
-                            d.type, d.tags \
+                            d.type, d.tags, d.analysis_json \
                      FROM ( \
                          SELECT DISTINCT ON (c.document_id) \
                                 c.document_id, \
@@ -702,7 +703,7 @@ impl VectorStore for PostgresVectorStore {
                     FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
                 )
                 SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at,
-                       d.type, d.tags,
+                       d.type, d.tags, d.analysis_json,
                        (f.rrf_score
                           * exp(- EXTRACT(EPOCH FROM (now() - d.updated_at))
                                 / (86400.0 * $7::float))
@@ -825,7 +826,7 @@ impl VectorStore for PostgresVectorStore {
                 .get(0);
 
             let sql = format!(
-                "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data FROM documents \
+                "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
@@ -852,7 +853,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let row = client
                 .query_opt(
-                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data FROM documents WHERE id = $1",
+                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json FROM documents WHERE id = $1",
                     &[&id],
                 )
                 .await?;
@@ -1103,7 +1104,7 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
-                            d.path, d.type, d.tags, \
+                            d.path, d.type, d.tags, d.analysis_json, \
                             MIN(c.dense_embedding <=> $1::vector) AS distance \
                      FROM chunks c JOIN documents d ON d.id = c.document_id \
                      WHERE d.id = ANY($2) \
@@ -1626,7 +1627,7 @@ impl VectorStore for PostgresVectorStore {
             // Selects the same column set as row_to_item so a single helper handles both.
             let rows = client
                 .query(
-                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data \
+                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json \
                      FROM documents \
                      WHERE ontology_status = 'pending' \
                      ORDER BY created_at ASC \

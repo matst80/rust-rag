@@ -12,6 +12,14 @@ import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { ArrowDownAZ, ArrowUpAZ, SortAsc, SortDesc } from "lucide-react"
 
 interface EdgeReviewListProps {
   onReviewComplete?: () => void
@@ -35,6 +43,23 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
     }
     | null
   >(null)
+  const [sortBy, setSortBy] = React.useState<string>("confidence-desc")
+
+  const sortedEdges = React.useMemo(() => {
+    return [...edges].sort((a, b) => {
+      const confA = (a.metadata?.confidence as number) ?? 0
+      const confB = (b.metadata?.confidence as number) ?? 0
+
+      if (sortBy === "confidence-desc") return confB - confA
+      if (sortBy === "confidence-asc") return confA - confB
+      
+      if (sortBy === "alpha-asc") return a.relationship.localeCompare(b.relationship)
+      if (sortBy === "alpha-desc") return b.relationship.localeCompare(a.relationship)
+
+      // Secondary sort by source_id to keep it stable
+      return a.source_id.localeCompare(b.source_id)
+    })
+  }, [edges, sortBy])
 
   const fetchSuggestedEdges = React.useCallback(async () => {
     try {
@@ -264,8 +289,49 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
   return (
     <ScrollArea className="h-full pr-4">
       <div className="space-y-4 pb-8">
+        <div className="flex items-center justify-between gap-4 px-1">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <Network className="h-3.5 w-3.5" />
+            <span>{edges.length} Suggestions</span>
+          </div>
+          <Select value={sortBy} onValueChange={setSortBy}>
+            <SelectTrigger className="h-8 w-[180px] text-xs bg-background/50 border-primary/10">
+              <div className="flex items-center gap-2">
+                <SortDesc className="h-3.5 w-3.5 text-muted-foreground" />
+                <SelectValue placeholder="Sort by" />
+              </div>
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectItem value="confidence-desc" className="text-xs">
+                <div className="flex items-center gap-2">
+                  <SortDesc className="h-3.5 w-3.5" />
+                  <span>Confidence (High-Low)</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="confidence-asc" className="text-xs">
+                <div className="flex items-center gap-2">
+                  <SortAsc className="h-3.5 w-3.5" />
+                  <span>Confidence (Low-High)</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="alpha-asc" className="text-xs">
+                <div className="flex items-center gap-2">
+                  <ArrowDownAZ className="h-3.5 w-3.5" />
+                  <span>Relation (A-Z)</span>
+                </div>
+              </SelectItem>
+              <SelectItem value="alpha-desc" className="text-xs">
+                <div className="flex items-center gap-2">
+                  <ArrowUpAZ className="h-3.5 w-3.5" />
+                  <span>Relation (Z-A)</span>
+                </div>
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         <AnimatePresence mode="popLayout">
-          {edges.map((edge) => (
+          {sortedEdges.map((edge) => (
             <motion.div
               key={edge.id}
               layout

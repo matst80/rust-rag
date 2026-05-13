@@ -588,11 +588,12 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             let neighbors: Vec<EntryNeighbor> = nbh
                 .nodes
                 .into_iter()
-                .filter(|n| {
+                .filter_map(|n| {
                     if n.id == center_id {
-                        return false;
+                        return None;
                     }
-                    nbh.edges.iter().any(|e| {
+                    // Find the "best" edge for this neighbor to determine inclusion and relationship
+                    let best_edge = nbh.edges.iter().find(|e| {
                         let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
                             || (e.from_item_id == center_id && e.to_item_id == n.id);
                         if !is_connected {
@@ -606,23 +607,46 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                                     .get("confidence")
                                     .and_then(|v| v.as_f64())
                                     .unwrap_or(1.0);
-                                status == Some("confirmed")
-                                    || (status.is_none() && confidence >= 0.7)
+                                // Include confirmed edges or manual overrides with decent confidence
+                                status == Some("confirmed") || (status.is_none() && confidence >= 0.7)
                             }
-                            GraphEdgeType::Similarity => e.weight >= 0.8
+                            GraphEdgeType::Similarity => {
+                                // "really close" threshold (approx distance < 0.25)
+                                e.weight >= 0.8
+                            }
                         }
+                    })?;
+
+                    Some(EntryNeighbor {
+                        id: n.id,
+                        title: n
+                            .metadata
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_owned())
+                            .or_else(|| {
+                                n.analysis
+                                    .as_ref()
+                                    .and_then(|a| a.get("title"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_owned())
+                            }),
+                        relationship: best_edge.relation.clone(),
+                        source_type: n
+                            .metadata
+                            .get("source_type")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_owned()),
+                        thumbnail: None,
                     })
-                })
-                .map(|n| EntryNeighbor {
-                    id: n.id.clone(),
-                    title: n.metadata.get("title").and_then(|v| v.as_str()).map(|s| s.to_owned()),
                 })
                 .collect();
             if !neighbors.is_empty() {
                 let _ = writeln!(text, "\n## Contextual Neighbors");
                 for neighbor in neighbors {
                     let title = neighbor.title.as_deref().unwrap_or("untitled");
-                    let _ = writeln!(text, "- `{}` ({})", neighbor.id, title);
+                    let rel = neighbor.relationship.as_deref().unwrap_or("similar");
+                    let _ = writeln!(text, "- `{}` ({}) — [{}]", neighbor.id, title, rel);
                 }
             }
         }

@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
 import { useItem, useDeleteItem, useEdgesForItem, useGraphStatus } from "@/lib/api"
+import { RELATION_STYLES } from "../graph/relation-item"
+import { cn } from "@/lib/utils"
 import { useSchema, useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
 import {
@@ -326,13 +328,35 @@ ${(entry.text ?? "").slice(0, 6000)}`
                     <Link
                       key={neighbor.id}
                       href={`/entries/${encodeURIComponent(neighbor.id)}`}
-                      className="group flex flex-col gap-1 border border-border bg-card p-4 hover:border-primary/40 hover:bg-primary/5 transition-all duration-300"
+                      className="group relative flex flex-col gap-1 border border-border bg-card p-4 hover:border-primary/40 hover:bg-primary/5 transition-all duration-300"
                     >
-                      <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors">
-                        {neighbor.id.substring(0, 12)}...
-                      </span>
-                      <div className="text-sm font-medium text-foreground line-clamp-1">
-                        {neighbor.title || "Untitled Fragment"}
+                      {neighbor.thumbnail && (
+                        <div className="absolute top-3 right-3 size-12 border border-border/40 overflow-hidden bg-muted/50 rounded-sm">
+                          <img
+                            src={neighbor.thumbnail}
+                            alt=""
+                            className="size-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500"
+                          />
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors">
+                          {neighbor.id.substring(0, 12)}...
+                        </span>
+                        {neighbor.relationship && (
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-primary/20 text-primary/80 bg-primary/5 leading-none transition-colors",
+                              RELATION_STYLES[neighbor.relationship.toLowerCase()]
+                            )}
+                          >
+                            {neighbor.relationship}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-sm font-medium text-foreground line-clamp-1 pr-12">
+                        {neighbor.title || (neighbor.source_type === "image" ? "Image Fragment" : neighbor.id)}
                       </div>
                     </Link>
                   ))}

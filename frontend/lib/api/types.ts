@@ -29,6 +29,9 @@ export interface Entry {
 export interface EntryNeighbor {
   id: string
   title?: string | null
+  relationship?: string | null
+  source_type?: string | null
+  thumbnail?: string | null
 }
 
 export interface SchemaDefinition {

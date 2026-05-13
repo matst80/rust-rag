@@ -650,6 +650,9 @@ pub struct AdminItemPayload {
 pub struct EntryNeighbor {
     pub id: String,
     pub title: Option<String>,
+    pub relationship: Option<String>,
+    pub source_type: Option<String>,
+    pub thumbnail: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -2082,48 +2085,88 @@ async fn get_item(
 
     if let Some(nbh) = neighborhood {
         let center_id = id.clone();
-        let neighbors: Vec<EntryNeighbor> = nbh
-            .nodes
-            .into_iter()
-            .filter(|n| {
-                if n.id == center_id {
+        let mut neighbors_with_edges: Vec<(ItemRecord, &GraphEdgeRecord)> = Vec::new();
+
+        for n in nbh.nodes {
+            if n.id == center_id {
+                continue;
+            }
+
+            // Find the "best" edge for this neighbor to determine inclusion and relationship
+            let best_edge = nbh.edges.iter().find(|e| {
+                let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
+                    || (e.from_item_id == center_id && e.to_item_id == n.id);
+                if !is_connected {
                     return false;
                 }
-                // Only include nodes connected by "proven" or "high quality" edges.
-                // Prioritizes confirmed manual edges and extremely close embeddings.
-                nbh.edges.iter().any(|e| {
-                    let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
-                        || (e.from_item_id == center_id && e.to_item_id == n.id);
-                    if !is_connected {
-                        return false;
-                    }
 
-                    match e.edge_type {
-                        GraphEdgeType::Manual => {
-                            let status = e.metadata.get("status").and_then(|v| v.as_str());
-                            let confidence = e.metadata
-                                .get("confidence")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(1.0);
-                            // Include confirmed edges or manual overrides with decent confidence
-                            status == Some("confirmed") || (status.is_none() && confidence >= 0.7)
-                        }
-                        GraphEdgeType::Similarity => {
-                            // "really close" threshold (approx distance < 0.25)
-                            e.weight >= 0.8
-                        }
+                match e.edge_type {
+                    GraphEdgeType::Manual => {
+                        let status = e.metadata.get("status").and_then(|v| v.as_str());
+                        let confidence = e.metadata
+                            .get("confidence")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(1.0);
+                        // Include confirmed edges or manual overrides with decent confidence
+                        status == Some("confirmed") || (status.is_none() && confidence >= 0.7)
                     }
-                })
-            })
-            .map(|n| EntryNeighbor {
-                id: n.id,
-                title: n
-                    .metadata
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned()),
+                    GraphEdgeType::Similarity => {
+                        // "really close" threshold (approx distance < 0.25)
+                        e.weight >= 0.8
+                    }
+                }
+            });
+
+            if let Some(edge) = best_edge {
+                neighbors_with_edges.push((n, edge));
+            }
+        }
+
+        // Sort: Manual edges first, then Similarity edges (by weight)
+        neighbors_with_edges.sort_by(|a, b| {
+            let type_a = a.1.edge_type;
+            let type_b = b.1.edge_type;
+            if type_a != type_b {
+                if type_a == GraphEdgeType::Manual {
+                    return std::cmp::Ordering::Less;
+                } else {
+                    return std::cmp::Ordering::Greater;
+                }
+            }
+            b.1.weight.partial_cmp(&a.1.weight).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let neighbors: Vec<EntryNeighbor> = neighbors_with_edges
+            .into_iter()
+            .map(|(n, e)| {
+                let source_type = n.metadata.get("source_type").and_then(|v| v.as_str()).map(|s| s.to_owned());
+                let thumbnail = if source_type.as_deref() == Some("image") {
+                    n.metadata.get("source_file").and_then(|v| v.as_str()).map(|s| s.to_owned())
+                } else {
+                    None
+                };
+
+                EntryNeighbor {
+                    id: n.id,
+                    title: n
+                        .metadata
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned())
+                        .or_else(|| {
+                            n.analysis
+                                .as_ref()
+                                .and_then(|a| a.get("title"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_owned())
+                        }),
+                    relationship: e.relation.clone(),
+                    source_type,
+                    thumbnail,
+                }
             })
             .collect();
+
         if !neighbors.is_empty() {
             payload.neighbors = Some(neighbors);
         }

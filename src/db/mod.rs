@@ -45,6 +45,9 @@ pub struct ItemRecord {
     pub type_name: Option<String>,
     /// Typed payload validated against the schema for `type_name`.
     pub data: Option<Value>,
+    /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, title, etc.).
+    /// This is stored in the documents/items table and populated by the worker.
+    pub analysis: Option<Value>,
 }
 
 /// Registered JSON Schema entry. Used to validate typed entries' `data`
@@ -161,6 +164,7 @@ pub struct SearchHit {
     pub type_name: Option<String>,
     /// Tags associated with the entry.
     pub tags: Vec<String>,
+    pub analysis: Option<Value>,
 }
 
 impl From<ItemRecord> for SearchHit {
@@ -191,6 +195,7 @@ impl From<ItemRecord> for SearchHit {
             path: item.path,
             type_name: item.type_name,
             tags,
+            analysis: item.analysis,
         }
     }
 }
@@ -1110,7 +1115,10 @@ impl VectorStore for SqliteVectorStore {
                     items.created_at,
                     CAST(vec_distance_L2(vec_items.embedding, vec_f32(?2)) AS REAL) AS distance,
                     items.path,
-                    items.type
+                    items.type,
+                    items.data,
+                    items.analysis_json,
+                    items.updated_at
                 FROM items
                 JOIN vec_items ON vec_items.id = items.id
                 WHERE items.source_id = ?1
@@ -1151,7 +1159,10 @@ impl VectorStore for SqliteVectorStore {
                     items.created_at,
                     CAST(vec_distance_L2(vec_items.embedding, vec_f32(?1)) AS REAL) AS distance,
                     items.path,
-                    items.type
+                    items.type,
+                    items.data,
+                    items.analysis_json,
+                    items.updated_at
                 FROM matches
                 JOIN vec_items ON vec_items.id = matches.id
                 JOIN items ON items.id = matches.id
@@ -1217,7 +1228,10 @@ impl VectorStore for SqliteVectorStore {
                     items.created_at,
                     COALESCE(bm25(items_fts), 0.0) as score,
                     items.path,
-                    items.type
+                    items.type,
+                    items.data,
+                    items.analysis_json,
+                    items.updated_at
                 FROM items
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1
@@ -1305,7 +1319,10 @@ impl VectorStore for SqliteVectorStore {
                 items.created_at,
                 CAST(vec_distance_L2(vec_items.embedding, vec_f32(?)) AS REAL) AS distance,
                 items.path,
-                items.type
+                items.type,
+                items.data,
+                items.analysis_json,
+                items.updated_at
             FROM items
             JOIN vec_items ON vec_items.id = items.id
             WHERE items.id IN ({placeholders})
@@ -1921,7 +1938,7 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         let mut stmt = connection.prepare(
-            "SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
+            "SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json
              FROM items
              WHERE ontology_status = 'pending'
              ORDER BY created_at ASC
@@ -1940,10 +1957,11 @@ impl VectorStore for SqliteVectorStore {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at, updated_at, path, type_name, data_str) = r?;
+                let (id, text, metadata_str, source_id, created_at, updated_at, path, type_name, data_str, analysis_str) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -1955,6 +1973,7 @@ impl VectorStore for SqliteVectorStore {
                     path,
                     type_name,
                     data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+                    analysis: analysis_str.and_then(|s| serde_json::from_str(&s).ok()),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2956,7 +2975,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -2984,7 +3003,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json
         FROM items
         WHERE id = ?1
         ",
@@ -3015,7 +3034,7 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         metadata,
         source_id: row.get(3)?,
         created_at: row.get(4)?,
-        updated_at: row.get(11)?,
+        updated_at: row.get(10)?,
         distance: row.get(5)?,
         section_path: Vec::new(),
         retrievers: vec!["dense".to_owned()],
@@ -3023,6 +3042,10 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
         path: row.get(6).ok(),
         type_name: row.get(7).ok(),
         tags,
+        analysis: match row.get::<_, Option<String>>(9)? {
+            Some(s) => Some(parse_json_column(s, 9)?),
+            None => None,
+        },
     })
 }
 
@@ -3039,6 +3062,10 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
         type_name: row.get(7)?,
         data: match data_str {
             Some(s) => Some(parse_json_column(s, 8)?),
+            None => None,
+        },
+        analysis: match row.get::<_, Option<String>>(9)? {
+            Some(s) => Some(parse_json_column(s, 9)?),
             None => None,
         },
     })
