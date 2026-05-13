@@ -10,10 +10,10 @@ use tracing::info;
 use super::{
     AttachmentRecord, AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord,
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-    GraphStatus, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
+    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
     NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, PathChild, PathRow,
-    SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
+    SchemaRecord, SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -104,6 +104,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0006_attachments",
         include_str!("../../migrations/0006_attachments.sql"),
+    ),
+    (
+        "0007_document_analysis",
+        include_str!("../../migrations/0007_document_analysis.sql"),
+    ),
+    (
+        "0008_typed_entries",
+        include_str!("../../migrations/0008_typed_entries.sql"),
     ),
 ];
 
@@ -270,6 +278,8 @@ fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
         source_id: row.try_get("source_id")?,
         created_at: ts_to_ms(created_at),
         path: row.try_get("path").ok(),
+        type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
+        data: row.try_get::<_, Option<Value>>("data").ok().flatten(),
     })
 }
 
@@ -310,8 +320,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -320,6 +330,8 @@ impl VectorStore for PostgresVectorStore {
                      tags = EXCLUDED.tags, \
                      status = EXCLUDED.status, \
                      path = EXCLUDED.path, \
+                     type = EXCLUDED.type, \
+                     data = EXCLUDED.data, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -331,6 +343,8 @@ impl VectorStore for PostgresVectorStore {
                     &status,
                     &created_at,
                     &item.path,
+                    &item.type_name,
+                    &item.data,
                 ],
             )
             .await?;
@@ -389,8 +403,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -399,6 +413,8 @@ impl VectorStore for PostgresVectorStore {
                      tags = EXCLUDED.tags, \
                      status = EXCLUDED.status, \
                      path = EXCLUDED.path, \
+                     type = EXCLUDED.type, \
+                     data = EXCLUDED.data, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -410,6 +426,8 @@ impl VectorStore for PostgresVectorStore {
                     &status,
                     &created_at,
                     &item.path,
+                    &item.type_name,
+                    &item.data,
                 ],
             )
             .await?;
@@ -721,6 +739,7 @@ impl VectorStore for PostgresVectorStore {
         let min_created = request.min_created_at.map(ms_to_ts);
         let max_created = request.max_created_at.map(ms_to_ts);
         let path_prefix = request.path_prefix.clone().filter(|p| !p.is_empty());
+        let type_filter = request.type_name.clone().filter(|t| !t.is_empty());
 
         self.block(async move {
             let client = pool.get().await?;
@@ -729,25 +748,27 @@ impl VectorStore for PostgresVectorStore {
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
-                   AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%')";
+                   AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
+                   AND ($5::text IS NULL OR type = $5)";
             let total: i64 = client
-                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix])
+                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter])
                 .await?
                 .get(0);
 
             let sql = format!(
-                "SELECT id, content, metadata, source_id, created_at, path FROM documents \
+                "SELECT id, content, metadata, source_id, created_at, path, type, data FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
+                   AND ($5::text IS NULL OR type = $5) \
                  ORDER BY created_at {order} \
-                 LIMIT $5 OFFSET $6"
+                 LIMIT $6 OFFSET $7"
             );
             let rows = client
                 .query(
                     &sql,
-                    &[&source, &min_created, &max_created, &path_prefix, &limit, &offset],
+                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &limit, &offset],
                 )
                 .await?;
             let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
@@ -762,11 +783,55 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let row = client
                 .query_opt(
-                    "SELECT id, content, metadata, source_id, created_at, path FROM documents WHERE id = $1",
+                    "SELECT id, content, metadata, source_id, created_at, path, type, data FROM documents WHERE id = $1",
                     &[&id],
                 )
                 .await?;
             row.map(|r| row_to_item(&r)).transpose()
+        })
+    }
+
+    fn update_item_analysis(&self, id: &str, json: &str, model: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let parsed: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+        let model = model.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let now = chrono::Utc::now();
+            let n = client
+                .execute(
+                    "UPDATE documents SET analysis_json = $1, analysis_at = $2, analysis_model = $3 WHERE id = $4",
+                    &[&parsed, &now, &model, &id],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn get_item_analysis(&self, id: &str) -> Result<Option<ItemAnalysisRecord>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT analysis_json, analysis_at, analysis_model FROM documents WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            let Some(row) = row else { return Ok(None) };
+            let json: Option<Value> = row.get(0);
+            let at: Option<DateTime<Utc>> = row.get(1);
+            let model: Option<String> = row.get(2);
+            match (json, at, model) {
+                (Some(j), Some(a), Some(m)) if !j.is_null() => Ok(Some(ItemAnalysisRecord {
+                    analysis: j,
+                    analysis_at: ts_to_ms(a),
+                    analysis_model: m,
+                })),
+                _ => Ok(None),
+            }
         })
     }
 
@@ -1391,6 +1456,195 @@ impl VectorStore for PostgresVectorStore {
 
     fn mark_ontology_status(&self, _id: &str, _status: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn list_schemas(&self) -> Result<Vec<SchemaRecord>> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT type_name, json_schema, title, description, created_at, updated_at
+                     FROM schemas ORDER BY type_name ASC",
+                    &[],
+                )
+                .await?;
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let created: DateTime<Utc> = row.get("created_at");
+                    let updated: DateTime<Utc> = row.get("updated_at");
+                    SchemaRecord {
+                        type_name: row.get("type_name"),
+                        json_schema: row.get::<_, Value>("json_schema"),
+                        title: row.get("title"),
+                        description: row.get("description"),
+                        created_at: ts_to_ms(created),
+                        updated_at: ts_to_ms(updated),
+                    }
+                })
+                .collect())
+        })
+    }
+
+    fn get_schema(&self, type_name: &str) -> Result<Option<SchemaRecord>> {
+        let pool = self.pool.clone();
+        let type_name = type_name.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT type_name, json_schema, title, description, created_at, updated_at
+                     FROM schemas WHERE type_name = $1",
+                    &[&type_name],
+                )
+                .await?;
+            Ok(row.map(|row| {
+                let created: DateTime<Utc> = row.get("created_at");
+                let updated: DateTime<Utc> = row.get("updated_at");
+                SchemaRecord {
+                    type_name: row.get("type_name"),
+                    json_schema: row.get::<_, Value>("json_schema"),
+                    title: row.get("title"),
+                    description: row.get("description"),
+                    created_at: ts_to_ms(created),
+                    updated_at: ts_to_ms(updated),
+                }
+            }))
+        })
+    }
+
+    fn upsert_schema(&self, record: SchemaRecord) -> Result<()> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await?;
+            client
+                .execute(
+                    "INSERT INTO schemas (type_name, json_schema, title, description, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, now(), now())
+                     ON CONFLICT (type_name) DO UPDATE SET
+                         json_schema = EXCLUDED.json_schema,
+                         title = EXCLUDED.title,
+                         description = EXCLUDED.description,
+                         updated_at = now()",
+                    &[
+                        &record.type_name,
+                        &record.json_schema,
+                        &record.title,
+                        &record.description,
+                    ],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn delete_schema(&self, type_name: &str, force: bool) -> Result<(bool, usize)> {
+        let pool = self.pool.clone();
+        let type_name = type_name.to_owned();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            let count: i64 = tx
+                .query_one(
+                    "SELECT count(*)::bigint FROM documents WHERE type = $1",
+                    &[&type_name],
+                )
+                .await?
+                .get(0);
+            if count > 0 && !force {
+                anyhow::bail!("schema {type_name} is referenced by {count} items");
+            }
+            let unset = if count > 0 {
+                tx.execute(
+                    "UPDATE documents SET type = NULL, data = NULL WHERE type = $1",
+                    &[&type_name],
+                )
+                .await? as usize
+            } else {
+                0
+            };
+            let n = tx
+                .execute("DELETE FROM schemas WHERE type_name = $1", &[&type_name])
+                .await?;
+            tx.commit().await?;
+            Ok((n > 0, unset))
+        })
+    }
+
+    fn count_items_by_type(&self, type_name: &str) -> Result<i64> {
+        let pool = self.pool.clone();
+        let type_name = type_name.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let n: i64 = client
+                .query_one(
+                    "SELECT count(*)::bigint FROM documents WHERE type = $1",
+                    &[&type_name],
+                )
+                .await?
+                .get(0);
+            Ok(n)
+        })
+    }
+
+    fn merge_item_tags(&self, id: &str, tags: &[String]) -> Result<bool> {
+        if tags.is_empty() {
+            return Ok(true);
+        }
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let new_tags: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            let row = tx
+                .query_opt(
+                    "SELECT metadata, tags FROM documents WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .await?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            let mut metadata: Value = row.try_get("metadata").unwrap_or(Value::Object(Default::default()));
+            let column_tags: Vec<String> = row.try_get("tags").unwrap_or_default();
+            let obj = metadata
+                .as_object_mut()
+                .context("metadata is not a JSON object")?;
+            let mut merged: Vec<String> = obj
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for t in &column_tags {
+                if !merged.iter().any(|m| m == t) {
+                    merged.push(t.clone());
+                }
+            }
+            for t in &new_tags {
+                if !merged.iter().any(|m| m == t) {
+                    merged.push(t.clone());
+                }
+            }
+            obj.insert("tags".to_owned(), serde_json::json!(merged));
+            tx.execute(
+                "UPDATE documents SET metadata = $1, tags = $2, updated_at = now() WHERE id = $3",
+                &[&metadata, &merged, &id],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(true)
+        })
     }
 }
 

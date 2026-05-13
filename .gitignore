@@ -6,6 +6,7 @@ target/
 *.tmp
 *.bak
 assets/
+!assets/schemas/
 data/
 *.sqlite
 .env
@@ -15,3 +16,5 @@ test_ort_env/
 eval/runs/
 eval/candidates.json
 .venv-export/
+.venv-export-sparse/
+helix-setup/

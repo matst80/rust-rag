@@ -222,6 +222,19 @@ pub(super) fn initialize_schema(
     ensure_column_exists(connection, "items", "analysis_json", "TEXT")?;
     ensure_column_exists(connection, "items", "analysis_at", "INTEGER")?;
     ensure_column_exists(connection, "items", "analysis_model", "TEXT")?;
+    ensure_column_exists(connection, "items", "type", "TEXT")?;
+    ensure_column_exists(connection, "items", "data", "TEXT")?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_items_type ON items(type);
+         CREATE TABLE IF NOT EXISTS schemas (
+             type_name TEXT PRIMARY KEY,
+             json_schema TEXT NOT NULL CHECK (json_valid(json_schema)),
+             title TEXT,
+             description TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );",
+    )?;
 
     connection.execute_batch(&format!(
         "

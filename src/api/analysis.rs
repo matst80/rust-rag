@@ -17,7 +17,7 @@
 //! from `store_entry_core` via `spawn_analysis`.
 
 use super::{ApiError, AppState};
-use crate::db::SearchHit;
+use crate::db::{ManualEdgeInput, SearchHit};
 use anyhow::{Result, anyhow};
 use axum::{Json, extract::State};
 use schemars::JsonSchema;
@@ -404,6 +404,34 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                     tracing::warn!(error=%e, "analysis persist failed");
                     span.record("outcome", "persist_err");
                 } else {
+                    // Promote LLM-derived tags onto the item's metadata.tags
+                    // so they participate in list/search filtering. Best-effort.
+                    if !analysis.tags.is_empty() {
+                        if let Err(e) = state.store.merge_item_tags(&item_id, &analysis.tags) {
+                            tracing::warn!(error=%e, "tag merge failed");
+                        }
+                    }
+
+                    // Create "anti-edges" for unrelated verdicts to penalize them in search.
+                    for verdict in &analysis.verdicts {
+                        if verdict.relation == "unrelated" {
+                            let input = ManualEdgeInput {
+                                from_item_id: item_id.clone(),
+                                to_item_id: verdict.target_id.clone(),
+                                relation: Some("unrelated".to_owned()),
+                                weight: -1.0,
+                                directed: false,
+                                metadata: serde_json::json!({
+                                    "reason": verdict.reason,
+                                    "confidence": verdict.confidence,
+                                    "source": "analysis"
+                                }),
+                            };
+                            if let Err(e) = state.store.add_manual_edge(input) {
+                                tracing::warn!(error=%e, target_id=%verdict.target_id, "failed to create anti-edge");
+                            }
+                        }
+                    }
                     tracing::info!(
                         verdicts = analysis.verdicts.len(),
                         tags = analysis.tags.len(),

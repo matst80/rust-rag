@@ -254,7 +254,7 @@ impl AcpWsHandle {
     /// Stop the worker. Closes the upstream WS; subscribers see broadcast
     /// receiver closed. Idempotent.
     pub fn shutdown(&self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.notify_one();
     }
 }
 
@@ -290,11 +290,16 @@ impl AcpWsRegistry {
         let mut g = self.workers.write().await;
         if let Some(old) = g.remove(&id) {
             if old.url == url {
-                // No change — put it back.
-                g.insert(id.clone(), old.clone());
-                return old;
+                let old_status = old.status().await;
+                if old_status.connected {
+                    // No change and still connected — put it back.
+                    g.insert(id.clone(), old.clone());
+                    return old;
+                }
+                info!(instance_id = %id, "acp_registry: old worker disconnected, replacing to force reconnect");
+            } else {
+                info!(instance_id = %id, "acp_registry: re-registering, dropping old worker");
             }
-            info!(instance_id = %id, "acp_registry: re-registering, dropping old worker");
             old.shutdown();
         }
         let worker = spawn_worker(
@@ -529,14 +534,17 @@ async fn run_loop(
 async fn connect(
     url: &str,
     token: Option<&str>,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>
-{
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
     let mut req = url.into_client_request()?;
     if let Some(t) = token {
         let value = format!("Bearer {t}");
         req.headers_mut().insert(
             AUTHORIZATION,
-            value.parse().map_err(|e| anyhow!("bad token header: {e}"))?,
+            value
+                .parse()
+                .map_err(|e| anyhow!("bad token header: {e}"))?,
         );
     }
     let (ws, _resp) = tokio_tungstenite::connect_async(req).await?;

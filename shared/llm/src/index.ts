@@ -1,5 +1,6 @@
 export {
   getLlmClient,
+  setWasmBase,
   formatLoadProgress,
   clearModelCache,
   requestPersistentStorage,
@@ -11,9 +12,16 @@ export {
   type LlmClient,
 } from "./client"
 
-export { useLlmStatus } from "./react"
+export { useLlmStatus, useLlmHelperStatus } from "./react"
 
 export { captionImage, type CaptionOptions } from "./vision"
+
+export {
+  classifyImage,
+  formatClassificationResult,
+  setVisionWasmBase,
+  type ClassifyOptions,
+} from "./classifier"
 
 export {
   runLocalChat,
@@ -23,3 +31,15 @@ export {
   type ToolDef,
   type RunLocalChatArgs,
 } from "./local-chat"
+
+export {
+  LlmHelper,
+  getLlmHelper,
+  type LlmHelperStatus,
+  type GenerateOptions,
+} from "./helper"
+export {
+  parseToolCall,
+  hideToolTokens,
+  type ToolCallParseResult,
+} from "./parser"

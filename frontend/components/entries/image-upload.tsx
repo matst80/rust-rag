@@ -11,9 +11,11 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import {
   captionImage,
+  classifyImage,
+  formatClassificationResult,
   formatLoadProgress,
   isWebGpuAvailable,
-  useLlmStatus,
+  useLlmHelperStatus,
 } from "@rust-rag/llm"
 import { MarkdownView } from "./markdown-view"
 
@@ -33,12 +35,12 @@ export function ImageUpload() {
   const [webgpu, setWebgpu] = useState(false)
   const [useLocal, setUseLocal] = useState(true)
   const [caption, setCaption] = useState<string>("")
+  const [labels, setLabels] = useState<string>("")
   const [captioning, setCaptioning] = useState(false)
-  const visionStatus = useLlmStatus("vision")
+  const visionStatus = useLlmHelperStatus()
   const abortRef = useRef<AbortController | null>(null)
 
-  useEffect(() => { setWebgpu(isWebGpuAvailable()) }, [])
-  useEffect(() => { if (!webgpu) setUseLocal(false) }, [webgpu])
+  useEffect(() => { const hasGpu = isWebGpuAvailable(); setWebgpu(hasGpu); setUseLocal(hasGpu) }, [])
 
   const handleFile = useCallback((f: File) => {
     if (!f.type.startsWith("image/")) {
@@ -145,9 +147,21 @@ export function ImageUpload() {
   const runLocalCaption = useCallback(async (sourceFile: File): Promise<string> => {
     setCaptioning(true)
     setCaption("")
+    setLabels("")
     abortRef.current = new AbortController()
     try {
       const scaledBlob = await scaleImage(sourceFile)
+
+      // Step 1: Classify (very fast)
+      try {
+        const res = await classifyImage(scaledBlob)
+        const formatted = formatClassificationResult(res)
+        setLabels(formatted)
+      } catch (err) {
+        console.warn("Classification failed", err)
+      }
+
+      // Step 2: Caption (LLM)
       const text = await captionImage(scaledBlob, {
         prompt: IMAGE_PROMPT,
         onToken: (partial) => setCaption(partial),
@@ -176,20 +190,26 @@ export function ImageUpload() {
       const scaledBlob = await scaleImage(file)
       const scaledFile = new File([scaledBlob], file.name, { type: file.type })
 
-      if (useLocal && webgpu) {
+      if (useLocal) {
         // Caption locally if not already done, then create entry + attach.
         let text = caption
         if (!text) {
           text = await runLocalCaption(file)
         }
-        if (!text) throw new Error("No caption produced")
+
+        // Combine labels and caption
+        const combinedText = labels
+          ? `Labels: ${labels}\n\n${text}`
+          : text
+
         const entry = await api.items.create({
-          text,
+          text: combinedText,
           source_id: sourceId || "images",
           metadata: {
             source_type: "image",
             original_filename: file.name,
-            captioned_by: "gemma-3n-E2B-it",
+            captioned_by: "gemma-4-E4B-it",
+            labels: labels || undefined,
           },
         })
         try {
@@ -321,7 +341,7 @@ export function ImageUpload() {
           <Sparkles className={cn("size-3.5 shrink-0", useLocal ? "text-primary" : "text-muted-foreground/40")} />
           <div className="min-w-0">
             <p className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-              {useLocal ? "Caption locally (Gemma 3n · private)" : "Caption on backend (Claude)"}
+              {useLocal ? "Caption locally (Gemma 4 · private)" : "Caption on backend (Claude)"}
             </p>
             {useLocal && visionStatus.kind === "loading" && (
               <p className="font-mono text-[9px] text-muted-foreground/70 tabular-nums">

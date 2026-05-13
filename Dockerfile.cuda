@@ -28,7 +28,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
-COPY mcp-stdio ./mcp-stdio
+
 RUN mkdir -p assets
 
 # `--no-default-features` strips ort/download-binaries (mutually exclusive
@@ -58,6 +58,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/rust-rag /usr/local/bin/rust-rag
+COPY assets/schemas /app/assets/schemas
 
 RUN mkdir -p /app/data /app/data/uploads /app/assets/bge-m3 \
 	&& chown -R rustrag:rustrag /app

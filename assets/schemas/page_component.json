@@ -1,0 +1,19 @@
+{
+  "type_name": "page_component",
+  "title": "Page Component",
+  "description": "Reusable page-builder component spec.",
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["kind", "props"],
+    "properties": {
+      "kind": { "type": "string", "minLength": 1 },
+      "props": { "type": "object" },
+      "children": {
+        "type": "array",
+        "items": { "$ref": "#" }
+      }
+    },
+    "additionalProperties": false
+  }
+}

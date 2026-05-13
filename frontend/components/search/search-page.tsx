@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
+import { useRouter, useSearchParams, usePathname } from "next/navigation"
 import { Brain, Sparkles, X } from "lucide-react"
 import { SearchInput } from "./search-input"
 import { SearchResults } from "./search-results"
@@ -23,12 +24,51 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
   const [isHybrid, setIsHybrid] = useState(true)
   const [isRerank, setIsRerank] = useState(true)
 
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const pathname = usePathname()
+
   // Assisted mode state
   const [isStreaming, setIsStreaming] = useState(false)
   const [queries, setQueries] = useState<QueryBlock[]>([])
   const [merged, setMerged] = useState<SearchResult[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const lastTriggeredQuery = useRef<string | null>(null)
+
+  // Sync state from URL on mount and when searchParams change
+  useEffect(() => {
+    const q = searchParams.get("q") || ""
+    const mode = searchParams.get("mode")
+    const hybrid = searchParams.get("hybrid")
+    const rerank = searchParams.get("rerank")
+    const category = searchParams.get("category")
+
+    if (q !== submittedQuery) {
+      setSearchQuery(q)
+      setSubmittedQuery(q)
+    }
+
+    if (mode === "assisted") setIsAssisted(true)
+    else if (mode === "basic") setIsAssisted(false)
+
+    if (hybrid !== null) setIsHybrid(hybrid === "true")
+    if (rerank !== null) setIsRerank(rerank === "true")
+    if (category !== null) setCategoryFilter(category === "all" ? null : category)
+
+    // Auto-trigger search if q is present in URL
+    if (q && q !== lastTriggeredQuery.current) {
+      lastTriggeredQuery.current = q
+      if (mode === "assisted" || (mode === null && isAssisted)) {
+        runAssisted(q)
+      }
+    } else if (!q) {
+      lastTriggeredQuery.current = null
+      setSubmittedQuery("")
+      setMerged(null)
+      setQueries([])
+    }
+  }, [searchParams])
 
   // Basic search hook
   const { data: basicResults, isLoading: isBasicLoading } = useSearch(
@@ -92,21 +132,23 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     const q = searchQuery.trim()
     if (!q) return
 
-    if (isAssisted) {
-      runAssisted(q)
-    } else {
-      setSubmittedQuery(q)
-      setMerged(null)
-      setQueries([])
-    }
-  }, [searchQuery, isAssisted])
+    // Update URL - this will trigger the useEffect above
+    const params = new URLSearchParams(searchParams.toString())
+    params.set("q", q)
+    params.set("mode", isAssisted ? "assisted" : "basic")
+    params.set("hybrid", isHybrid.toString())
+    params.set("rerank", isRerank.toString())
+    if (categoryFilter) params.set("category", categoryFilter)
+    else params.delete("category")
+    router.push(`${pathname}?${params.toString()}`)
+  }, [searchQuery, isAssisted, isHybrid, isRerank, categoryFilter, searchParams, pathname, router])
 
   const isLoading = isAssisted ? isStreaming : isBasicLoading
   const hasResults = isAssisted ? merged !== null : !!basicResults
 
   return (
     <div className="relative flex w-full min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
-      <div className="mx-auto w-full max-w-3xl flex-1 flex flex-col px-4 md:px-6">
+      <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-4 md:px-6">
         {!submittedQuery ? (
           <div className="flex flex-1 flex-col items-center justify-start pt-10 md:justify-center md:-mt-16">
 

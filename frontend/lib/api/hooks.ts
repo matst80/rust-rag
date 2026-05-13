@@ -19,6 +19,9 @@ import type {
   Attachment,
   EntriesTreeResponse,
   EntriesPathsResponse,
+  SchemaDefinition,
+  UpsertSchemaRequest,
+  DeleteSchemaResponse,
 } from "./types"
 
 // Categories hooks
@@ -66,6 +69,13 @@ export function useRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, RechunkRequest>(
     `rechunk-${id}`,
     (_, { arg }) => api.items.rechunk(id, arg)
+  )
+}
+
+export function useReanalyzeItem(id: string) {
+  return useSWRMutation<Entry, Error, string[], void>(
+    ["item", id],
+    () => api.items.reanalyze(id)
   )
 }
 
@@ -196,5 +206,36 @@ export function useDeleteEdge() {
   return useSWRMutation<void, Error, string, string>(
     "edges",
     (_, { arg }) => api.edges.delete(arg)
+  )
+}
+
+// Schemas
+export function useSchemas() {
+  return useSWR<SchemaDefinition[]>("schemas", api.schemas.list)
+}
+
+export function useSchema(typeName: string | null) {
+  return useSWR<SchemaDefinition>(
+    typeName ? ["schema", typeName] : null,
+    ([, t]) => api.schemas.get(t as string)
+  )
+}
+
+export function useUpsertSchema(typeName: string) {
+  return useSWRMutation<SchemaDefinition, Error, string[], UpsertSchemaRequest>(
+    ["schema", typeName],
+    (_, { arg }) => api.schemas.upsert(typeName, arg)
+  )
+}
+
+export function useDeleteSchema() {
+  return useSWRMutation<
+    DeleteSchemaResponse,
+    Error,
+    string,
+    { typeName: string; force?: boolean }
+  >(
+    "schemas",
+    (_, { arg }) => api.schemas.delete(arg.typeName, arg.force ?? false)
   )
 }

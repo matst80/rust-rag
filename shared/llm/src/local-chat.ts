@@ -1,4 +1,6 @@
 import { getLlmClient, type ProfileKey } from "./client"
+import { getLlmHelper } from "./helper"
+import { parseToolCall, hideToolTokens } from "./parser"
 
 export interface LocalChatMessage {
   role: "user" | "assistant"
@@ -34,7 +36,7 @@ function buildSystemPrompt(tools: ToolDef[]): string {
     .join("\n")
   return `You are a careful research assistant for a personal knowledge base (RAG).
 
-You can call tools to look things up. To call a tool, output exactly one JSON code block on its own:
+You can call tools to search your knowledge, interact with the current browser page, or save new notes. To call a tool, output exactly one JSON code block on its own:
 
 \`\`\`tool
 {"name": "search", "args": {"query": "auth middleware", "top_k": 5}}
@@ -44,49 +46,38 @@ Available tools:
 ${toolList}
 
 Rules:
-- Use tools when the user's question depends on stored notes.
+- Use tools when the user's question depends on stored notes or the current page content.
+- Use extract_images to find images on the page.
+- Use analyze_image to "see" and describe a specific image URL when the user asks about its content.
+- Use save_note to persist important summaries or findings for the user.
 - Cite entry ids in your final answer like (id_here).
 - After getting tool results, you may call another tool or give a final answer.
 - Final answer: plain markdown, no tool block.
 - Be brief. 3-6 sentences unless asked for detail.`
 }
 
-interface ToolCallParseResult {
-  before: string
-  call: { name: string; args: Record<string, unknown> } | null
-}
 
-function parseToolCall(text: string): ToolCallParseResult {
-  const re = /```tool\s*([\s\S]*?)```/i
-  const m = text.match(re)
-  if (!m) return { before: text, call: null }
-  const before = text.slice(0, m.index ?? 0)
-  try {
-    const json = JSON.parse(m[1].trim())
-    if (json && typeof json.name === "string") {
-      return {
-        before,
-        call: { name: json.name, args: json.args ?? {} },
-      }
-    }
-  } catch {
-    // not a tool call
-  }
-  return { before: text, call: null }
-}
 
 function buildPrompt(
   system: string,
   history: LocalChatMessage[],
   scratch: string
 ): string {
-  const lines: string[] = [system, ""]
+  const parts: string[] = []
+
+  // System turn
+  parts.push(`<|turn|>system\n${system}<|turn|>`)
+
+  // History turns
   for (const m of history) {
-    lines.push(m.role === "user" ? `User: ${m.content}` : `Assistant: ${m.content}`)
+    const role = m.role === "user" ? "user" : "model"
+    parts.push(`<|turn|>${role}\n${m.content}<|turn|>`)
   }
-  lines.push("Assistant:")
-  if (scratch) lines.push(scratch)
-  return lines.join("\n")
+
+  // Final model turn (left open for completion)
+  parts.push(`<|turn|>model\n${scratch}`)
+
+  return parts.join("\n")
 }
 
 export interface RunLocalChatArgs {
@@ -95,6 +86,7 @@ export interface RunLocalChatArgs {
   onUpdate: (update: LocalChatStepUpdate) => void
   signal?: AbortSignal
   profile?: ProfileKey
+  engine?: "litert" | "transformers"
 }
 
 export async function runLocalChat({
@@ -103,8 +95,8 @@ export async function runLocalChat({
   onUpdate,
   signal,
   profile = "text",
+  engine = "litert",
 }: RunLocalChatArgs): Promise<string> {
-  const client = getLlmClient(profile)
   const toolByName = new Map(tools.map((t) => [t.name, t]))
   const system = buildSystemPrompt(tools)
   const toolLog: LocalToolCall[] = []
@@ -114,20 +106,37 @@ export async function runLocalChat({
     if (signal?.aborted) throw new Error("aborted")
     const prompt = buildPrompt(system, history, scratch)
 
-    let lastPartial = ""
-    const raw = await client.generate(
-      prompt,
-      (partial) => {
-        lastPartial = partial
-        const visible = partial.split("```tool")[0]
-        onUpdate({
-          partialAnswer: (scratch + visible).trim(),
-          toolCalls: toolLog,
-        })
-      },
-      signal
-    )
-    const text = raw || lastPartial
+    let text = ""
+    if (engine === "transformers") {
+      const helper = getLlmHelper()
+      text = await helper.generate({
+        prompt,
+        signal,
+        onToken: (partial) => {
+          const visible = hideToolTokens(partial)
+          onUpdate({
+            partialAnswer: (scratch + visible).trim(),
+            toolCalls: toolLog,
+          })
+        },
+      })
+    } else {
+      const client = getLlmClient(profile)
+      let lastPartial = ""
+      const raw = await client.generate(
+        prompt,
+        (partial) => {
+          lastPartial = partial
+          const visible = hideToolTokens(partial)
+          onUpdate({
+            partialAnswer: (scratch + visible).trim(),
+            toolCalls: toolLog,
+          })
+        },
+        signal
+      )
+      text = raw || lastPartial
+    }
 
     const parsed = parseToolCall(text)
     if (!parsed.call) {
@@ -174,3 +183,4 @@ export async function runLocalChat({
   onUpdate({ partialAnswer: final, toolCalls: toolLog, done: true })
   return final
 }
+

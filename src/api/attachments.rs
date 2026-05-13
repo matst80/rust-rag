@@ -373,6 +373,7 @@ async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<Stri
 
         let resp = client
             .get(current.clone())
+            .header("Accept", "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8")
             .send()
             .await
             .map_err(|e| ApiError::BadRequest(format!("fetch failed: {e}")))?;
@@ -535,6 +536,7 @@ pub async fn entries_tree_core(
             min_created_at: None,
             max_created_at: None,
             path_prefix: Some(prefix.clone()),
+            type_name: None,
         };
         let want = prefix.to_lowercase();
         let (items, _) = tokio::task::spawn_blocking(move || store.list_items(req))
