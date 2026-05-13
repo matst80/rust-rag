@@ -45,6 +45,8 @@ PERSISTENT CONTEXT: Store decisions, system state, and task context here so any 
 SHARED CHANNELS: Use messaging tools (`send_message`, `list_messages`) for structured hand-offs between agents and humans.\n\
 CROSS-AGENT AWARENESS: Before starting a task, run `search_entries` (omit `source_id` for global search) to check if another agent already covered it. Read entry `agent_collaboration_guide` in source `knowledge` for the full protocol.\n\
 \n\
+FIRST CALL: run `list_memory_conventions` once per session — it returns the canonical `source_id` taxonomy, required metadata fields, default typed schemas (decision/fact/todo/incident/note/recipe/workout/page_component), and the edge-predicate vocabulary used by the ontology worker. The doc is itself a stored entry (`rust_rag_mcp_usage_guide_v1` in `knowledge`) so anyone can refine the conventions via `update_item` / `store_entry` — no redeploy. Use `list_schemas` to inspect schema details before storing typed entries.\n\
+\n\
 NAMESPACES (`source_id`): short lowercase buckets — e.g. `knowledge` (durable facts/architecture), `memory` (per-agent notes), `agent_notes`, or `project:<name>:knowledge` / `project:<name>:todos` for project-scoped work.\n\
 \n\
 TYPICAL FLOW:\n\
@@ -52,6 +54,72 @@ TYPICAL FLOW:\n\
 2. Do work.\n\
 3. MANDATORY: `store_entry` (stable id, descriptive metadata.tags + author) to persist every significant outcome. \"If it isn't in the RAG, it didn't happen.\"\n\
 4. `send_message` to hand off, citing the stored entry id.";
+
+/// Stable id of the live, editable usage guide stored in the rust-rag instance
+/// itself. `list_memory_conventions` returns this entry's text when present;
+/// `build_memory_conventions` is the compiled-in fallback used otherwise.
+const MEMORY_CONVENTIONS_ENTRY_ID: &str = "rust_rag_mcp_usage_guide_v1";
+
+/// JSON document returned by the `list_memory_conventions` tool. Authoritative
+/// reference for how agents should structure stored memory.
+fn build_memory_conventions() -> serde_json::Value {
+    serde_json::json!({
+        "stable_id": {
+            "format": "descriptive snake_case, optional version suffix (e.g. `_v2`).",
+            "rules": [
+                "Reusing an existing `id` in `store_entry` replaces the entry (upsert).",
+                "Never use UUIDs or timestamps for `id` — those are auto-generated when omitted.",
+                "Tie versioned successors together via the `decision` schema (`supersedes` / `superseded_by`) or a manual edge."
+            ]
+        },
+        "source_id_taxonomy": {
+            "reserved": {
+                "knowledge": "Durable cross-project facts, architecture, evergreen reference material.",
+                "memory": "Per-agent scratch notes that should survive sessions.",
+                "agent_notes": "Hand-off context between agents working a shared task."
+            },
+            "project_scoped": {
+                "pattern": "project:<slug>:knowledge | project:<slug>:todos",
+                "example": "project:rust-rag:knowledge",
+                "rules": [
+                    "`<slug>` is short, lowercase, kebab-case if needed.",
+                    "Open todos go in `project:<slug>:todos` with metadata `status` and `priority`."
+                ]
+            }
+        },
+        "required_metadata": {
+            "always": ["author", "tags"],
+            "for_todos": ["status", "priority"],
+            "optional_but_recommended": ["doc_type"]
+        },
+        "typed_entries": {
+            "how": "Call `store_entry` with `type` set to one of the registered schemas and `data` carrying the structured payload. Validation is enforced server-side via JSON Schema. Discover schemas with `list_schemas` / `get_schema`.",
+            "default_schemas": {
+                "decision": "ADR-style record: context, decision, consequences, status (proposed/accepted/superseded/rejected).",
+                "fact": "Atomic claim with `source` and `confidence` (0-1). Optional `expires_at` for staleness.",
+                "todo": "Single task with `status` (open/in_progress/done/cancelled) and optional `priority`/`due`.",
+                "incident": "Operational incident: timeline, severity, root_cause, resolution.",
+                "note": "Lightweight titled prose with optional `tags` / `links` — fallback when no better schema fits."
+            },
+            "tip": "If your content fits a schema, prefer typed storage — it composes with `search_entries.type` filtering and the analyze pipeline."
+        },
+        "edge_vocabulary": {
+            "tool": "create_manual_edge",
+            "canonical_predicates": crate::ontology::VALID_PREDICATES,
+            "directions": {
+                "is_a": "from is a subtype/instance of to",
+                "part_of": "from is a component of to",
+                "caused_by": "from is an effect/consequence of to",
+                "works_for": "entity in from is affiliated with to",
+                "contradicts": "from makes a claim incompatible with to",
+                "depends_on": "from requires to to function/exist",
+                "contains": "from includes/embeds to as a sub-element",
+                "implemented_by": "to is the concrete realization of from"
+            },
+            "note": "Off-list relations are allowed but won't compose with ontology-worker edges or analyze_entry verdicts. Stick to the canonical set unless you have a reason."
+        }
+    })
+}
 
 #[derive(Clone)]
 pub struct RustRagMcpServer {
@@ -404,7 +472,34 @@ impl RustRagMcpServer {
         Ok(Json(body.0))
     }
 
-    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. Use a stable descriptive `id` (e.g. 'project_x_v1_architecture'), pick the right `source_id` namespace ('knowledge', 'memory', 'agent_notes', 'project:<name>:knowledge'), write `text` as comprehensive markdown, and add `metadata` with `author` + `tags` for searchability. Optional `path` (slash-separated, e.g. 'team/handbook') groups the entry in the wiki tree under its source_id.")]
+    #[tool(
+        description = "Return the canonical conventions for storing memory in this rust-rag instance: stable-id pattern, `source_id` taxonomy (reserved + `project:<slug>:*`), required metadata fields, default typed schemas (decision/fact/todo/incident/note + bundled schemas) with one-line purposes, and the edge-predicate vocabulary used by the ontology worker. \
+LIVE-EDITABLE: the actual document is the entry `rust_rag_mcp_usage_guide_v1` in source `knowledge` — `update_item` (or `store_entry` with the same id) to iterate without redeploying. Falls back to a built-in JSON default when the entry is missing. \
+Run this once at the start of a session before storing anything — it tells you whether your content should be a typed entry (call `list_schemas` to inspect the schema) or free-text, and which predicates to pass to `create_manual_edge`."
+    )]
+    async fn list_memory_conventions(&self) -> Result<CallToolResult, String> {
+        let store = self.state.store.clone();
+        let entry = tokio::task::spawn_blocking(move || store.get_item(MEMORY_CONVENTIONS_ENTRY_ID))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let text = match entry {
+            Some(record) => record.text,
+            None => {
+                let doc = build_memory_conventions();
+                serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. \
+BEFORE STORING: if you have not yet, call `list_memory_conventions` (for taxonomy + required fields) and `list_schemas` (for typed-entry options) — most agents skip this and store mush. \
+SCHEMA-FIRST: if your content fits a registered schema (decision/fact/todo/incident/note/recipe/workout/page_component or any other in `list_schemas`), pass `type` + `data` for server-side JSON Schema validation and structured retrieval (`search_entries.type`, `list_items.type`). Use free-text only when no schema fits. \
+STABLE ID: pass a descriptive `id` like `rust_rag_auth_redesign_v2`. Reusing an existing `id` REPLACES the entry (upsert) — use this for evolving notes; bump a `_vN` suffix when the change is breaking enough that callers should distinguish. Omit `id` only for ephemeral or strictly append-only content. \
+SOURCE_ID: pick from the reserved buckets (`knowledge` / `memory` / `agent_notes`) or use `project:<slug>:knowledge` / `project:<slug>:todos`. Free-form values are allowed but won't compose with other agents' searches — see `list_memory_conventions` first. \
+METADATA: always include `author` and `tags`. For `*:todos` source_ids also include `status` and `priority`. \
+PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in the tree under its source_id; orthogonal to `type`.")]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
@@ -416,7 +511,7 @@ impl RustRagMcpServer {
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace. Pass `type` to restrict results to entries of a specific data type (e.g., 'todo', 'note'). Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace (see `list_memory_conventions` for the canonical taxonomy). Pass `type` to scope to a single typed-entry schema (see `list_schemas` for what's registered) — useful for retrieving only decisions, only facts, etc. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
@@ -460,7 +555,7 @@ impl RustRagMcpServer {
             .ok_or_else(|| "item not found".to_owned())
     }
 
-    #[tool(description = "List all source_id categories and their item counts.")]
+    #[tool(description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id.")]
     async fn list_categories(&self) -> Result<Json<CategoriesResponse>, String> {
         let store = self.state.store.clone();
         let categories = tokio::task::spawn_blocking(move || store.list_categories())
@@ -999,7 +1094,10 @@ impl RustRagMcpServer {
         Ok(Json(GraphRebuildResponse { rebuilt_edges }))
     }
 
-    #[tool(description = "Create a manual graph edge between two items.")]
+    #[tool(description = "Create a manual graph edge between two items. \
+PREDICATES: use one of the canonical predicates (`is_a`, `part_of`, `caused_by`, `works_for`, `contradicts`, `depends_on`, `contains`, `implemented_by`) so the edge composes with ontology-worker edges, graph traversal, and the analyze pipeline. See `list_memory_conventions` for direction semantics (e.g. `from is_a to` means FROM is a subtype of TO, NOT the reverse). Off-list `relation` strings are accepted but are essentially private to your caller — other agents and the ontology worker will not recognize them. \
+WEIGHT defaults to 1.0; use -1.0 (with `directed: false`) for anti-edges that should DEMOTE the target in graph-related search. \
+DIRECTED defaults to false — set to true when the predicate's direction is meaningful (it always is for the canonical set).")]
     async fn create_manual_edge(
         &self,
         Parameters(request): Parameters<CreateManualEdgeRequest>,

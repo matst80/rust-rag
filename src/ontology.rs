@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 // Two predicates added over the original Gemini schema:
 //   contains      — hierarchy within a document (article contains a fact/claim)
 //   implemented_by — links a spec/concept to its concrete realization
-const VALID_PREDICATES: &[&str] = &[
+pub const VALID_PREDICATES: &[&str] = &[
     "is_a",
     "part_of",
     "caused_by",
