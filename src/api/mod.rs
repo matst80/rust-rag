@@ -3576,6 +3576,7 @@ impl From<ItemRecord> for AdminItemPayload {
             analysis_model: None,
             type_name: value.type_name,
             data: value.data,
+            neighbors: None,
         }
     }
 }

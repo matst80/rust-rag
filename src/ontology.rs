@@ -175,7 +175,6 @@ async fn process_batch(
         let item_id = item.id.clone();
         let source_id = item.source_id.clone();
         let store_clone = store.clone();
-        let svc = embedder_svc.clone();
 
         let predicates = tokio::task::spawn_blocking(move || store_clone.list_ontology_predicates(Some(&source_id)))
             .await??;
