@@ -1,72 +1,76 @@
-# RAG CLI
+# rag — rust-rag CLI
 
-A simple Go CLI tool to interact with your `rust-rag` instance.
+Entry/attachment tool for a `rust-rag` instance. Scope: store/search/list/browse entries (free-text + typed), URL ingestion, multimodal image ingest, attachments, analysis, graph discovery, schema discovery.
 
-## Installation
+ACP/messaging surface was removed — use the MCP server or HTTP API directly for those.
+
+## Build
 
 ```bash
 cd go-cli
 go build -o rag .
-sudo mv rag /usr/local/bin/ # optional
+sudo mv rag /usr/local/bin/   # optional
 ```
 
-## Usage
+## Auth
 
-### Login
-
-Uses the OIDC-like device flow. It will give you a link to visit in your browser to approve the CLI session.
+Device-code flow:
 
 ```bash
 rag login
 ```
 
-### Store Data
+Token stored in `~/.config/rust-rag/config.json`.
 
-Store text directly or pipe data from other tools.
+## Command tree
 
-```bash
-# Direct text
-rag store "This is a fact about RAG systems."
+```
+rag login
+rag entry store [text]            # -s source, -m metadata, --type, --data, --path, --tags, --title
+rag entry smart [text]            # LLM splits text + assigns source_id/metadata (--url, --title, --model)
+rag entry get <id>
+rag entry update <id>             # --text/--metadata/--source/--path/--type/--data
+rag entry delete <id>
+rag entry list                    # -s source, --path-prefix, --type, -n limit
+rag entry browse                  # -s source, --prefix
+rag entry related <id>            # graph neighborhood (--depth, --limit, --edge-type)
+rag entry analyze <id|->          # LLM analysis (id, or `-` for stdin text)
+rag entry image <path>            # multimodal image ingest
 
-# Pipe data (useful for logs, exports, etc)
-cat document.txt | rag store --source documents
+rag search <query>                # -k, -s, --type, --rerank/--no-rerank, --show-related
+rag ingest <url>                  # -s, --path, --type, --cdp, --llm-clean
+rag sources
 
-# Advanced: metadata and source
-rag store "Task for Mats" --source tasks --metadata '{"priority": "high", "todo": "mats"}'
+rag schema list
+rag schema get <type>
+
+rag edge list                     # --item, --type
+rag edge add <from> <to> <predicate>  # --weight, --directed
+
+rag attach add <entry_id> <url>
+rag attach list <entry_id>
+rag attach rm <attachment_id>
+
+rag dream
+rag health
 ```
 
-### Search
+Global flags:
+
+- `--api-url`  base URL (default `http://localhost:4001`)
+- `--config`   alt config file
+- `--json`     emit raw JSON instead of pretty output
+
+## Examples
 
 ```bash
-rag search "What are the benefits of RAG?" --limit 3
-```
-
-### List Recent Items
-
-```bash
-rag list --n 20 --source tasks
-```
-
-## Configuration
-
-Configuration is stored in `~/.config/rust-rag/config.json`. You can override the API URL:
-
-```bash
-rag --api-url https://my-rag-instance.com list
-```
-
-You can also set the current message channel as a global flag for commands that operate on a channel:
-
-```bash
-rag --channel ops msg send "deploy started"
-rag --channel ops msg history --limit 20
-rag --channel ops acp gemini --name ops-bot
-```
-
-If `--channel` is not set, the CLI falls back to the configured `channel` value. If
-that is also unset, it derives a default channel from the current directory name.
-
-```bash
-cd ~/src/rust-rag
-rag msg send "working here"   # sends to #rust-rag
+rag entry store "fact about caching" -s knowledge --tags rag,caching
+cat doc.md | rag entry store -s documents --path docs/intro --title "Intro"
+rag entry list -s project:rust-rag:todos -n 5
+rag search "vector store sqlite" -k 3 --rerank --show-related
+rag ingest https://example.com/article -s web --llm-clean
+rag entry image ./screenshot.png -s screenshots
+rag entry analyze go_cli_roadmap_v1
+rag edge add a_id b_id refines --weight 0.8
+rag attach add entry_id https://example.com/file.pdf
 ```
