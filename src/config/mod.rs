@@ -301,6 +301,7 @@ pub struct AppConfig {
     pub analysis: AnalysisConfig,
     pub dreaming: DreamingConfig,
     pub google_oauth: GoogleOAuthConfig,
+    pub web_push: WebPushConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,6 +323,24 @@ impl GoogleOAuthConfig {
             && self.client_secret.is_some()
             && self.redirect_uri.is_some()
             && self.token_enc_key.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebPushConfig {
+    /// VAPID public key (base64-url, uncompressed P-256 point — what the
+    /// browser's `pushManager.subscribe()` accepts as `applicationServerKey`).
+    pub public_key: Option<String>,
+    /// VAPID private key (base64-url, 32-byte P-256 scalar).
+    pub private_key: Option<String>,
+    /// `mailto:` URI or origin URL embedded in VAPID JWTs — push services
+    /// use it to contact the operator if your traffic misbehaves.
+    pub subject: Option<String>,
+}
+
+impl WebPushConfig {
+    pub fn is_configured(&self) -> bool {
+        self.public_key.is_some() && self.private_key.is_some() && self.subject.is_some()
     }
 }
 
@@ -495,6 +514,11 @@ impl AppConfig {
                 token_enc_key: non_empty_var("OAUTH_TOKEN_ENC_KEY"),
                 default_scopes: parse_csv_env("GOOGLE_OAUTH_DEFAULT_SCOPES")
                     .unwrap_or_else(default_google_scopes),
+            },
+            web_push: WebPushConfig {
+                public_key: non_empty_var("VAPID_PUBLIC_KEY"),
+                private_key: non_empty_var("VAPID_PRIVATE_KEY"),
+                subject: non_empty_var("VAPID_SUBJECT"),
             },
         })
     }

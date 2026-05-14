@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation"
 import { AppHeader } from "@/components/app-header"
 import { GoogleIntegrationCard } from "@/components/integrations/google-card"
+import { NotificationsCard } from "@/components/integrations/notifications-card"
 import { readSessionFromCookies } from "@/lib/auth/session"
 
 export default async function IntegrationsPage() {
@@ -26,6 +27,7 @@ export default async function IntegrationsPage() {
 					</p>
 				</div>
 				<GoogleIntegrationCard />
+				<NotificationsCard />
 			</main>
 		</>
 	)

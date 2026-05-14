@@ -2,6 +2,7 @@ mod auth;
 mod graph;
 mod oauth_creds;
 pub mod postgres;
+mod push;
 mod schema;
 
 use anyhow::{Context, Result, anyhow};
@@ -589,6 +590,47 @@ pub trait OAuthCredsStore: Send + Sync {
     ) -> Result<Option<OAuthCredentialsRecord>>;
     fn delete_oauth_credentials(&self, subject: &str, provider: &str) -> Result<bool>;
     fn list_oauth_providers(&self, subject: &str) -> Result<Vec<OAuthCredentialsRecord>>;
+}
+
+/// One row per browser/device the user has authorized for Web Push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscriptionRecord {
+    pub id: String,
+    pub subject: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub user_agent: Option<String>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertPushSubscription {
+    pub subject: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub user_agent: Option<String>,
+    pub now: i64,
+}
+
+pub trait PushStore: Send + Sync {
+    /// Insert or update a subscription. (subject, endpoint) is unique; an
+    /// existing row's keys and user_agent are refreshed and `created_at`
+    /// preserved.
+    fn upsert_push_subscription(
+        &self,
+        sub: UpsertPushSubscription,
+    ) -> Result<PushSubscriptionRecord>;
+    fn list_push_subscriptions(&self, subject: &str) -> Result<Vec<PushSubscriptionRecord>>;
+    /// Delete by `id`, scoped to `subject` so users can only remove their
+    /// own subscriptions. Returns true if a row was deleted.
+    fn delete_push_subscription(&self, id: &str, subject: &str) -> Result<bool>;
+    /// Delete by endpoint (used by the send loop when the push service
+    /// returns 410/404 → subscription is dead).
+    fn delete_push_subscription_by_endpoint(&self, endpoint: &str) -> Result<bool>;
+    fn touch_push_subscription(&self, id: &str, now: i64) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -13,8 +13,9 @@ use super::{
     GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
     NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OAuthCredentialsRecord,
-    OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow, SchemaRecord, SearchHit,
-    SortOrder, UpsertOAuthCredentials, UserMemoryStore, UserProfile, VectorStore,
+    OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow, PushStore,
+    PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder, UpsertOAuthCredentials,
+    UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -174,6 +175,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0013_user_oauth_credentials",
         include_str!("../../migrations/0013_user_oauth_credentials.sql"),
+    ),
+    (
+        "0014_push_subscriptions",
+        include_str!("../../migrations/0014_push_subscriptions.sql"),
     ),
 ];
 
@@ -2757,6 +2762,123 @@ impl OAuthCredsStore for PostgresVectorStore {
                 )
                 .await?;
             rows.iter().map(row_to_oauth_creds).collect()
+        })
+    }
+}
+
+const PUSH_SUB_COLUMNS: &str =
+    "id, subject, endpoint, p256dh, auth, user_agent, created_at, last_used_at";
+
+fn row_to_push_sub(row: &tokio_postgres::Row) -> Result<PushSubscriptionRecord> {
+    Ok(PushSubscriptionRecord {
+        id: row.try_get("id")?,
+        subject: row.try_get("subject")?,
+        endpoint: row.try_get("endpoint")?,
+        p256dh: row.try_get("p256dh")?,
+        auth: row.try_get("auth")?,
+        user_agent: row.try_get("user_agent")?,
+        created_at: row.try_get("created_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+    })
+}
+
+impl PushStore for PostgresVectorStore {
+    fn upsert_push_subscription(
+        &self,
+        sub: UpsertPushSubscription,
+    ) -> Result<PushSubscriptionRecord> {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::now_v7().to_string();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_one(
+                    &format!(
+                        "INSERT INTO push_subscriptions \
+                             ({PUSH_SUB_COLUMNS}) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) \
+                         ON CONFLICT (subject, endpoint) DO UPDATE SET \
+                             p256dh = EXCLUDED.p256dh, \
+                             auth = EXCLUDED.auth, \
+                             user_agent = COALESCE(EXCLUDED.user_agent, push_subscriptions.user_agent) \
+                         RETURNING {PUSH_SUB_COLUMNS}"
+                    ),
+                    &[
+                        &id,
+                        &sub.subject,
+                        &sub.endpoint,
+                        &sub.p256dh,
+                        &sub.auth,
+                        &sub.user_agent,
+                        &sub.now,
+                    ],
+                )
+                .await?;
+            row_to_push_sub(&row)
+        })
+    }
+
+    fn list_push_subscriptions(&self, subject: &str) -> Result<Vec<PushSubscriptionRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    &format!(
+                        "SELECT {PUSH_SUB_COLUMNS} FROM push_subscriptions \
+                         WHERE subject = $1 ORDER BY created_at DESC"
+                    ),
+                    &[&subject],
+                )
+                .await?;
+            rows.iter().map(row_to_push_sub).collect()
+        })
+    }
+
+    fn delete_push_subscription(&self, id: &str, subject: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM push_subscriptions WHERE id = $1 AND subject = $2",
+                    &[&id, &subject],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn delete_push_subscription_by_endpoint(&self, endpoint: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let endpoint = endpoint.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM push_subscriptions WHERE endpoint = $1",
+                    &[&endpoint],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn touch_push_subscription(&self, id: &str, now: i64) -> Result<()> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            client
+                .execute(
+                    "UPDATE push_subscriptions SET last_used_at = $1 WHERE id = $2",
+                    &[&now, &id],
+                )
+                .await?;
+            Ok(())
         })
     }
 }

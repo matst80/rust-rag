@@ -1,15 +1,15 @@
 use crate::{
     config::{
         AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, GoogleOAuthConfig,
-        ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig,
+        ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig, WebPushConfig,
     },
     crypto::EncryptionKey,
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
-        MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, SearchHit, SortOrder,
-        UserEventType, UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW,
+        MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, PushStore, SearchHit,
+        SortOrder, UserEventType, UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW,
         PROFILE_REFRESH_AFTER,
     },
     embedding::EmbeddingService,
@@ -58,6 +58,7 @@ mod tombstones;
 mod ingest_url;
 mod dreaming;
 mod integrations;
+mod push;
 
 pub use analysis::{
     AnalyzeEntryParams, ChatCompletionRequest, StoreAnalysis, chat_completion_text, run_analysis,
@@ -148,6 +149,10 @@ pub struct AppState {
     /// `OAUTH_TOKEN_ENC_KEY` is not configured — integrations endpoints
     /// will refuse to start the OAuth flow in that case.
     pub oauth_token_key: Option<Arc<EncryptionKey>>,
+    /// Per-subject Web Push subscriptions backend. `None` in minimal test
+    /// fixtures or when push is intentionally disabled.
+    pub push: Option<Arc<dyn PushStore>>,
+    pub web_push: Arc<WebPushConfig>,
 }
 
 impl AppState {
@@ -203,7 +208,21 @@ impl AppState {
             oauth_creds: None,
             google_oauth: Arc::new(GoogleOAuthConfig::default()),
             oauth_token_key: None,
+            push: None,
+            web_push: Arc::new(WebPushConfig::default()),
         }
+    }
+
+    /// Wire the Web Push backend + VAPID config. Call once during startup.
+    /// `None` for the store disables all push paths (endpoints will 503).
+    pub fn with_web_push(
+        mut self,
+        config: WebPushConfig,
+        store: Arc<dyn PushStore>,
+    ) -> Self {
+        self.web_push = Arc::new(config);
+        self.push = Some(store);
+        self
     }
 
     /// Wire the per-user OAuth credential store + Google client config +
@@ -312,6 +331,8 @@ impl AppState {
             oauth_creds: None,
             google_oauth: Arc::new(GoogleOAuthConfig::default()),
             oauth_token_key: None,
+            push: None,
+            web_push: Arc::new(WebPushConfig::default()),
         }
     }
 }
@@ -1110,6 +1131,17 @@ pub fn router(state: AppState) -> Router {
             "/api/integrations/google/drive/fetch/{id}",
             get(integrations::google::drive_fetch),
         )
+        .route("/api/push/vapid-public-key", get(push::vapid_public_key))
+        .route("/api/push/subscribe", post(push::subscribe))
+        .route(
+            "/api/push/subscriptions",
+            get(push::list_subscriptions),
+        )
+        .route(
+            "/api/push/subscriptions/{id}",
+            delete(push::delete_subscription),
+        )
+        .route("/api/notify", post(push::notify))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,

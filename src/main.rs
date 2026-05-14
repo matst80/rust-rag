@@ -21,7 +21,10 @@ use rust_rag::{
     build_app,
     config::{AppConfig, OpenAiChatConfig},
     crypto::EncryptionKey,
-    db::{AuthStore, MessageStore, OAuthCredsStore, SqliteVectorStore, UserMemoryStore, VectorStore},
+    db::{
+        AuthStore, MessageStore, OAuthCredsStore, PushStore, SqliteVectorStore, UserMemoryStore,
+        VectorStore,
+    },
     embedding::{Embedder, EmbeddingService},
     manager, ontology,
 };
@@ -285,6 +288,13 @@ async fn main() -> Result<()> {
         config.google_oauth.clone(),
         oauth_creds,
         oauth_token_key,
+    )
+    .with_web_push(
+        config.web_push.clone(),
+        match &pg_store {
+            Some(pg) => pg.clone() as Arc<dyn PushStore>,
+            None => store.clone() as Arc<dyn PushStore>,
+        },
     );
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size

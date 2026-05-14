@@ -255,6 +255,19 @@ pub(super) fn initialize_schema(
              PRIMARY KEY (subject, provider)
          );
          CREATE INDEX IF NOT EXISTS idx_user_oauth_subject ON user_oauth_credentials(subject);
+         CREATE TABLE IF NOT EXISTS push_subscriptions (
+             id TEXT PRIMARY KEY,
+             subject TEXT NOT NULL,
+             endpoint TEXT NOT NULL,
+             p256dh TEXT NOT NULL,
+             auth TEXT NOT NULL,
+             user_agent TEXT,
+             created_at INTEGER NOT NULL,
+             last_used_at INTEGER,
+             UNIQUE (subject, endpoint)
+         );
+         CREATE INDEX IF NOT EXISTS idx_push_subscriptions_subject
+             ON push_subscriptions(subject);
          CREATE TABLE IF NOT EXISTS ontology_predicates (
              name TEXT NOT NULL,
              source_id TEXT NOT NULL DEFAULT '*',

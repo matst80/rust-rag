@@ -9,6 +9,7 @@ pub mod embedding;
 pub mod integrations;
 pub mod manager;
 pub mod mcp;
+pub mod notify;
 pub mod ontology;
 pub mod reranker;
 pub mod validation;

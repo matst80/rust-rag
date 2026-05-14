@@ -14,13 +14,14 @@ use crate::api::{ApiError, AppState, SessionSubject, current_timestamp_millis};
 use crate::db::UpsertOAuthCredentials;
 use axum::{
     Json,
-    extract::{Extension, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, HeaderValue, header},
     response::{IntoResponse, Redirect, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::fill as getrandom_fill;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -79,7 +80,7 @@ pub async fn drive_search(
     let subject = require_subject(&subject)?;
     let client = crate::integrations::google::GoogleClient::for_subject(&state, &subject)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(google_err_to_api)?;
 
     crate::integrations::google::drive::search(
         &client,
@@ -89,7 +90,7 @@ pub async fn drive_search(
     )
     .await
     .map(Json)
-    .map_err(ApiError::Internal)
+    .map_err(google_err_to_api)
 }
 
 pub async fn drive_fetch(
@@ -100,12 +101,23 @@ pub async fn drive_fetch(
     let subject = require_subject(&subject)?;
     let client = crate::integrations::google::GoogleClient::for_subject(&state, &subject)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(google_err_to_api)?;
 
     crate::integrations::google::drive::fetch(&client, &file_id)
         .await
         .map(Json)
-        .map_err(ApiError::Internal)
+        .map_err(google_err_to_api)
+}
+
+fn google_err_to_api(e: crate::integrations::google::client::GoogleClientError) -> ApiError {
+    use crate::integrations::google::client::GoogleClientError as E;
+    match e {
+        E::NotConnected => ApiError::BadRequest(e.to_string()),
+        E::NotConfigured(_) => ApiError::ServiceUnavailable(e.to_string()),
+        E::Refresh(_) => ApiError::BadRequest(e.to_string()),
+        E::Upstream { .. } => ApiError::Internal(anyhow::anyhow!(e.to_string())),
+        E::Other(err) => ApiError::Internal(err),
+    }
 }
 
 #[derive(Debug, Serialize)]

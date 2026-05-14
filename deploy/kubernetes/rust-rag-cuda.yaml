@@ -309,6 +309,17 @@ spec:
             ##     --from-literal=GOOGLE_OAUTH_REDIRECT_URI=https://rag.k6n.net/api/integrations/google/callback
             - secretRef:
                 name: rust-rag-oauth
+            ## VAPID keypair for Web Push (RFC 8030). Server identity, not
+            ## per-user. Create out-of-band:
+            ##   openssl ecparam -name prime256v1 -genkey -noout -out vapid.pem
+            ##   PUB=$(openssl ec -in vapid.pem -pubout -outform DER | tail -c 65 | base64 | tr '/+' '_-' | tr -d '=\n')
+            ##   PRIV=$(openssl ec -in vapid.pem -outform DER | tail -c +8 | head -c 32 | base64 | tr '/+' '_-' | tr -d '=\n')
+            ##   kubectl -n home create secret generic rust-rag-vapid \
+            ##     --from-literal=VAPID_PUBLIC_KEY="$PUB" \
+            ##     --from-literal=VAPID_PRIVATE_KEY="$PRIV" \
+            ##     --from-literal=VAPID_SUBJECT=mailto:you@example.com
+            - secretRef:
+                name: rust-rag-vapid
           volumeMounts:
             - name: data
               mountPath: /app/data

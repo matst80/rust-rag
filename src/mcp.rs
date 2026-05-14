@@ -1797,6 +1797,33 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map(Json)
             .map_err(|e| e.to_string())
     }
+
+    #[tool(description = "Send a Web Push notification to a user's registered devices. Defaults to the caller's subject if `subject` is omitted — that's the right shape for self-reminders. Pass `subject` explicitly to notify a different user (the call still needs the appropriate auth). Use `tag` to deduplicate noisy notifications (re-using a tag replaces the earlier one); `url` is the deep-link the SW opens on click. Returns per-subscription delivery stats, including how many dead subscriptions were pruned. Requires the user to have subscribed via /settings/integrations.")]
+    async fn notify_user(
+        &self,
+        Parameters(params): Parameters<NotifyUserParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::notify::SendResult>, String> {
+        let caller = extract_subject(&ctx).ok();
+        let target = params
+            .subject
+            .clone()
+            .or(caller)
+            .ok_or_else(|| "no target subject (omit only when authenticated)".to_owned())?;
+        let payload = crate::notify::NotificationPayload {
+            title: params.title,
+            body: params.body,
+            url: params.url,
+            tag: params.tag,
+            ttl_secs: params.ttl_secs,
+            urgency: params.urgency,
+            data: params.data,
+        };
+        crate::notify::send(&self.state, &target, &payload)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1833,6 +1860,33 @@ pub struct GmailSearchParams {
 pub struct GmailGetThreadParams {
     /// Thread id (the `thread_id` field from `gmail_search` results).
     pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct NotifyUserParams {
+    /// Target subject. Omit to send to the calling subject (self-reminder).
+    #[serde(default)]
+    pub subject: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// Click-through URL the service worker opens when the notification
+    /// is clicked.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Tag for replacing earlier notifications with the same tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// TTL in seconds the push service holds the message if the device
+    /// is offline. Default 3600.
+    #[serde(default)]
+    pub ttl_secs: Option<u32>,
+    /// "very-low" | "low" | "normal" (default) | "high".
+    #[serde(default)]
+    pub urgency: Option<String>,
+    /// Optional structured data forwarded verbatim to the service worker.
+    #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub data: Option<serde_json::Value>,
 }
 
 /// Pull the authenticated subject out of the MCP request context. The HTTP
