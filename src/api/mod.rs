@@ -589,6 +589,7 @@ pub struct CreateManualEdgeRequest {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateGraphEdgeRequest {
+    pub relation: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
 }
@@ -2897,7 +2898,7 @@ async fn update_graph_edge(
     validate_metadata(&request.metadata)?;
 
     let store = state.store.clone();
-    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.metadata))
+    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.relation, request.metadata))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(map_graph_error)?;
@@ -3511,14 +3512,14 @@ async fn whisper_proxy_task(
     let client_to_upstream = async {
         while let Some(Ok(msg)) = client_stream.next().await {
             let tungsten_msg = match msg {
-                AxumMessage::Text(t) => TungsteniteMessage::Text(t.into()),
-                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.into()),
-                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.into()),
-                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.into()),
+                AxumMessage::Text(t) => TungsteniteMessage::Text(t.to_string()),
+                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.to_vec()),
+                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.to_vec().into()),
+                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.to_vec().into()),
                 AxumMessage::Close(c) => {
                     let close_frame = c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
                         code: cf.code.into(),
-                        reason: cf.reason.into(),
+                        reason: cf.reason.to_string().into(),
                     });
                     TungsteniteMessage::Close(close_frame)
                 }
@@ -3532,14 +3533,14 @@ async fn whisper_proxy_task(
     let upstream_to_client = async {
         while let Some(Ok(msg)) = upstream_stream.next().await {
             let axum_msg = match msg {
-                TungsteniteMessage::Text(t) => AxumMessage::Text(t.into()),
+                TungsteniteMessage::Text(t) => AxumMessage::Text(t.to_string().into()),
                 TungsteniteMessage::Binary(b) => AxumMessage::Binary(b.into()),
                 TungsteniteMessage::Ping(p) => AxumMessage::Ping(p.into()),
                 TungsteniteMessage::Pong(p) => AxumMessage::Pong(p.into()),
                 TungsteniteMessage::Close(c) => {
                     let close_frame = c.map(|cf| axum::extract::ws::CloseFrame {
                         code: cf.code.into(),
-                        reason: cf.reason.into(),
+                        reason: cf.reason.to_string().into(),
                     });
                     AxumMessage::Close(close_frame)
                 }
@@ -4207,6 +4208,8 @@ mod tests {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        analysis: item.analysis.clone(),
+                        updated_at: item.updated_at,
                     });
                 }
             }
@@ -4389,14 +4392,14 @@ mod tests {
 
         fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
             let edges = self.graph_edges.lock().expect("store mutex poisoned");
-            Ok(edges.get(id).cloned())
+            Ok(edges.iter().find(|e| e.id == id).cloned())
         }
 
         fn list_graph_edges(
             &self,
             item_id: Option<&str>,
             edge_type: Option<GraphEdgeType>,
-            status: Option<&str>,
+            _status: Option<&str>,
         ) -> Result<Vec<GraphEdgeRecord>> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");
@@ -4460,7 +4463,7 @@ mod tests {
             Ok(edge)
         }
 
-        fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+        fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");
             }
@@ -4471,6 +4474,7 @@ mod tests {
                 .find(|edge| edge.id == id)
                 .ok_or_else(|| anyhow!("edge {} not found", id))?;
 
+            edge.relation = relation;
             edge.metadata = metadata;
             edge.updated_at += 1;
             Ok(edge.clone())
@@ -5001,6 +5005,7 @@ mod tests {
             metadata: json!({ "label": "match" }),
             source_id: "memory".to_owned(),
             created_at: 1234,
+            updated_at: 1234,
             distance: 0.0125,
             section_path: Vec::new(),
             retrievers: Vec::new(),
@@ -5008,6 +5013,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -5061,6 +5067,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 1,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -5075,6 +5083,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 2,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5102,9 +5112,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        updated_at: 1,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5115,9 +5127,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        updated_at: 2,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5128,9 +5142,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 3,
+                        updated_at: 3,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5142,6 +5158,7 @@ mod tests {
                 metadata: json!({}),
                 source_id: "memory".to_owned(),
                 created_at: 1,
+                updated_at: 1,
                 distance: 0.2,
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
@@ -5149,6 +5166,7 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -5187,6 +5205,7 @@ mod tests {
             metadata: json!({}),
             source_id: "memory".to_owned(),
             created_at: 1,
+            updated_at: 1,
             distance: 0.1,
             section_path: Vec::new(),
             retrievers: Vec::new(),
@@ -5194,6 +5213,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -5219,9 +5239,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        updated_at: 1,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5232,9 +5254,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        updated_at: 2,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5247,6 +5271,7 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 1,
+                    updated_at: 1,
                     distance: 0.1,
                     section_path: Vec::new(),
                     retrievers: Vec::new(),
@@ -5254,6 +5279,7 @@ mod tests {
                     path: None,
                     type_name: None,
                     tags: Vec::new(),
+                    analysis: None,
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -5261,6 +5287,7 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 2,
+                    updated_at: 2,
                     distance: 0.4,
                     section_path: Vec::new(),
                     retrievers: Vec::new(),
@@ -5268,6 +5295,7 @@ mod tests {
                     path: None,
                     type_name: None,
                     tags: Vec::new(),
+                    analysis: None,
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -5309,6 +5337,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 1,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -5323,6 +5353,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 2,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5369,9 +5401,11 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    updated_at: 100,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -5379,9 +5413,11 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    updated_at: 200,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-3".to_owned(),
@@ -5389,9 +5425,11 @@ mod tests {
                     metadata: json!({"kind":"c"}),
                     source_id: "memory".to_owned(),
                     created_at: 300,
+                    updated_at: 300,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
             ],
             vec![
@@ -5472,9 +5510,11 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    updated_at: 100,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -5482,9 +5522,11 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    updated_at: 200,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
             ],
             vec![],
@@ -5537,9 +5579,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             }],
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
@@ -5571,9 +5615,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -5581,9 +5627,11 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                updated_at: 200,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-3".to_owned(),
@@ -5591,9 +5639,11 @@ mod tests {
                 metadata: json!({"kind":"c"}),
                 source_id: "memory".to_owned(),
                 created_at: 300,
+                updated_at: 300,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -5619,9 +5669,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -5629,9 +5681,11 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                updated_at: 200,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -5660,9 +5714,11 @@ mod tests {
             metadata: json!({ "kind": "reference" }),
             source_id: "knowledge".to_owned(),
             created_at: 42,
+            updated_at: 42,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5696,9 +5752,11 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            updated_at: 123,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -5739,9 +5797,11 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            updated_at: 123,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(

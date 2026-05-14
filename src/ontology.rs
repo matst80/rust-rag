@@ -766,6 +766,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }
     }
 

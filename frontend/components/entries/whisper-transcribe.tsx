@@ -24,31 +24,30 @@ export function WhisperTranscribe({ onTranscription }: WhisperTranscribeProps) {
   const { data: whisperOverviewEntry } = useItem("projects_whisper_slask_overview")
 
   const whisperWsUrl = useMemo(() => {
-    // 1. Try to find a ws:// or wss:// URL in the overview or api entry (manual override)
-    const urlRegex = /ws:\/\/[\d.]+(?::\d+)?\/ws/g
-    const overviewMatch = whisperOverviewEntry?.text.match(urlRegex)
-    if (overviewMatch) return overviewMatch[0]
-    
-    const apiMatch = whisperApiEntry?.text.match(urlRegex)
-    if (apiMatch) return apiMatch[0]
-    
-    // 2. Use the backend proxy (relative to the current host)
+    // 1. If we are in the browser, the backend proxy is the most reliable way 
+    // to reach the k8s service from external networks.
     if (typeof window !== "undefined") {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
       const host = window.location.host
       
       // In development, the backend might be on 4001 while frontend is on 3000
-      // If host is localhost:3000, we'll try to guess if we should use 4001 directly
-      // as Next.js rewrites don't always support WebSocket upgrades.
       if (host.includes(":3000")) {
         return `${protocol}//${host.replace(":3000", ":4001")}/api/whisper/ws`
       }
       
       return `${protocol}//${host}/api/whisper/ws`
     }
+
+    // 2. Fallback to extracting from RAG entries (mainly for non-browser or debugging)
+    const urlRegex = /ws[s]?:\/\/[^\s/]+(?:\/ws)?/g
+    const apiMatch = whisperApiEntry?.text.match(urlRegex)
+    if (apiMatch) return apiMatch[0]
+
+    const overviewMatch = whisperOverviewEntry?.text.match(urlRegex)
+    if (overviewMatch) return overviewMatch[0]
     
     // Final fallback
-    return "ws://10.10.3.30:80/ws" 
+    return "ws://whisper-slask-service.llm.svc.cluster.local/ws" 
   }, [whisperApiEntry, whisperOverviewEntry])
 
   const stopRecording = () => {
