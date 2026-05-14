@@ -1102,6 +1102,14 @@ pub fn router(state: AppState) -> Router {
             "/api/integrations/google/disconnect",
             post(integrations::google::disconnect),
         )
+        .route(
+            "/api/integrations/google/drive/search",
+            get(integrations::google::drive_search),
+        )
+        .route(
+            "/api/integrations/google/drive/fetch/{id}",
+            get(integrations::google::drive_fetch),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,

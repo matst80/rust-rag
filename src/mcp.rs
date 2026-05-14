@@ -1760,6 +1760,43 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map(Json)
             .map_err(|e| e.to_string())
     }
+
+    #[tool(description = "Search the caller's Gmail using the standard query operators (https://support.google.com/mail/answer/7190) — e.g. `from:alice@example.com newer_than:30d`, `subject:invoice has:attachment`, `label:starred`. Returns up to `page_size` (1-100, default 20) message summaries with pre-extracted From/To/Subject/Date headers + a snippet. Use `gmail_get_thread` with the `thread_id` from a result to read the full conversation.")]
+    async fn gmail_search(
+        &self,
+        Parameters(params): Parameters<GmailSearchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::gmail::SearchResult>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::gmail::search(
+            &client,
+            &params.query,
+            params.page_size.unwrap_or(20),
+            params.page_token.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Fetch every message in a Gmail thread by thread_id. Bodies are decoded from base64url; text/plain is preferred, text/html falls back to markdown via html2md, each body capped at ~100KB. The `body_source` field tells you which path was taken. Use `gmail_search` first to find thread_ids.")]
+    async fn gmail_get_thread(
+        &self,
+        Parameters(params): Parameters<GmailGetThreadParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::gmail::FetchedThread>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::gmail::get_thread(&client, &params.thread_id)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1778,6 +1815,24 @@ pub struct DriveSearchParams {
 pub struct DriveFetchParams {
     /// Drive file id (the `id` field from `drive_search` results).
     pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GmailSearchParams {
+    /// Gmail query, same operators as the Gmail search bar.
+    pub query: String,
+    /// 1-100, default 20.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// `nextPageToken` from a previous response to paginate.
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GmailGetThreadParams {
+    /// Thread id (the `thread_id` field from `gmail_search` results).
+    pub thread_id: String,
 }
 
 /// Pull the authenticated subject out of the MCP request context. The HTTP

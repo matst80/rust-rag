@@ -22,6 +22,7 @@ import type {
   SchemaDefinition,
   UpsertSchemaRequest,
   DeleteSchemaResponse,
+  DriveSearchResult,
 } from "./types"
 
 // Categories hooks
@@ -241,5 +242,13 @@ export function useDeleteSchema() {
   >(
     "schemas",
     (_, { arg }) => api.schemas.delete(arg.typeName, arg.force ?? false)
+  )
+}
+// Integrations
+export function useDriveSearch(query: string, mimeType?: string) {
+  return useSWR<DriveSearchResult>(
+    query ? ["drive-search", query, mimeType] : null,
+    () => api.integrations.google.drive.search(query, mimeType),
+    { revalidateOnFocus: false }
   )
 }

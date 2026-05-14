@@ -551,3 +551,26 @@ export interface AssistedQueryHandlers {
   onError?: (error: ChatCompletionStreamError) => void
   onDone?: () => void
 }
+export interface DriveFile {
+  id: string
+  name: string
+  mimeType: string
+  modifiedTime?: string
+  webViewLink?: string
+}
+
+export interface DriveSearchResult {
+  files: DriveFile[]
+  query: string
+}
+
+export interface FetchedDriveDoc {
+  id: string
+  name: string
+  mime_type: string
+  returned_mime: string
+  content: string
+  truncated: boolean
+  size_bytes: number
+  web_view_link?: string
+}

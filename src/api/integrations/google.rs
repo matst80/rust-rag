@@ -64,6 +64,50 @@ pub struct StatusResponse {
     pub updated_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriveSearchQuery {
+    pub q: String,
+    pub page_size: Option<u32>,
+    pub mime_type: Option<String>,
+}
+
+pub async fn drive_search(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Query(query): Query<DriveSearchQuery>,
+) -> Result<Json<crate::integrations::google::drive::SearchResult>, ApiError> {
+    let subject = require_subject(&subject)?;
+    let client = crate::integrations::google::GoogleClient::for_subject(&state, &subject)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    crate::integrations::google::drive::search(
+        &client,
+        &query.q,
+        query.page_size.unwrap_or(20),
+        query.mime_type.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(ApiError::Internal)
+}
+
+pub async fn drive_fetch(
+    State(state): State<AppState>,
+    Extension(subject): Extension<SessionSubject>,
+    Path(file_id): Path<String>,
+) -> Result<Json<crate::integrations::google::drive::FetchedDoc>, ApiError> {
+    let subject = require_subject(&subject)?;
+    let client = crate::integrations::google::GoogleClient::for_subject(&state, &subject)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    crate::integrations::google::drive::fetch(&client, &file_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 #[derive(Debug, Serialize)]
 pub struct DisconnectResponse {
     pub deleted: bool,
