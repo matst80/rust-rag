@@ -18,10 +18,13 @@ interface AcpEvent {
 
 interface SessionInfo {
 	acp_session_id: string
-	project_path?: string
-	thread_id?: number | null
-	status?: string
-	agent_command?: string
+	project_path: string
+	thread_id: number
+	status: string
+	name?: string | null
+	agent_command: string
+	agent_name?: string | null
+	available_commands?: { name: string; description?: string; schema?: Record<string, unknown> }[]
 	history?: unknown[]
 }
 
@@ -294,8 +297,37 @@ export function AgentChat() {
 			if (k === "sessionstarted" || k === "session_started" || k === "sessionswitched" || k === "session_switched") {
 				const sid = sessionIdOf(payload)
 				if (sid) {
-					setSessions((prev) => ({ ...prev, [sid]: { acp_session_id: sid, ...payload } }))
+					setSessions((prev) => ({ ...prev, [sid]: { acp_session_id: sid, ...payload } } as Record<string, SessionInfo>))
 					setActiveSessionId((cur) => cur ?? sid)
+				}
+			}
+			
+			if (k === "session_renamed" || k === "sessionrenamed") {
+				const sid = sessionIdOf(payload)
+				const name = payload["name"] as string | undefined
+				if (sid && name) {
+					setSessions((prev) => {
+						const s = prev[sid]
+						if (!s) return prev
+						return { ...prev, [sid]: { ...s, name } }
+					})
+				}
+			}
+
+			if (k === "session_removed" || k === "sessionremoved" || k === "topic_removed" || k === "topicremoved") {
+				const sid = sessionIdOf(payload)
+				if (sid) {
+					setSessions((prev) => {
+						const next = { ...prev }
+						delete next[sid]
+						return next
+					})
+					setEventsBySession((prev) => {
+						const next = { ...prev }
+						delete next[sid]
+						return next
+					})
+					setActiveSessionId((prev) => (prev === sid ? null : prev))
 				}
 			}
 
@@ -479,6 +511,19 @@ export function AgentChat() {
 		setDraft("")
 	}
 
+	const executeCommand = (command: string) => {
+		if (!activeSessionId) return
+		send({ type: "execute_command", session_id: activeSessionId, command })
+	}
+
+	const renameSession = () => {
+		if (!activeSessionId) return
+		const current = sessions[activeSessionId]?.name ?? sessions[activeSessionId]?.project_path?.split("/").pop() ?? ""
+		const name = window.prompt("New session name:", current)
+		if (name === null) return
+		send({ type: "rename_session", session_id: activeSessionId, name: name.trim() })
+	}
+
 	const cancelActive = () => {
 		if (!activeSessionId) return
 		send({ type: "cancel", session_id: activeSessionId })
@@ -660,7 +705,8 @@ export function AgentChat() {
 					)}
 					{sessionList.map((s) => {
 						const isActive = activeSessionId === s.acp_session_id
-						const projectName = s.project_path?.split("/").pop() ?? "(no path)"
+						const projectName = (s.project_path || "").split("/").pop() ?? "(no path)"
+						const displayName = s.name || projectName
 						return (
 							<li key={s.acp_session_id} className="group/row relative">
 								<button
@@ -675,7 +721,7 @@ export function AgentChat() {
 								>
 									<Bot className="size-3.5 shrink-0 mt-0.5" />
 									<div className="flex flex-col min-w-0 flex-1">
-										<span className="truncate text-sm font-medium">{projectName}</span>
+										<span className="truncate text-sm font-medium">{displayName}</span>
 										<span className="truncate text-[10px] font-mono text-muted-foreground">
 											{s.acp_session_id.slice(0, 8)} · {s.agent_command ?? ""}
 										</span>
@@ -700,12 +746,12 @@ export function AgentChat() {
 					<>
 						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
 							<Bot className="size-4 shrink-0 text-muted-foreground" />
-							<div className="flex min-w-0 flex-1 flex-col">
+							<div className="flex min-w-0 flex-1 flex-col cursor-pointer hover:opacity-80" onClick={renameSession} title="Click to rename session">
 								<span className="truncate text-sm font-medium">
-									{active?.project_path ?? activeSessionId}
+									{active?.name || active?.project_path || activeSessionId}
 								</span>
 								<span className="truncate text-[10px] font-mono text-muted-foreground">
-									{activeSessionId} · {active?.agent_command ?? ""}
+									{activeSessionId.slice(0, 8)} · {active?.agent_command ?? ""}
 									<span className={cn("ml-2", sessionStatusColor(active?.status))}>
 										{active?.status ?? ""}
 									</span>
@@ -780,6 +826,23 @@ export function AgentChat() {
 							<div ref={messagesEndRef} />
 						</div>
 
+						{active?.available_commands && active.available_commands.length > 0 && (
+							<div className="flex items-center gap-2 px-4 py-2 border-t border-border/40 bg-muted/5 overflow-x-auto no-scrollbar">
+								<span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground whitespace-nowrap mr-1">Actions:</span>
+								{active.available_commands.map((cmd) => (
+									<button
+										key={cmd.name}
+										type="button"
+										onClick={() => executeCommand(cmd.name)}
+										className="rounded-full bg-primary/5 border border-primary/20 px-3 py-1 text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors whitespace-nowrap"
+										title={cmd.description}
+									>
+										{cmd.name}
+									</button>
+								))}
+							</div>
+						)}
+
 						<form
 							className="border-t border-border p-4"
 							onSubmit={(e) => {
@@ -798,7 +861,7 @@ export function AgentChat() {
 										}
 									}}
 									onClick={() => { console.log(activeSession) }}
-									placeholder={`Message session ${activeSessionId.slice(0, 8)}…`}
+									placeholder={`Message ${active?.name || activeSessionId.slice(0, 8)}…`}
 									rows={1}
 									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
 								/>

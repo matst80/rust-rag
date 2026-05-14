@@ -606,7 +606,34 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 if let Some(sid) = sid {
-                    g.live_sessions.insert(sid, s.clone());
+                    g.live_sessions.insert(sid.clone(), s.clone());
+
+                    // Populate ring buffer from snapshot history
+                    if let Some(hist) = s.get("history").and_then(Value::as_array) {
+                        let mut synthesized = Vec::with_capacity(hist.len());
+                        for h in hist {
+                            g.next_seq += 1;
+                            let seq = g.next_seq;
+                            let h_kind = h.get("type").and_then(Value::as_str).unwrap_or("unknown").to_string();
+                            synthesized.push(AcpEvent {
+                                local_seq: seq,
+                                event_id: h.get("event_id").and_then(Value::as_u64),
+                                kind: h_kind,
+                                session_id: Some(sid.clone()),
+                                payload: h.clone(),
+                                received_at: now_ms,
+                            });
+                        }
+
+                        let buf = g.buffers.entry(sid.clone()).or_default();
+                        buf.events.clear();
+                        for ev in synthesized {
+                            buf.events.push_back(ev);
+                        }
+                        while buf.events.len() > cap {
+                            buf.events.pop_front();
+                        }
+                    }
                 }
             }
         }
@@ -647,6 +674,47 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
             g.live_sessions.remove(sid);
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
+        }
+    }
+
+    if kind == "session_removed" || kind == "sessionremoved" || kind == "topic_removed" || kind == "topicremoved" {
+        if let Some(sid) = &session_id {
+            g.live_sessions.remove(sid);
+            g.buffers.remove(sid);
+            g.pending_permissions
+                .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
+        }
+    }
+
+    if (kind == "session_renamed" || kind == "sessionrenamed")
+        && let Some(sid) = &session_id
+        && let Some(name) = payload.get("name")
+    {
+        if let Some(s) = g.live_sessions.get_mut(sid) {
+            if let Value::Object(map) = s {
+                map.insert("name".to_string(), name.clone());
+            }
+        }
+    }
+
+    // Append to live history for subscriber_snapshot replay
+    if let Some(sid) = &session_id {
+        if let Some(s) = g.live_sessions.get_mut(sid) {
+            if let Value::Object(map) = s {
+                let history = map.entry("history".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(arr) = history {
+                    // Convert our envelope back to the daemon's internal event shape if possible
+                    // but for now just push the payload. The daemon's history is a list of SessionEvent.
+                    let mut item = payload.clone();
+                    if let Value::Object(item_map) = &mut item {
+                        item_map.insert("type".to_string(), Value::String(kind.clone()));
+                    }
+                    arr.push(item);
+                    while arr.len() > cap {
+                        arr.remove(0);
+                    }
+                }
+            }
         }
     }
 
