@@ -6,6 +6,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod embedding;
+pub mod integrations;
 pub mod manager;
 pub mod mcp;
 pub mod ontology;

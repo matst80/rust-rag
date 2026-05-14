@@ -22,12 +22,13 @@ use crate::{
     },
 };
 use rmcp::{
-    ServerHandler,
+    RoleServer, ServerHandler,
     handler::server::{
         router::tool::ToolRouter,
         wrapper::{Json, Parameters},
     },
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager,
@@ -1407,6 +1408,34 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(AcpCommandAck { ok: true, sent: "end_session".into(), context: None }))
     }
 
+    #[tool(description = "Update the session/topic name.")]
+    async fn acp_rename_session(
+        &self,
+        Parameters(params): Parameters<AcpRenameSessionParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "rename_session",
+            serde_json::json!({ "session_id": params.session_id, "name": params.name }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "rename_session".into(), context: None }))
+    }
+
+    #[tool(description = "Removes a topic (and its session history) from the daemon's memory and disk.")]
+    async fn acp_remove_topic(
+        &self,
+        Parameters(params): Parameters<AcpRemoveTopicParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "remove_topic",
+            serde_json::json!({ "thread_id": params.thread_id }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "remove_topic".into(), context: None }))
+    }
+
     #[tool(description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\").")]
     async fn acp_set_permission_mode(
         &self,
@@ -1694,6 +1723,94 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         });
         Ok("Dreaming round started in background.".to_owned())
     }
+
+    #[tool(description = "Search the caller's Google Drive. Requires the user to have connected Google via /settings/integrations. Matches against file names and full-text contents (Drive's `fullText contains` operator). Returns up to `page_size` files (1-100, default 20), most-recently-modified first. Pass `mime_type` to constrain results — e.g. `application/vnd.google-apps.document` for Docs only.")]
+    async fn drive_search(
+        &self,
+        Parameters(params): Parameters<DriveSearchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::drive::SearchResult>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::drive::search(
+            &client,
+            &params.query,
+            params.page_size.unwrap_or(20),
+            params.mime_type.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Fetch a single Google Drive file by id. Google Docs are exported as Markdown, Sheets as TSV, Slides as plain text; other text-y MIME types are downloaded as-is. Binary types are rejected. Bodies are truncated to ~200KB; the response sets `truncated: true` when that limit is hit. Pair with `drive_search` to discover file ids.")]
+    async fn drive_fetch(
+        &self,
+        Parameters(params): Parameters<DriveFetchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::drive::FetchedDoc>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::drive::fetch(&client, &params.file_id)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DriveSearchParams {
+    /// Free-text query passed to Drive's `fullText contains` operator.
+    pub query: String,
+    /// 1-100, default 20.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// Optional MIME-type filter, e.g. `application/vnd.google-apps.document`.
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DriveFetchParams {
+    /// Drive file id (the `id` field from `drive_search` results).
+    pub file_id: String,
+}
+
+/// Pull the authenticated subject out of the MCP request context. The HTTP
+/// transport injects `http::request::Parts` into the request extensions, and
+/// `require_api_key` middleware upstream sets `SessionSubject` on the
+/// underlying axum request. Returns a user-facing error string when no
+/// subject is present (anonymous caller or missing extension).
+fn extract_subject(ctx: &RequestContext<RoleServer>) -> Result<String, String> {
+    let parts = ctx
+        .extensions
+        .get::<axum::http::request::Parts>()
+        .ok_or_else(|| "no http request context".to_owned())?;
+    let subject = parts
+        .extensions
+        .get::<crate::api::SessionSubject>()
+        .and_then(|s| s.0.clone())
+        .ok_or_else(|| "google integration requires an authenticated subject".to_owned())?;
+    Ok(subject)
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpRenameSessionParams {
+    pub session_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpRemoveTopicParams {
+    pub thread_id: i64,
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
