@@ -1,5 +1,6 @@
 mod auth;
 mod graph;
+mod oauth_creds;
 pub mod postgres;
 mod schema;
 
@@ -547,6 +548,47 @@ pub trait AuthStore: Send + Sync {
     /// pending), `false` if already consumed (replay attempt).
     fn consume_auth_code(&self, code: &str, token_id: &str, now: i64) -> Result<bool>;
     fn expire_auth_codes(&self, now: i64) -> Result<usize>;
+}
+
+/// Encrypted OAuth credentials for third-party integrations (Google, etc.).
+/// Tokens are stored already-encrypted by the caller using `crate::crypto`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCredentialsRecord {
+    pub subject: String,
+    pub provider: String,
+    pub access_token_enc: Option<String>,
+    pub refresh_token_enc: Option<String>,
+    pub scopes: String,
+    pub expires_at: Option<i64>,
+    pub account_email: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertOAuthCredentials {
+    pub subject: String,
+    pub provider: String,
+    pub access_token_enc: Option<String>,
+    pub refresh_token_enc: Option<String>,
+    pub scopes: String,
+    pub expires_at: Option<i64>,
+    pub account_email: Option<String>,
+    pub now: i64,
+}
+
+pub trait OAuthCredsStore: Send + Sync {
+    fn upsert_oauth_credentials(
+        &self,
+        creds: UpsertOAuthCredentials,
+    ) -> Result<OAuthCredentialsRecord>;
+    fn find_oauth_credentials(
+        &self,
+        subject: &str,
+        provider: &str,
+    ) -> Result<Option<OAuthCredentialsRecord>>;
+    fn delete_oauth_credentials(&self, subject: &str, provider: &str) -> Result<bool>;
+    fn list_oauth_providers(&self, subject: &str) -> Result<Vec<OAuthCredentialsRecord>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

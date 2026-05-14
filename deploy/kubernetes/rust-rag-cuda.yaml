@@ -299,6 +299,16 @@ spec:
             ##     --from-literal=RAG_DATABASE_URL=postgres://...
             - secretRef:
                 name: rust-rag-postgres
+            ## Google OAuth client + master key for AES-GCM-encrypting
+            ## stored access/refresh tokens. Required for
+            ## /api/integrations/google/*. Create out-of-band:
+            ##   kubectl -n home create secret generic rust-rag-oauth \
+            ##     --from-literal=OAUTH_TOKEN_ENC_KEY=... \
+            ##     --from-literal=GOOGLE_OAUTH_CLIENT_ID=... \
+            ##     --from-literal=GOOGLE_OAUTH_CLIENT_SECRET=... \
+            ##     --from-literal=GOOGLE_OAUTH_REDIRECT_URI=https://rag.k6n.net/api/integrations/google/callback
+            - secretRef:
+                name: rust-rag-oauth
           volumeMounts:
             - name: data
               mountPath: /app/data

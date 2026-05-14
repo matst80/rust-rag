@@ -1,14 +1,16 @@
 use crate::{
     config::{
-        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
-        MultimodalConfig, OntologyConfig, OpenAiChatConfig,
+        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, GoogleOAuthConfig,
+        ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig,
     },
+    crypto::EncryptionKey,
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
-        MessageUpdate, NewMessage, NewUserEvent, SearchHit, SortOrder, UserEventType,
-        UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW, PROFILE_REFRESH_AFTER,
+        MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, SearchHit, SortOrder,
+        UserEventType, UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW,
+        PROFILE_REFRESH_AFTER,
     },
     embedding::EmbeddingService,
 };
@@ -55,6 +57,7 @@ pub mod schemas;
 mod tombstones;
 mod ingest_url;
 mod dreaming;
+mod integrations;
 
 pub use analysis::{
     AnalyzeEntryParams, ChatCompletionRequest, StoreAnalysis, chat_completion_text, run_analysis,
@@ -136,6 +139,15 @@ pub struct AppState {
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
+    /// Per-user encrypted OAuth credentials for external integrations
+    /// (Google, etc.). `None` when no integrations backend is wired in
+    /// (e.g. minimal test fixtures).
+    pub oauth_creds: Option<Arc<dyn OAuthCredsStore>>,
+    pub google_oauth: Arc<GoogleOAuthConfig>,
+    /// Master AES-GCM key used by `oauth_creds`. `None` when
+    /// `OAUTH_TOKEN_ENC_KEY` is not configured — integrations endpoints
+    /// will refuse to start the OAuth flow in that case.
+    pub oauth_token_key: Option<Arc<EncryptionKey>>,
 }
 
 impl AppState {
@@ -188,7 +200,25 @@ impl AppState {
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
+            oauth_creds: None,
+            google_oauth: Arc::new(GoogleOAuthConfig::default()),
+            oauth_token_key: None,
         }
+    }
+
+    /// Wire the per-user OAuth credential store + Google client config +
+    /// master encryption key for the integrations endpoints. Call once
+    /// during startup; safe to omit when integrations are disabled.
+    pub fn with_google_oauth(
+        mut self,
+        config: GoogleOAuthConfig,
+        store: Arc<dyn OAuthCredsStore>,
+        key: Option<Arc<EncryptionKey>>,
+    ) -> Self {
+        self.google_oauth = Arc::new(config);
+        self.oauth_creds = Some(store);
+        self.oauth_token_key = key;
+        self
     }
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
@@ -279,6 +309,9 @@ impl AppState {
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
+            oauth_creds: None,
+            google_oauth: Arc::new(GoogleOAuthConfig::default()),
+            oauth_token_key: None,
         }
     }
 }
@@ -1052,6 +1085,22 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/messages/{id}",
             axum::routing::patch(update_message).delete(delete_message),
+        )
+        .route(
+            "/api/integrations/google/status",
+            get(integrations::google::status),
+        )
+        .route(
+            "/api/integrations/google/start",
+            get(integrations::google::start),
+        )
+        .route(
+            "/api/integrations/google/callback",
+            get(integrations::google::callback),
+        )
+        .route(
+            "/api/integrations/google/disconnect",
+            post(integrations::google::disconnect),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -20,7 +20,8 @@ use rust_rag::{
     api::{AppState, EmbedderHandle},
     build_app,
     config::{AppConfig, OpenAiChatConfig},
-    db::{AuthStore, MessageStore, SqliteVectorStore, UserMemoryStore, VectorStore},
+    crypto::EncryptionKey,
+    db::{AuthStore, MessageStore, OAuthCredsStore, SqliteVectorStore, UserMemoryStore, VectorStore},
     embedding::{Embedder, EmbeddingService},
     manager, ontology,
 };
@@ -246,6 +247,23 @@ async fn main() -> Result<()> {
         Some(pg) => pg.clone(),
         None => store.clone(),
     };
+    // OAuth integrations: per-user encrypted credential vault routes
+    // through Postgres in prod and falls back to SQLite for local dev.
+    let oauth_creds: Arc<dyn OAuthCredsStore> = match &pg_store {
+        Some(pg) => pg.clone(),
+        None => store.clone(),
+    };
+    let oauth_token_key = match config.google_oauth.token_enc_key.as_deref() {
+        Some(raw) => match EncryptionKey::from_secret_str(raw) {
+            Ok(key) => Some(Arc::new(key)),
+            Err(e) => {
+                tracing::warn!(error = %e, "OAUTH_TOKEN_ENC_KEY invalid — google integration disabled");
+                None
+            }
+        },
+        None => None,
+    };
+
     let embedder_handle = Arc::new(EmbedderHandle::loading());
     let state = AppState::new(
         embedder_handle.clone(),
@@ -262,7 +280,12 @@ async fn main() -> Result<()> {
     .with_manager(config.manager.clone())
     .with_analysis(config.analysis.clone())
     .with_dreaming(config.dreaming.clone())
-    .with_ontology(config.ontology.clone(), ontology_llm_config(&config));
+    .with_ontology(config.ontology.clone(), ontology_llm_config(&config))
+    .with_google_oauth(
+        config.google_oauth.clone(),
+        oauth_creds,
+        oauth_token_key,
+    );
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against

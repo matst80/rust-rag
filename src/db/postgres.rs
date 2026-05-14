@@ -12,8 +12,9 @@ use super::{
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
     GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
-    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OntologyPredicateRecord, PathChild, PathRow,
-    SchemaRecord, SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
+    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OAuthCredentialsRecord,
+    OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow, SchemaRecord, SearchHit,
+    SortOrder, UpsertOAuthCredentials, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -169,6 +170,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0012_ontology_directed_pair_unique",
         include_str!("../../migrations/0012_ontology_directed_pair_unique.sql"),
+    ),
+    (
+        "0013_user_oauth_credentials",
+        include_str!("../../migrations/0013_user_oauth_credentials.sql"),
     ),
 ];
 
@@ -2634,6 +2639,124 @@ impl AuthStore for PostgresVectorStore {
                 )
                 .await?;
             Ok(n as usize)
+        })
+    }
+}
+
+const OAUTH_CREDS_COLUMNS: &str =
+    "subject, provider, access_token_enc, refresh_token_enc, scopes, expires_at, account_email, \
+     created_at, updated_at";
+
+fn row_to_oauth_creds(row: &tokio_postgres::Row) -> Result<OAuthCredentialsRecord> {
+    Ok(OAuthCredentialsRecord {
+        subject: row.try_get("subject")?,
+        provider: row.try_get("provider")?,
+        access_token_enc: row.try_get("access_token_enc")?,
+        refresh_token_enc: row.try_get("refresh_token_enc")?,
+        scopes: row.try_get("scopes")?,
+        expires_at: row.try_get("expires_at")?,
+        account_email: row.try_get("account_email")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+impl OAuthCredsStore for PostgresVectorStore {
+    fn upsert_oauth_credentials(
+        &self,
+        creds: UpsertOAuthCredentials,
+    ) -> Result<OAuthCredentialsRecord> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            // Preserve created_at on conflict; refresh_token + account_email
+            // fall back to existing values if the new one is NULL (Google
+            // omits refresh_token on re-consent if granted previously).
+            let row = client
+                .query_one(
+                    &format!(
+                        "INSERT INTO user_oauth_credentials \
+                             ({OAUTH_CREDS_COLUMNS}) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) \
+                         ON CONFLICT (subject, provider) DO UPDATE SET \
+                             access_token_enc = EXCLUDED.access_token_enc, \
+                             refresh_token_enc = COALESCE(EXCLUDED.refresh_token_enc, user_oauth_credentials.refresh_token_enc), \
+                             scopes = EXCLUDED.scopes, \
+                             expires_at = EXCLUDED.expires_at, \
+                             account_email = COALESCE(EXCLUDED.account_email, user_oauth_credentials.account_email), \
+                             updated_at = EXCLUDED.updated_at \
+                         RETURNING {OAUTH_CREDS_COLUMNS}"
+                    ),
+                    &[
+                        &creds.subject,
+                        &creds.provider,
+                        &creds.access_token_enc,
+                        &creds.refresh_token_enc,
+                        &creds.scopes,
+                        &creds.expires_at,
+                        &creds.account_email,
+                        &creds.now,
+                    ],
+                )
+                .await?;
+            row_to_oauth_creds(&row)
+        })
+    }
+
+    fn find_oauth_credentials(
+        &self,
+        subject: &str,
+        provider: &str,
+    ) -> Result<Option<OAuthCredentialsRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        let provider = provider.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_opt(
+                    &format!(
+                        "SELECT {OAUTH_CREDS_COLUMNS} FROM user_oauth_credentials \
+                         WHERE subject = $1 AND provider = $2"
+                    ),
+                    &[&subject, &provider],
+                )
+                .await?;
+            row.as_ref().map(row_to_oauth_creds).transpose()
+        })
+    }
+
+    fn delete_oauth_credentials(&self, subject: &str, provider: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        let provider = provider.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM user_oauth_credentials WHERE subject = $1 AND provider = $2",
+                    &[&subject, &provider],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn list_oauth_providers(&self, subject: &str) -> Result<Vec<OAuthCredentialsRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    &format!(
+                        "SELECT {OAUTH_CREDS_COLUMNS} FROM user_oauth_credentials \
+                         WHERE subject = $1 ORDER BY provider"
+                    ),
+                    &[&subject],
+                )
+                .await?;
+            rows.iter().map(row_to_oauth_creds).collect()
         })
     }
 }

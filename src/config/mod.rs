@@ -46,6 +46,17 @@ fn default_mcp_allowed_hosts() -> Vec<String> {
     vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
 }
 
+fn default_google_scopes() -> Vec<String> {
+    vec![
+        "openid".into(),
+        "email".into(),
+        "profile".into(),
+        "https://www.googleapis.com/auth/gmail.readonly".into(),
+        "https://www.googleapis.com/auth/calendar".into(),
+        "https://www.googleapis.com/auth/drive.readonly".into(),
+    ]
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiChatConfig {
     pub base_url: Option<String>,
@@ -289,6 +300,29 @@ pub struct AppConfig {
     pub acp_ws: AcpWsConfig,
     pub analysis: AnalysisConfig,
     pub dreaming: DreamingConfig,
+    pub google_oauth: GoogleOAuthConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoogleOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Public redirect URL, e.g. `https://rag.example.com/api/integrations/google/callback`.
+    /// Must match what is registered in the GCP OAuth client.
+    pub redirect_uri: Option<String>,
+    /// Master key for AES-GCM-encrypting stored tokens (32 bytes, base64 or hex).
+    pub token_enc_key: Option<String>,
+    /// Default OAuth scopes requested on /start. Comma-separated.
+    pub default_scopes: Vec<String>,
+}
+
+impl GoogleOAuthConfig {
+    pub fn is_configured(&self) -> bool {
+        self.client_id.is_some()
+            && self.client_secret.is_some()
+            && self.redirect_uri.is_some()
+            && self.token_enc_key.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -453,6 +487,14 @@ impl AppConfig {
                     .unwrap_or_else(|_| "memory".to_owned()),
                 target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
                     .unwrap_or_else(|_| "knowledge".to_owned()),
+            },
+            google_oauth: GoogleOAuthConfig {
+                client_id: non_empty_var("GOOGLE_OAUTH_CLIENT_ID"),
+                client_secret: non_empty_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+                redirect_uri: non_empty_var("GOOGLE_OAUTH_REDIRECT_URI"),
+                token_enc_key: non_empty_var("OAUTH_TOKEN_ENC_KEY"),
+                default_scopes: parse_csv_env("GOOGLE_OAUTH_DEFAULT_SCOPES")
+                    .unwrap_or_else(default_google_scopes),
             },
         })
     }
