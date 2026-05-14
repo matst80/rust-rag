@@ -1141,7 +1141,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     ) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            store.list_graph_edges(query.item_id.as_deref(), query.edge_type)
+            store.list_graph_edges(query.item_id.as_deref(), query.edge_type, query.status.as_deref())
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1238,12 +1238,66 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
     ) -> Result<Json<GraphEdgePayload>, String> {
         let store = self.state.store.clone();
         let id = params.id.clone();
+        let relation = params.relation;
         let metadata = params.metadata;
-        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, metadata))
+        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, relation, metadata))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
         Ok(Json(edge.into()))
+    }
+
+    #[tool(description = "List graph edges awaiting review. Returns edges where status is 'suggested'.")]
+    async fn list_ontology_reviews(&self) -> Result<Json<GraphEdgesResponse>, String> {
+        let store = self.state.store.clone();
+        let edges = tokio::task::spawn_blocking(move || {
+            store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        Ok(Json(GraphEdgesResponse {
+            edges: edges.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(description = "Accept a suggested graph edge. Optionally update its relation (predicate).")]
+    async fn accept_ontology_review(
+        &self,
+        Parameters(params): Parameters<AcceptOntologyReviewParams>,
+    ) -> Result<Json<GraphEdgePayload>, String> {
+        let store = self.state.store.clone();
+        let id = params.id.clone();
+        let relation = params.relation;
+        
+        let edge = tokio::task::spawn_blocking(move || {
+            let record = store.get_graph_edge(&id)?
+                .ok_or_else(|| anyhow::anyhow!("edge {} not found", id))?;
+            
+            let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
+            metadata.insert("status".to_string(), serde_json::Value::String("confirmed".to_string()));
+            
+            store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        
+        Ok(Json(edge.into()))
+    }
+
+    #[tool(description = "Reject a suggested graph edge by deleting it.")]
+    async fn reject_ontology_review(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<DeleteResponse>, String> {
+        let store = self.state.store.clone();
+        let target = id.clone();
+        let deleted = tokio::task::spawn_blocking(move || store.delete_graph_edge(&target))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(Json(DeleteResponse { id, deleted }))
     }
 
     #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
@@ -1939,8 +1993,17 @@ pub struct UpsertSchemaParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcceptOntologyReviewParams {
+    pub id: String,
+    #[serde(default)]
+    pub relation: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateGraphEdgeParams {
     pub id: String,
+    #[serde(default)]
+    pub relation: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: serde_json::Value,
 }

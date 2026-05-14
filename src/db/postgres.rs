@@ -1230,7 +1230,7 @@ impl VectorStore for PostgresVectorStore {
             if current_depth >= depth {
                 continue;
             }
-            for edge in self.list_graph_edges(Some(&current_id), edge_type)? {
+            for edge in self.list_graph_edges(Some(&current_id), edge_type, None)? {
                 edge_map.entry(edge.id.clone()).or_insert_with(|| edge.clone());
                 for neighbor_id in [&edge.from_item_id, &edge.to_item_id] {
                     if visited_nodes.len() >= limit || visited_nodes.contains(neighbor_id) {
@@ -1269,14 +1269,33 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_opt(
+                    "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                            directed, metadata, created_at, updated_at \
+                     FROM graph_edges WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            row.as_ref().map(row_to_graph_edge).transpose()
+        })
+    }
+
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>> {
         let pool = self.pool.clone();
         let item_id = item_id.map(str::to_owned);
         let edge_type_str = edge_type.map(GraphEdgeType::as_str).map(str::to_owned);
+        let status = status.map(str::to_owned);
         self.block(async move {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let rows = client
@@ -1286,8 +1305,9 @@ impl VectorStore for PostgresVectorStore {
                      FROM graph_edges \
                      WHERE ($1::TEXT IS NULL OR from_item_id = $1 OR to_item_id = $1) \
                        AND ($2::TEXT IS NULL OR edge_type = $2) \
+                       AND ($3::TEXT IS NULL OR metadata->>'status' = $3) \
                      ORDER BY updated_at DESC, id ASC",
-                    &[&item_id, &edge_type_str],
+                    &[&item_id, &edge_type_str, &status],
                 )
                 .await?;
             rows.iter().map(row_to_graph_edge).collect()
@@ -1586,7 +1606,7 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
         if !self.graph_config.enabled {
             anyhow::bail!("graph features are disabled");
         }
@@ -1605,8 +1625,8 @@ impl VectorStore for PostgresVectorStore {
             }
 
             tx.execute(
-                "UPDATE graph_edges SET metadata = $1, updated_at = $2 WHERE id = $3",
-                &[&metadata, &timestamp, &id],
+                "UPDATE graph_edges SET relation = $1, metadata = $2, updated_at = $3 WHERE id = $4",
+                &[&relation, &metadata, &timestamp, &id],
             )
             .await?;
 

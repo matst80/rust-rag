@@ -152,6 +152,19 @@ impl MultimodalConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct WhisperConfig {
+    pub ws_url: String,
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self {
+            ws_url: "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct OntologyConfig {
     pub enabled: bool,
     pub confidence_threshold: f32,
@@ -302,6 +315,7 @@ pub struct AppConfig {
     pub dreaming: DreamingConfig,
     pub google_oauth: GoogleOAuthConfig,
     pub web_push: WebPushConfig,
+    pub whisper: WhisperConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -519,6 +533,10 @@ impl AppConfig {
                 public_key: non_empty_var("VAPID_PUBLIC_KEY"),
                 private_key: non_empty_var("VAPID_PRIVATE_KEY"),
                 subject: non_empty_var("VAPID_SUBJECT"),
+            },
+            whisper: WhisperConfig {
+                ws_url: env::var("RAG_WHISPER_WS_URL")
+                    .unwrap_or_else(|_| "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned()),
             },
         })
     }

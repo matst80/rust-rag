@@ -153,6 +153,7 @@ pub struct AppState {
     /// fixtures or when push is intentionally disabled.
     pub push: Option<Arc<dyn PushStore>>,
     pub web_push: Arc<WebPushConfig>,
+    pub whisper: Arc<crate::config::WhisperConfig>,
 }
 
 impl AppState {
@@ -210,6 +211,7 @@ impl AppState {
             oauth_token_key: None,
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
+            whisper: Arc::new(crate::config::WhisperConfig::default()),
         }
     }
 
@@ -258,6 +260,11 @@ impl AppState {
 
     pub fn with_manager(mut self, manager: ManagerConfig) -> Self {
         self.manager_runtime = Some(Arc::new(manager));
+        self
+    }
+
+    pub fn with_whisper(mut self, whisper: crate::config::WhisperConfig) -> Self {
+        self.whisper = Arc::new(whisper);
         self
     }
 
@@ -333,6 +340,7 @@ impl AppState {
             oauth_token_key: None,
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
+            whisper: Arc::new(crate::config::WhisperConfig::default()),
         }
     }
 }
@@ -564,6 +572,7 @@ pub struct GraphNeighborhoodQuery {
 pub struct ListGraphEdgesQuery {
     pub item_id: Option<String>,
     pub edge_type: Option<GraphEdgeType>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1095,6 +1104,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/acp/register", post(register_acp_instance))
         .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
         .route("/api/acp/ws", get(acp_ws_proxy))
+        .route("/api/whisper/ws", get(whisper_proxy))
         .route(
             "/api/acp/register/{name}",
             delete(unregister_acp_instance),
@@ -1779,7 +1789,7 @@ pub(crate) async fn search_core(
                 let related = if let Some(top) = filtered.first() {
                     let top_id = top.id.clone();
                     let edges = store
-                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
+                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual), None)
                         .ok()
                         .unwrap_or_default();
 
@@ -2071,8 +2081,10 @@ async fn list_graph_edges(
     let item_id = query.item_id;
     let edge_type = query.edge_type;
 
+    let status = query.status;
+
     let edges =
-        tokio::task::spawn_blocking(move || store.list_graph_edges(item_id.as_deref(), edge_type))
+        tokio::task::spawn_blocking(move || store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref()))
             .await
             .map_err(ApiError::TaskJoin)?
             .map_err(map_graph_error)?;
@@ -3464,6 +3476,87 @@ async fn acp_ws_proxy_task(
     }
 }
 
+/// Proxy WebSocket connection to the Whisper transcription service.
+/// Upstream address is configurable via RAG_WHISPER_WS_URL, defaulting to
+/// the k8s service `whisper-slask-service.llm.svc.cluster.local`.
+async fn whisper_proxy(
+    ws: axum::extract::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, ApiError> {
+    let upstream_url = state.whisper.ws_url.clone();
+    Ok(ws.on_upgrade(move |socket| whisper_proxy_task(socket, upstream_url)))
+}
+
+async fn whisper_proxy_task(
+    client_socket: axum::extract::ws::WebSocket,
+    upstream_url: String,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+    let (mut client_sink, mut client_stream) = client_socket.split();
+
+    let (upstream_socket, _) = match connect_async(&upstream_url).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, url = %upstream_url, "whisper_proxy: failed to connect to upstream");
+            return;
+        }
+    };
+
+    let (mut upstream_sink, mut upstream_stream) = upstream_socket.split();
+
+    let client_to_upstream = async {
+        while let Some(Ok(msg)) = client_stream.next().await {
+            let tungsten_msg = match msg {
+                AxumMessage::Text(t) => TungsteniteMessage::Text(t.into()),
+                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.into()),
+                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.into()),
+                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.into()),
+                AxumMessage::Close(c) => {
+                    let close_frame = c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: cf.code.into(),
+                        reason: cf.reason.into(),
+                    });
+                    TungsteniteMessage::Close(close_frame)
+                }
+            };
+            if upstream_sink.send(tungsten_msg).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let upstream_to_client = async {
+        while let Some(Ok(msg)) = upstream_stream.next().await {
+            let axum_msg = match msg {
+                TungsteniteMessage::Text(t) => AxumMessage::Text(t.into()),
+                TungsteniteMessage::Binary(b) => AxumMessage::Binary(b.into()),
+                TungsteniteMessage::Ping(p) => AxumMessage::Ping(p.into()),
+                TungsteniteMessage::Pong(p) => AxumMessage::Pong(p.into()),
+                TungsteniteMessage::Close(c) => {
+                    let close_frame = c.map(|cf| axum::extract::ws::CloseFrame {
+                        code: cf.code.into(),
+                        reason: cf.reason.into(),
+                    });
+                    AxumMessage::Close(close_frame)
+                }
+                TungsteniteMessage::Frame(_) => continue,
+            };
+            if client_sink.send(axum_msg).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_upstream => (),
+        _ = upstream_to_client => (),
+    }
+}
+
 const MESSAGE_AUTH_METADATA_KEY: &str = "__auth";
 
 fn resolve_message_sender(
@@ -4247,7 +4340,7 @@ mod tests {
                 anyhow::bail!("item {center_id} not found");
             }
 
-            let edges = self.list_graph_edges(None, edge_type)?;
+            let edges = self.list_graph_edges(None, edge_type, None)?;
             let mut visited = HashSet::from([center_id.to_owned()]);
             let mut order = vec![center_id.to_owned()];
             let mut queue = VecDeque::from([(center_id.to_owned(), 0usize)]);
@@ -4294,10 +4387,16 @@ mod tests {
             })
         }
 
+        fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+            let edges = self.graph_edges.lock().expect("store mutex poisoned");
+            Ok(edges.get(id).cloned())
+        }
+
         fn list_graph_edges(
             &self,
             item_id: Option<&str>,
             edge_type: Option<GraphEdgeType>,
+            status: Option<&str>,
         ) -> Result<Vec<GraphEdgeRecord>> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");

@@ -948,14 +948,16 @@ pub trait VectorStore: Send + Sync {
         limit: usize,
         edge_type: Option<GraphEdgeType>,
     ) -> Result<GraphNeighborhood>;
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>>;
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>>;
     fn rebuild_similarity_graph(&self) -> Result<usize>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord>;
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
     fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
     fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
@@ -1810,7 +1812,7 @@ impl VectorStore for SqliteVectorStore {
                 continue;
             }
 
-            for edge in list_graph_edges_internal(connection, Some(&current_id), edge_type)? {
+            for edge in list_graph_edges_internal(connection, Some(&current_id), edge_type, None)? {
                 edge_map
                     .entry(edge.id.clone())
                     .or_insert_with(|| edge.clone());
@@ -1850,10 +1852,29 @@ impl VectorStore for SqliteVectorStore {
         })
     }
 
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("sqlite connection not open"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+             FROM graph_edges WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], map_graph_edge_row)?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>> {
         self.ensure_graph_enabled()?;
         self.ensure_graph_fresh()?;
@@ -1862,7 +1883,7 @@ impl VectorStore for SqliteVectorStore {
         let connection = guard
             .as_ref()
             .context("sqlite connection has already been closed")?;
-        list_graph_edges_internal(connection, item_id, edge_type)
+        list_graph_edges_internal(connection, item_id, edge_type, status)
     }
 
     fn rebuild_similarity_graph(&self) -> Result<usize> {
@@ -1948,7 +1969,7 @@ impl VectorStore for SqliteVectorStore {
             updated_at: timestamp,
         })
     }
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let conn = guard
             .as_ref()
@@ -1958,8 +1979,8 @@ impl VectorStore for SqliteVectorStore {
         let now = current_timestamp_millis()?;
 
         conn.execute(
-            "UPDATE graph_edges SET metadata = ?, updated_at = ? WHERE id = ?",
-            params![metadata_str, now, id],
+            "UPDATE graph_edges SET relation = ?, metadata = ?, updated_at = ? WHERE id = ?",
+            params![relation, metadata_str, now, id],
         )?;
 
         let mut stmt = conn.prepare(
@@ -3578,7 +3599,7 @@ mod tests {
         let rebuilt = store.rebuild_similarity_graph().unwrap();
         assert_eq!(rebuilt, 1);
 
-        let edges = store.list_graph_edges(None, None).unwrap();
+        let edges = store.list_graph_edges(None, None, None).unwrap();
         assert_eq!(edges.len(), 2);
         assert!(
             edges

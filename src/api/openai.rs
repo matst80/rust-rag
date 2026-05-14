@@ -321,6 +321,20 @@ pub(super) async fn chat_completions(
         .filter(|message| message.role != "system")
         .cloned()
         .collect();
+    
+    // Strip trailing empty assistant message which is often used as a placeholder
+    // by frontends but is incompatible with modern thinking/reasoning modes (like Claude 3.7).
+    if let Some(last) = messages.last() {
+        let is_empty = last.role == "assistant" &&
+            last.content.as_ref().map_or(true, |v| v.is_null() || v.as_str().map_or(false, |s| s.is_empty())) &&
+            last.reasoning_content.as_ref().map_or(true, |s| s.is_empty()) &&
+            last.tool_calls.as_ref().map_or(true, |v| v.is_empty());
+        
+        if is_empty {
+            messages.pop();
+        }
+    }
+
     messages.insert(
         0,
         ChatMessage {

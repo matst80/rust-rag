@@ -295,7 +295,8 @@ async fn main() -> Result<()> {
             Some(pg) => pg.clone() as Arc<dyn PushStore>,
             None => store.clone() as Arc<dyn PushStore>,
         },
-    );
+    )
+    .with_whisper(config.whisper.clone());
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
