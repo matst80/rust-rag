@@ -49,6 +49,17 @@ All routes are served by the Axum backend; the frontend mounts them at the same 
 - Source IDs are short namespaces (e.g. \`knowledge\`, \`project:<name>:knowledge\`, \`project:<name>:todos\`).
 - Graph edges can be manual (\`create_manual_edge\`) or similarity-derived.
 
+## CLI
+
+The \`rag\` CLI talks to this server (store, search, ingest URLs/images, attachments, schemas, graph). Download a prebuilt binary, \`chmod +x\`, then run \`rag login\` against this host.
+
+- [rag-linux-amd64](/downloads/rag-linux-amd64)
+- [rag-linux-arm64](/downloads/rag-linux-arm64)
+- [rag-darwin-amd64](/downloads/rag-darwin-amd64)
+- [rag-darwin-arm64](/downloads/rag-darwin-arm64)
+
+Source + docs: \`go-cli/\` in the repo.
+
 ## Links
 
 - GitHub: https://github.com/matst80/rust-rag
@@ -117,6 +128,15 @@ The server exposes the same tool surface used internally for cross-agent collabo
 - 401 with \`WWW-Authenticate\` → token missing/expired. Issue a new one at \`/auth/tokens\`.
 - 403 on a specific message — you're not the message author and not in \`RAG_ADMIN_SUBJECTS\`.
 - Unexpected disconnects → the server keeps the SSE stream open for the lifetime of an MCP session; ensure no proxy in front of it is buffering or timing out below 60s.
+
+## CLI
+
+The \`rag\` CLI mirrors the MCP surface over plain HTTP — useful for shell scripting, CI, or quick checks. After download, run \`rag login\` (device-code flow) and it stores a token in \`~/.config/rust-rag/config.json\`.
+
+- [rag-linux-amd64](/downloads/rag-linux-amd64)
+- [rag-linux-arm64](/downloads/rag-linux-arm64)
+- [rag-darwin-amd64](/downloads/rag-darwin-amd64)
+- [rag-darwin-arm64](/downloads/rag-darwin-arm64)
 
 ## Links
 
