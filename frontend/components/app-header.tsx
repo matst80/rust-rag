@@ -2,16 +2,13 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useState } from "react"
 import useSWR from "swr"
-import { ManagerMemoryPanel } from "@/components/manager/memory-panel"
 import {
   BookOpen,
   Brain,
   FolderOpen,
   FolderTree,
   GitBranch,
-  Github,
   Hash,
   ImagePlus,
   KeyRound,
@@ -19,10 +16,7 @@ import {
   LogOut,
   MessageSquare,
   Search,
-  Sparkles,
   Terminal,
-  User,
-  Cog,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme-toggle"
