@@ -255,13 +255,18 @@ export function AgentChat() {
 					: []
 				setProjects(projectList)
 				const map: Record<string, SessionInfo> = {}
-				const ingestedBySession: Record<string, AcpEvent[]> = {}
+				const snapshotHistory: Record<string, AcpEvent[]> = {}
+				const now = Date.now()
 				for (const s of list) {
 					if (!s?.acp_session_id) continue
 					map[s.acp_session_id] = s
 					const hist = Array.isArray(s.history) ? s.history : []
 					const arr: AcpEvent[] = []
-					for (const h of hist) {
+					// History items are in chronological order. We assign decreasing 
+					// receivedAt relative to 'now' so they stay in order but 
+					// precede any future live events.
+					for (let i = 0; i < hist.length; i++) {
+						const h = hist[i]
 						if (!h || typeof h !== "object") continue
 						const hp = h as Record<string, unknown>
 						const hkind = typeof hp.type === "string" ? hp.type : "unknown"
@@ -269,18 +274,25 @@ export function AgentChat() {
 						arr.push({
 							kind: hkind,
 							payload: hp,
-							receivedAt: Date.now(),
+							receivedAt: now - (hist.length - i) * 10,
 							localSeq: seqRef.current,
 						})
 					}
-					if (arr.length > 0) ingestedBySession[s.acp_session_id] = arr
+					if (arr.length > 0) snapshotHistory[s.acp_session_id] = arr
 				}
 				setSessions(map)
-				if (Object.keys(ingestedBySession).length > 0) {
+				if (Object.keys(snapshotHistory).length > 0) {
 					setEventsBySession((prev) => {
 						const next = { ...prev }
-						for (const [sid, arr] of Object.entries(ingestedBySession)) {
-							const merged = [...(next[sid] ?? []), ...arr]
+						for (const [sid, histArr] of Object.entries(snapshotHistory)) {
+							const existing = next[sid] ?? []
+							// Filter out existing events that have the same event_id as something in histArr
+							const seenIds = new Set(histArr.map(h => h.payload.event_id).filter(id => id != null))
+							const live = existing.filter(e => e.payload.event_id == null || !seenIds.has(e.payload.event_id))
+							
+							// To be safe, if history is large, we just take it as the source of truth
+							// and append any live events that happened after the last history event.
+							const merged = [...histArr, ...live]
 							if (merged.length > 500) merged.splice(0, merged.length - 500)
 							next[sid] = merged
 						}
@@ -357,6 +369,40 @@ export function AgentChat() {
 					} catch {
 						// ignore
 					}
+				}
+			}
+
+			if (k === "agent_update" || k === "agentupdate") {
+				const sid = sessionIdOf(payload)
+				if (sid) {
+					const inner = (payload.event as Record<string, unknown>) ?? payload
+					const suRaw = inner.sessionUpdate
+					const variant = typeof suRaw === "string" ? suRaw : ((suRaw as Record<string, unknown>)?.type as string) ?? ""
+					
+					if (variant === "working" || variant === "agent_message_chunk" || variant === "agent_thought_chunk" || variant === "tool_call") {
+						setSessions((prev) => {
+							const s = prev[sid]
+							if (!s || s.status === "Working") return prev
+							return { ...prev, [sid]: { ...s, status: "Working" } }
+						})
+					} else if (variant === "finished" || variant === "ready" || variant === "idle" || variant === "error") {
+						setSessions((prev) => {
+							const s = prev[sid]
+							if (!s || s.status === "Idle") return prev
+							return { ...prev, [sid]: { ...s, status: "Idle" } }
+						})
+					}
+				}
+			}
+
+			if (k === "user_prompt" || k === "userprompt") {
+				const sid = sessionIdOf(payload)
+				if (sid) {
+					setSessions((prev) => {
+						const s = prev[sid]
+						if (!s || s.status === "Prompting") return prev
+						return { ...prev, [sid]: { ...s, status: "Prompting" } }
+					})
 				}
 			}
 
@@ -508,12 +554,22 @@ export function AgentChat() {
 	const sendPrompt = () => {
 		if (!activeSessionId || !draft.trim()) return
 		send({ type: "send_prompt", session_id: activeSessionId, text: draft })
+		setSessions(prev => {
+			const s = prev[activeSessionId]
+			if (!s) return prev
+			return { ...prev, [activeSessionId]: { ...s, status: "Prompting" } }
+		})
 		setDraft("")
 	}
 
 	const executeCommand = (command: string) => {
 		if (!activeSessionId) return
 		send({ type: "execute_command", session_id: activeSessionId, command })
+		setSessions(prev => {
+			const s = prev[activeSessionId]
+			if (!s) return prev
+			return { ...prev, [activeSessionId]: { ...s, status: "Prompting" } }
+		})
 	}
 
 	const renameSession = () => {
@@ -746,10 +802,13 @@ export function AgentChat() {
 					<>
 						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
 							<Bot className="size-4 shrink-0 text-muted-foreground" />
-							<div className="flex min-w-0 flex-1 flex-col cursor-pointer hover:opacity-80" onClick={renameSession} title="Click to rename session">
-								<span className="truncate text-sm font-medium">
-									{active?.name || active?.project_path || activeSessionId}
-								</span>
+							<div className="flex min-w-0 flex-1 flex-col cursor-pointer group/title" onClick={renameSession} title="Click to rename session">
+								<div className="flex items-center gap-1.5 min-w-0">
+									<span className="truncate text-sm font-medium">
+										{active?.name || active?.project_path || activeSessionId}
+									</span>
+									<Plus className="size-3 text-muted-foreground/0 group-hover/title:text-muted-foreground transition-colors rotate-45" />
+								</div>
 								<span className="truncate text-[10px] font-mono text-muted-foreground">
 									{activeSessionId.slice(0, 8)} · {active?.agent_command ?? ""}
 									<span className={cn("ml-2", sessionStatusColor(active?.status))}>
@@ -775,21 +834,25 @@ export function AgentChat() {
 							>
 								<Link2 className="size-4" />
 							</button>
-							<button
-								type="button"
-								onClick={cancelActive}
-								className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-								title="Cancel current prompt"
-								aria-label="Cancel"
-							>
-								<Square className="size-4" />
-							</button>
+
+							{(active?.status === "Prompting" || active?.status === "Working") && (
+								<button
+									type="button"
+									onClick={cancelActive}
+									className="flex size-8 items-center justify-center rounded-md text-red-500 hover:bg-red-500/10"
+									title="Stop Agent"
+									aria-label="Stop Agent"
+								>
+									<Square className="size-3.5 fill-current" />
+								</button>
+							)}
+
 							<button
 								type="button"
 								onClick={endActive}
-								className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-								title="End session"
-								aria-label="End session"
+								className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
+								title="End Session"
+								aria-label="End Session"
 							>
 								<X className="size-4" />
 							</button>
@@ -827,16 +890,19 @@ export function AgentChat() {
 						</div>
 
 						{active?.available_commands && active.available_commands.length > 0 && (
-							<div className="flex items-center gap-2 px-4 py-2 border-t border-border/40 bg-muted/5 overflow-x-auto no-scrollbar">
-								<span className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground whitespace-nowrap mr-1">Actions:</span>
+							<div className="flex items-center gap-2 px-4 py-2.5 border-t border-border/40 bg-muted/5 overflow-x-auto no-scrollbar scroll-smooth">
+								<span className="text-[9px] font-bold uppercase tracking-[0.15em] text-muted-foreground/60 whitespace-nowrap mr-2">
+									Commands
+								</span>
 								{active.available_commands.map((cmd) => (
 									<button
 										key={cmd.name}
 										type="button"
 										onClick={() => executeCommand(cmd.name)}
-										className="rounded-full bg-primary/5 border border-primary/20 px-3 py-1 text-[10px] font-medium text-primary hover:bg-primary/10 transition-colors whitespace-nowrap"
+										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-all hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
 										title={cmd.description}
 									>
+										<Plus className="size-3 opacity-50" />
 										{cmd.name}
 									</button>
 								))}

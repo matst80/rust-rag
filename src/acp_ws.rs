@@ -27,7 +27,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tracing::{debug, info, warn};
 
-use crate::config::AcpWsConfig;
+pub use crate::config::AcpWsConfig;
 
 fn is_snapshot(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("Snapshot")
@@ -43,6 +43,12 @@ fn is_session_ended(kind: &str) -> bool {
 }
 fn is_session_started(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("SessionStarted") || kind == "session_started"
+}
+fn is_session_renamed(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("SessionRenamed") || kind == "session_renamed"
+}
+fn is_topic_removed(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("TopicRemoved") || kind == "topic_removed"
 }
 
 /// One event captured from the WS stream.
@@ -642,7 +648,7 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         }
     }
 
-    if is_session_started(&kind)
+    if (is_session_started(&kind) || is_session_renamed(&kind))
         && let Some(sid) = &session_id
     {
         // Capture as much SessionInfo as the event carries. Daemon emits a
@@ -677,22 +683,24 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         }
     }
 
-    if kind == "session_removed" || kind == "sessionremoved" || kind == "topic_removed" || kind == "topicremoved" {
+    if is_topic_removed(&kind) {
         if let Some(sid) = &session_id {
             g.live_sessions.remove(sid);
             g.buffers.remove(sid);
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
-        }
-    }
-
-    if (kind == "session_renamed" || kind == "sessionrenamed")
-        && let Some(sid) = &session_id
-        && let Some(name) = payload.get("name")
-    {
-        if let Some(s) = g.live_sessions.get_mut(sid) {
-            if let Value::Object(map) = s {
-                map.insert("name".to_string(), name.clone());
+        } else if let Some(tid) = payload.get("thread_id").and_then(Value::as_i64) {
+            let mut to_remove = Vec::new();
+            for (sid, info) in &g.live_sessions {
+                if info.get("thread_id").and_then(Value::as_i64) == Some(tid) {
+                    to_remove.push(sid.clone());
+                }
+            }
+            for sid in to_remove {
+                g.live_sessions.remove(&sid);
+                g.buffers.remove(&sid);
+                g.pending_permissions
+                    .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
             }
         }
     }

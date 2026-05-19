@@ -24,9 +24,10 @@ import { ArrowDownAZ, ArrowUpAZ, SortAsc, SortDesc } from "lucide-react"
 interface EdgeReviewListProps {
   onReviewComplete?: () => void
   onFocusNode?: (nodeId: string) => void
+  onFocusEdge?: (edgeId: string, nodeId: string) => void
 }
 
-export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewListProps) {
+export function EdgeReviewList({ onReviewComplete, onFocusNode, onFocusEdge }: EdgeReviewListProps) {
   const [edges, setEdges] = React.useState<Edge[]>([])
   const [itemTitles, setItemTitles] = React.useState<Record<string, string>>({})
   const [loading, setLoading] = React.useState(true)
@@ -432,6 +433,17 @@ export function EdgeReviewList({ onReviewComplete, onFocusNode }: EdgeReviewList
 
                       {/* Actions */}
                       <div className="flex flex-col gap-2 shrink-0 border-l border-border/40 pl-3">
+                        {onFocusEdge && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-primary hover:bg-primary/10 rounded-full"
+                            onClick={() => onFocusEdge(edge.id, edge.source_id)}
+                            title="Focus edge in graph"
+                          >
+                            <Network className="h-4 w-4" />
+                          </Button>
+                        )}
                         <Button
                           size="icon"
                           variant="ghost"

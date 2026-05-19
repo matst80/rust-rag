@@ -12,8 +12,10 @@ use super::{
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
     GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
     MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
-    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OntologyPredicateRecord, PathChild, PathRow,
-    SchemaRecord, SearchHit, SortOrder, UserMemoryStore, UserProfile, VectorStore,
+    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OAuthCredentialsRecord,
+    OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow, PushStore,
+    PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder, UpsertOAuthCredentials,
+    UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -169,6 +171,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0012_ontology_directed_pair_unique",
         include_str!("../../migrations/0012_ontology_directed_pair_unique.sql"),
+    ),
+    (
+        "0013_user_oauth_credentials",
+        include_str!("../../migrations/0013_user_oauth_credentials.sql"),
+    ),
+    (
+        "0014_push_subscriptions",
+        include_str!("../../migrations/0014_push_subscriptions.sql"),
     ),
 ];
 
@@ -1220,7 +1230,7 @@ impl VectorStore for PostgresVectorStore {
             if current_depth >= depth {
                 continue;
             }
-            for edge in self.list_graph_edges(Some(&current_id), edge_type)? {
+            for edge in self.list_graph_edges(Some(&current_id), edge_type, None)? {
                 edge_map.entry(edge.id.clone()).or_insert_with(|| edge.clone());
                 for neighbor_id in [&edge.from_item_id, &edge.to_item_id] {
                     if visited_nodes.len() >= limit || visited_nodes.contains(neighbor_id) {
@@ -1259,14 +1269,33 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_opt(
+                    "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                            directed, metadata, created_at, updated_at \
+                     FROM graph_edges WHERE id = $1",
+                    &[&id],
+                )
+                .await?;
+            row.as_ref().map(row_to_graph_edge).transpose()
+        })
+    }
+
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>> {
         let pool = self.pool.clone();
         let item_id = item_id.map(str::to_owned);
         let edge_type_str = edge_type.map(GraphEdgeType::as_str).map(str::to_owned);
+        let status = status.map(str::to_owned);
         self.block(async move {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let rows = client
@@ -1276,8 +1305,9 @@ impl VectorStore for PostgresVectorStore {
                      FROM graph_edges \
                      WHERE ($1::TEXT IS NULL OR from_item_id = $1 OR to_item_id = $1) \
                        AND ($2::TEXT IS NULL OR edge_type = $2) \
+                       AND ($3::TEXT IS NULL OR metadata->>'status' = $3) \
                      ORDER BY updated_at DESC, id ASC",
-                    &[&item_id, &edge_type_str],
+                    &[&item_id, &edge_type_str, &status],
                 )
                 .await?;
             rows.iter().map(row_to_graph_edge).collect()
@@ -1576,7 +1606,7 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
         if !self.graph_config.enabled {
             anyhow::bail!("graph features are disabled");
         }
@@ -1595,8 +1625,8 @@ impl VectorStore for PostgresVectorStore {
             }
 
             tx.execute(
-                "UPDATE graph_edges SET metadata = $1, updated_at = $2 WHERE id = $3",
-                &[&metadata, &timestamp, &id],
+                "UPDATE graph_edges SET relation = $1, metadata = $2, updated_at = $3 WHERE id = $4",
+                &[&relation, &metadata, &timestamp, &id],
             )
             .await?;
 
@@ -2634,6 +2664,241 @@ impl AuthStore for PostgresVectorStore {
                 )
                 .await?;
             Ok(n as usize)
+        })
+    }
+}
+
+const OAUTH_CREDS_COLUMNS: &str =
+    "subject, provider, access_token_enc, refresh_token_enc, scopes, expires_at, account_email, \
+     created_at, updated_at";
+
+fn row_to_oauth_creds(row: &tokio_postgres::Row) -> Result<OAuthCredentialsRecord> {
+    Ok(OAuthCredentialsRecord {
+        subject: row.try_get("subject")?,
+        provider: row.try_get("provider")?,
+        access_token_enc: row.try_get("access_token_enc")?,
+        refresh_token_enc: row.try_get("refresh_token_enc")?,
+        scopes: row.try_get("scopes")?,
+        expires_at: row.try_get("expires_at")?,
+        account_email: row.try_get("account_email")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+impl OAuthCredsStore for PostgresVectorStore {
+    fn upsert_oauth_credentials(
+        &self,
+        creds: UpsertOAuthCredentials,
+    ) -> Result<OAuthCredentialsRecord> {
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            // Preserve created_at on conflict; refresh_token + account_email
+            // fall back to existing values if the new one is NULL (Google
+            // omits refresh_token on re-consent if granted previously).
+            let row = client
+                .query_one(
+                    &format!(
+                        "INSERT INTO user_oauth_credentials \
+                             ({OAUTH_CREDS_COLUMNS}) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) \
+                         ON CONFLICT (subject, provider) DO UPDATE SET \
+                             access_token_enc = EXCLUDED.access_token_enc, \
+                             refresh_token_enc = COALESCE(EXCLUDED.refresh_token_enc, user_oauth_credentials.refresh_token_enc), \
+                             scopes = EXCLUDED.scopes, \
+                             expires_at = EXCLUDED.expires_at, \
+                             account_email = COALESCE(EXCLUDED.account_email, user_oauth_credentials.account_email), \
+                             updated_at = EXCLUDED.updated_at \
+                         RETURNING {OAUTH_CREDS_COLUMNS}"
+                    ),
+                    &[
+                        &creds.subject,
+                        &creds.provider,
+                        &creds.access_token_enc,
+                        &creds.refresh_token_enc,
+                        &creds.scopes,
+                        &creds.expires_at,
+                        &creds.account_email,
+                        &creds.now,
+                    ],
+                )
+                .await?;
+            row_to_oauth_creds(&row)
+        })
+    }
+
+    fn find_oauth_credentials(
+        &self,
+        subject: &str,
+        provider: &str,
+    ) -> Result<Option<OAuthCredentialsRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        let provider = provider.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_opt(
+                    &format!(
+                        "SELECT {OAUTH_CREDS_COLUMNS} FROM user_oauth_credentials \
+                         WHERE subject = $1 AND provider = $2"
+                    ),
+                    &[&subject, &provider],
+                )
+                .await?;
+            row.as_ref().map(row_to_oauth_creds).transpose()
+        })
+    }
+
+    fn delete_oauth_credentials(&self, subject: &str, provider: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        let provider = provider.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM user_oauth_credentials WHERE subject = $1 AND provider = $2",
+                    &[&subject, &provider],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn list_oauth_providers(&self, subject: &str) -> Result<Vec<OAuthCredentialsRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    &format!(
+                        "SELECT {OAUTH_CREDS_COLUMNS} FROM user_oauth_credentials \
+                         WHERE subject = $1 ORDER BY provider"
+                    ),
+                    &[&subject],
+                )
+                .await?;
+            rows.iter().map(row_to_oauth_creds).collect()
+        })
+    }
+}
+
+const PUSH_SUB_COLUMNS: &str =
+    "id, subject, endpoint, p256dh, auth, user_agent, created_at, last_used_at";
+
+fn row_to_push_sub(row: &tokio_postgres::Row) -> Result<PushSubscriptionRecord> {
+    Ok(PushSubscriptionRecord {
+        id: row.try_get("id")?,
+        subject: row.try_get("subject")?,
+        endpoint: row.try_get("endpoint")?,
+        p256dh: row.try_get("p256dh")?,
+        auth: row.try_get("auth")?,
+        user_agent: row.try_get("user_agent")?,
+        created_at: row.try_get("created_at")?,
+        last_used_at: row.try_get("last_used_at")?,
+    })
+}
+
+impl PushStore for PostgresVectorStore {
+    fn upsert_push_subscription(
+        &self,
+        sub: UpsertPushSubscription,
+    ) -> Result<PushSubscriptionRecord> {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::now_v7().to_string();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let row = client
+                .query_one(
+                    &format!(
+                        "INSERT INTO push_subscriptions \
+                             ({PUSH_SUB_COLUMNS}) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) \
+                         ON CONFLICT (subject, endpoint) DO UPDATE SET \
+                             p256dh = EXCLUDED.p256dh, \
+                             auth = EXCLUDED.auth, \
+                             user_agent = COALESCE(EXCLUDED.user_agent, push_subscriptions.user_agent) \
+                         RETURNING {PUSH_SUB_COLUMNS}"
+                    ),
+                    &[
+                        &id,
+                        &sub.subject,
+                        &sub.endpoint,
+                        &sub.p256dh,
+                        &sub.auth,
+                        &sub.user_agent,
+                        &sub.now,
+                    ],
+                )
+                .await?;
+            row_to_push_sub(&row)
+        })
+    }
+
+    fn list_push_subscriptions(&self, subject: &str) -> Result<Vec<PushSubscriptionRecord>> {
+        let pool = self.pool.clone();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    &format!(
+                        "SELECT {PUSH_SUB_COLUMNS} FROM push_subscriptions \
+                         WHERE subject = $1 ORDER BY created_at DESC"
+                    ),
+                    &[&subject],
+                )
+                .await?;
+            rows.iter().map(row_to_push_sub).collect()
+        })
+    }
+
+    fn delete_push_subscription(&self, id: &str, subject: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let subject = subject.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM push_subscriptions WHERE id = $1 AND subject = $2",
+                    &[&id, &subject],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn delete_push_subscription_by_endpoint(&self, endpoint: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let endpoint = endpoint.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let n = client
+                .execute(
+                    "DELETE FROM push_subscriptions WHERE endpoint = $1",
+                    &[&endpoint],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn touch_push_subscription(&self, id: &str, now: i64) -> Result<()> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            client
+                .execute(
+                    "UPDATE push_subscriptions SET last_used_at = $1 WHERE id = $2",
+                    &[&now, &id],
+                )
+                .await?;
+            Ok(())
         })
     }
 }

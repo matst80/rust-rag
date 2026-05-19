@@ -372,7 +372,7 @@ async fn process_item(
     let known_pairs: std::collections::HashSet<String> =
         tokio::task::spawn_blocking(move || -> Result<std::collections::HashSet<String>> {
             let edges = store_clone
-                .list_graph_edges(Some(&target_id_for_edges), Some(crate::db::GraphEdgeType::Manual))?;
+                .list_graph_edges(Some(&target_id_for_edges), Some(crate::db::GraphEdgeType::Manual), None)?;
             let mut out = std::collections::HashSet::new();
             for e in edges {
                 if e.metadata.get("source").and_then(|v| v.as_str()) != Some("ontology_worker") {
@@ -766,6 +766,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }
     }
 

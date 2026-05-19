@@ -46,6 +46,17 @@ fn default_mcp_allowed_hosts() -> Vec<String> {
     vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]
 }
 
+fn default_google_scopes() -> Vec<String> {
+    vec![
+        "openid".into(),
+        "email".into(),
+        "profile".into(),
+        "https://www.googleapis.com/auth/gmail.readonly".into(),
+        "https://www.googleapis.com/auth/calendar".into(),
+        "https://www.googleapis.com/auth/drive.readonly".into(),
+    ]
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiChatConfig {
     pub base_url: Option<String>,
@@ -137,6 +148,19 @@ impl Default for MultimodalConfig {
 impl MultimodalConfig {
     pub fn is_configured(&self) -> bool {
         self.base_url.is_some()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WhisperConfig {
+    pub ws_url: String,
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self {
+            ws_url: "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned(),
+        }
     }
 }
 
@@ -289,6 +313,49 @@ pub struct AppConfig {
     pub acp_ws: AcpWsConfig,
     pub analysis: AnalysisConfig,
     pub dreaming: DreamingConfig,
+    pub google_oauth: GoogleOAuthConfig,
+    pub web_push: WebPushConfig,
+    pub whisper: WhisperConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GoogleOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Public redirect URL, e.g. `https://rag.example.com/api/integrations/google/callback`.
+    /// Must match what is registered in the GCP OAuth client.
+    pub redirect_uri: Option<String>,
+    /// Master key for AES-GCM-encrypting stored tokens (32 bytes, base64 or hex).
+    pub token_enc_key: Option<String>,
+    /// Default OAuth scopes requested on /start. Comma-separated.
+    pub default_scopes: Vec<String>,
+}
+
+impl GoogleOAuthConfig {
+    pub fn is_configured(&self) -> bool {
+        self.client_id.is_some()
+            && self.client_secret.is_some()
+            && self.redirect_uri.is_some()
+            && self.token_enc_key.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebPushConfig {
+    /// VAPID public key (base64-url, uncompressed P-256 point — what the
+    /// browser's `pushManager.subscribe()` accepts as `applicationServerKey`).
+    pub public_key: Option<String>,
+    /// VAPID private key (base64-url, 32-byte P-256 scalar).
+    pub private_key: Option<String>,
+    /// `mailto:` URI or origin URL embedded in VAPID JWTs — push services
+    /// use it to contact the operator if your traffic misbehaves.
+    pub subject: Option<String>,
+}
+
+impl WebPushConfig {
+    pub fn is_configured(&self) -> bool {
+        self.public_key.is_some() && self.private_key.is_some() && self.subject.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -453,6 +520,23 @@ impl AppConfig {
                     .unwrap_or_else(|_| "memory".to_owned()),
                 target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
                     .unwrap_or_else(|_| "knowledge".to_owned()),
+            },
+            google_oauth: GoogleOAuthConfig {
+                client_id: non_empty_var("GOOGLE_OAUTH_CLIENT_ID"),
+                client_secret: non_empty_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+                redirect_uri: non_empty_var("GOOGLE_OAUTH_REDIRECT_URI"),
+                token_enc_key: non_empty_var("OAUTH_TOKEN_ENC_KEY"),
+                default_scopes: parse_csv_env("GOOGLE_OAUTH_DEFAULT_SCOPES")
+                    .unwrap_or_else(default_google_scopes),
+            },
+            web_push: WebPushConfig {
+                public_key: non_empty_var("VAPID_PUBLIC_KEY"),
+                private_key: non_empty_var("VAPID_PRIVATE_KEY"),
+                subject: non_empty_var("VAPID_SUBJECT"),
+            },
+            whisper: WhisperConfig {
+                ws_url: env::var("RAG_WHISPER_WS_URL")
+                    .unwrap_or_else(|_| "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned()),
             },
         })
     }

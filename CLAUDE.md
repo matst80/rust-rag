@@ -4,7 +4,7 @@ Guidance for Claude Code (and other agents) working in this repository.
 
 ## What this repo is
 
-`rust-rag` — self-hosted retrieval + agent-collaboration backend. Axum HTTP API, SQLite + `sqlite-vec`, ONNX embeddings, MCP surface (in-process at `/mcp`), Next.js frontend in `frontend/`.
+`rust-rag` — self-hosted retrieval + agent-collaboration backend. Axum HTTP API, Postgres + `pgvector` in prod (SQLite + `sqlite-vec` for local dev), ONNX embeddings, MCP surface (in-process at `/mcp`), Next.js frontend in `frontend/`.
 
 Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`). Read it before non-trivial work.
 
@@ -32,7 +32,11 @@ make k8s-apply    # apply k8s manifests
 
 ## Prod topology
 
-Backend runs in-cluster as the CUDA Deployment (`deploy/kubernetes/rust-rag-cuda.yaml`), pinned to the GPU node `midi` via the NVIDIA device plugin. The Service `rag-service-cuda` fronts it; ingresses point there. SQLite lives on PVC `rust-rag-cuda-data` mounted at `/app/data` (file: `/app/data/rag.db`).
+Backend runs in-cluster as the CUDA Deployment (`deploy/kubernetes/rust-rag-cuda.yaml`), pinned to the GPU node `midi` via the NVIDIA device plugin. The Service `rag-service-cuda` fronts it; ingresses point there.
+
+**Storage**: Postgres + `pgvector` is the authoritative store in prod. The connection string is injected via the `rust-rag-postgres` Secret as `RAG_DATABASE_URL`. When that env var is set, vector/message/auth/user-memory/oauth-credentials all route to Postgres; the SQLite handle at `/app/data/rag.db` (PVC `rust-rag-cuda-data`) is still opened on boot for backward-compat but is not the source of truth. Migrations are embedded (`migrations/*.sql`) and run automatically at startup.
+
+For local development without `RAG_DATABASE_URL`, all stores fall back to SQLite — schema is identical in shape but kept in-sync manually between `src/db/schema.rs` and `migrations/*.sql`.
 
 The legacy bare-metal host (`10.10.11.135`) and the selector-less `rag-service` DNS shim are retired — assume in-cluster.
 

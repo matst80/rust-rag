@@ -122,9 +122,9 @@ export function ChatInterface() {
     setMessages(prev => [...prev, assistantMessage])
 
     if (localMode) {
-      await generateLocal([...newMessages, assistantMessage])
+      await generateLocal(newMessages)
     } else {
-      await generateHosted([...newMessages, assistantMessage])
+      await generateHosted(newMessages)
     }
   }
 

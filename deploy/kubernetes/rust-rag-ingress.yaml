@@ -38,6 +38,15 @@ spec:
                 name: rag-service-cuda
                 port:
                   number: 4001
+          # Attachment files served by backend ServeDir from /assets/*.
+          # Routed directly so Next.js doesn't need to proxy.
+          - path: /assets
+            pathType: Prefix
+            backend:
+              service:
+                name: rag-service-cuda
+                port:
+                  number: 4001
           - path: /healthz
             pathType: Exact
             backend:

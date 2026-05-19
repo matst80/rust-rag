@@ -147,6 +147,12 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
   const a = analysis ?? ({} as StoreAnalysis)
   const at = entry.analysis_at ? new Date(entry.analysis_at).toLocaleString() : "—"
 
+  const sortedVerdicts = [...(a.verdicts || [])].sort((a, b) => {
+    if (a.relation === "unrelated" && b.relation !== "unrelated") return 1
+    if (a.relation !== "unrelated" && b.relation === "unrelated") return -1
+    return 0
+  })
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -313,23 +319,25 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
       </div>
 
       {/* Verdicts */}
-      {a.verdicts && a.verdicts.length > 0 && (
+      {sortedVerdicts.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
             <Activity className="size-3.5 text-primary" />
             <FieldLabel>Contextual Verdicts</FieldLabel>
           </div>
           <div className="grid grid-cols-1 gap-3">
-            {a.verdicts.map((v, idx) => {
+            {sortedVerdicts.map((v, idx) => {
               const config = RELATION_CONFIG[v.relation] || RELATION_CONFIG.unrelated
               const Icon = config.icon
+              const isUnrelated = v.relation === "unrelated"
 
               return (
                 <div
                   key={`${v.target_id}-${idx}`}
                   className={cn(
                     "relative group flex flex-col gap-3 border p-4 transition-all hover:shadow-lg dark:hover:shadow-primary/5",
-                    config.color
+                    config.color,
+                    isUnrelated && "opacity-60 hover:opacity-100 grayscale-[0.5] hover:grayscale-0"
                   )}
                 >
                   <div className="flex items-center justify-between gap-4">
@@ -367,7 +375,9 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
                   </div>
 
                   {/* Hover glow decoration */}
-                  <div className="absolute inset-0 bg-current/0 group-hover:bg-current/[0.02] rounded-xl pointer-events-none transition-colors" />
+                  {!isUnrelated && (
+                    <div className="absolute inset-0 bg-current/0 group-hover:bg-current/[0.02] rounded-xl pointer-events-none transition-colors" />
+                  )}
                 </div>
               )
             })}

@@ -1,8 +1,8 @@
 "use client"
 
-import { Sparkles, Maximize2 } from "lucide-react"
+import { Sparkles, Maximize2, Clock, History } from "lucide-react"
 import { MarkdownView } from "./markdown-view"
-import { cn } from "@/lib/utils"
+import { cn, formatRelativeTime } from "@/lib/utils"
 import type { Entry } from "@/lib/api"
 import { EntryTagList } from "@/components/ui/entry-tag"
 
@@ -16,6 +16,18 @@ export function EntryPeek({ entry, className }: EntryPeekProps) {
 
   return (
     <div className={cn("flex flex-col overflow-hidden", className)}>
+      <div className="px-4 py-2 border-b border-border/40 bg-muted/5 flex items-center gap-4">
+        <div className="flex items-center gap-1.5 font-mono text-[9px] text-muted-foreground/60 uppercase" title={`Created: ${new Date(entry.created_at).toLocaleString()}`}>
+          <Clock className="size-2.5 opacity-50" />
+          {formatRelativeTime(entry.created_at)}
+        </div>
+        {entry.updated_at > entry.created_at + 1000 && (
+          <div className="flex items-center gap-1.5 font-mono text-[9px] text-muted-foreground/60 uppercase" title={`Modified: ${new Date(entry.updated_at).toLocaleString()}`}>
+            <History className="size-2.5 opacity-50" />
+            {formatRelativeTime(entry.updated_at)}
+          </div>
+        )}
+      </div>
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
         {analysis?.summary && (
           <div className="p-4 bg-primary/[0.03] border border-primary/10 rounded-lg animate-in fade-in slide-in-from-top-2 duration-500">

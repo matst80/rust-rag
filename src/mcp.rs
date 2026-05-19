@@ -22,12 +22,13 @@ use crate::{
     },
 };
 use rmcp::{
-    ServerHandler,
+    RoleServer, ServerHandler,
     handler::server::{
         router::tool::ToolRouter,
         wrapper::{Json, Parameters},
     },
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager,
@@ -1140,7 +1141,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     ) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            store.list_graph_edges(query.item_id.as_deref(), query.edge_type)
+            store.list_graph_edges(query.item_id.as_deref(), query.edge_type, query.status.as_deref())
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1237,12 +1238,66 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
     ) -> Result<Json<GraphEdgePayload>, String> {
         let store = self.state.store.clone();
         let id = params.id.clone();
+        let relation = params.relation;
         let metadata = params.metadata;
-        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, metadata))
+        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, relation, metadata))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
         Ok(Json(edge.into()))
+    }
+
+    #[tool(description = "List graph edges awaiting review. Returns edges where status is 'suggested'.")]
+    async fn list_ontology_reviews(&self) -> Result<Json<GraphEdgesResponse>, String> {
+        let store = self.state.store.clone();
+        let edges = tokio::task::spawn_blocking(move || {
+            store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        Ok(Json(GraphEdgesResponse {
+            edges: edges.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    #[tool(description = "Accept a suggested graph edge. Optionally update its relation (predicate).")]
+    async fn accept_ontology_review(
+        &self,
+        Parameters(params): Parameters<AcceptOntologyReviewParams>,
+    ) -> Result<Json<GraphEdgePayload>, String> {
+        let store = self.state.store.clone();
+        let id = params.id.clone();
+        let relation = params.relation;
+        
+        let edge = tokio::task::spawn_blocking(move || {
+            let record = store.get_graph_edge(&id)?
+                .ok_or_else(|| anyhow::anyhow!("edge {} not found", id))?;
+            
+            let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
+            metadata.insert("status".to_string(), serde_json::Value::String("confirmed".to_string()));
+            
+            store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        
+        Ok(Json(edge.into()))
+    }
+
+    #[tool(description = "Reject a suggested graph edge by deleting it.")]
+    async fn reject_ontology_review(
+        &self,
+        Parameters(IdParams { id }): Parameters<IdParams>,
+    ) -> Result<Json<DeleteResponse>, String> {
+        let store = self.state.store.clone();
+        let target = id.clone();
+        let deleted = tokio::task::spawn_blocking(move || store.delete_graph_edge(&target))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        Ok(Json(DeleteResponse { id, deleted }))
     }
 
     #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
@@ -1405,6 +1460,34 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         h.command("end_session", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
         Ok(Json(AcpCommandAck { ok: true, sent: "end_session".into(), context: None }))
+    }
+
+    #[tool(description = "Update the session/topic name.")]
+    async fn acp_rename_session(
+        &self,
+        Parameters(params): Parameters<AcpRenameSessionParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "rename_session",
+            serde_json::json!({ "session_id": params.session_id, "name": params.name }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "rename_session".into(), context: None }))
+    }
+
+    #[tool(description = "Removes a topic (and its session history) from the daemon's memory and disk.")]
+    async fn acp_remove_topic(
+        &self,
+        Parameters(params): Parameters<AcpRemoveTopicParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "remove_topic",
+            serde_json::json!({ "thread_id": params.thread_id }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck { ok: true, sent: "remove_topic".into(), context: None }))
     }
 
     #[tool(description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\").")]
@@ -1694,6 +1777,203 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         });
         Ok("Dreaming round started in background.".to_owned())
     }
+
+    #[tool(description = "Search the caller's Google Drive. Requires the user to have connected Google via /settings/integrations. Matches against file names and full-text contents (Drive's `fullText contains` operator). Returns up to `page_size` files (1-100, default 20), most-recently-modified first. Pass `mime_type` to constrain results — e.g. `application/vnd.google-apps.document` for Docs only.")]
+    async fn drive_search(
+        &self,
+        Parameters(params): Parameters<DriveSearchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::drive::SearchResult>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::drive::search(
+            &client,
+            &params.query,
+            params.page_size.unwrap_or(20),
+            params.mime_type.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Fetch a single Google Drive file by id. Google Docs are exported as Markdown, Sheets as TSV, Slides as plain text; other text-y MIME types are downloaded as-is. Binary types are rejected. Bodies are truncated to ~200KB; the response sets `truncated: true` when that limit is hit. Pair with `drive_search` to discover file ids.")]
+    async fn drive_fetch(
+        &self,
+        Parameters(params): Parameters<DriveFetchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::drive::FetchedDoc>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::drive::fetch(&client, &params.file_id)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Search the caller's Gmail using the standard query operators (https://support.google.com/mail/answer/7190) — e.g. `from:alice@example.com newer_than:30d`, `subject:invoice has:attachment`, `label:starred`. Returns up to `page_size` (1-100, default 20) message summaries with pre-extracted From/To/Subject/Date headers + a snippet. Use `gmail_get_thread` with the `thread_id` from a result to read the full conversation.")]
+    async fn gmail_search(
+        &self,
+        Parameters(params): Parameters<GmailSearchParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::gmail::SearchResult>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::gmail::search(
+            &client,
+            &params.query,
+            params.page_size.unwrap_or(20),
+            params.page_token.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Fetch every message in a Gmail thread by thread_id. Bodies are decoded from base64url; text/plain is preferred, text/html falls back to markdown via html2md, each body capped at ~100KB. The `body_source` field tells you which path was taken. Use `gmail_search` first to find thread_ids.")]
+    async fn gmail_get_thread(
+        &self,
+        Parameters(params): Parameters<GmailGetThreadParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::integrations::google::gmail::FetchedThread>, String> {
+        let subject = extract_subject(&ctx)?;
+        let client = crate::integrations::google::GoogleClient::for_subject(&self.state, &subject)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::integrations::google::gmail::get_thread(&client, &params.thread_id)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "Send a Web Push notification to a user's registered devices. Defaults to the caller's subject if `subject` is omitted — that's the right shape for self-reminders. Pass `subject` explicitly to notify a different user (the call still needs the appropriate auth). Use `tag` to deduplicate noisy notifications (re-using a tag replaces the earlier one); `url` is the deep-link the SW opens on click. Returns per-subscription delivery stats, including how many dead subscriptions were pruned. Requires the user to have subscribed via /settings/integrations.")]
+    async fn notify_user(
+        &self,
+        Parameters(params): Parameters<NotifyUserParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::notify::SendResult>, String> {
+        let caller = extract_subject(&ctx).ok();
+        let target = params
+            .subject
+            .clone()
+            .or(caller)
+            .ok_or_else(|| "no target subject (omit only when authenticated)".to_owned())?;
+        let payload = crate::notify::NotificationPayload {
+            title: params.title,
+            body: params.body,
+            url: params.url,
+            tag: params.tag,
+            ttl_secs: params.ttl_secs,
+            urgency: params.urgency,
+            data: params.data,
+        };
+        crate::notify::send(&self.state, &target, &payload)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DriveSearchParams {
+    /// Free-text query passed to Drive's `fullText contains` operator.
+    pub query: String,
+    /// 1-100, default 20.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// Optional MIME-type filter, e.g. `application/vnd.google-apps.document`.
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct DriveFetchParams {
+    /// Drive file id (the `id` field from `drive_search` results).
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GmailSearchParams {
+    /// Gmail query, same operators as the Gmail search bar.
+    pub query: String,
+    /// 1-100, default 20.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// `nextPageToken` from a previous response to paginate.
+    #[serde(default)]
+    pub page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct GmailGetThreadParams {
+    /// Thread id (the `thread_id` field from `gmail_search` results).
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct NotifyUserParams {
+    /// Target subject. Omit to send to the calling subject (self-reminder).
+    #[serde(default)]
+    pub subject: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// Click-through URL the service worker opens when the notification
+    /// is clicked.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Tag for replacing earlier notifications with the same tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// TTL in seconds the push service holds the message if the device
+    /// is offline. Default 3600.
+    #[serde(default)]
+    pub ttl_secs: Option<u32>,
+    /// "very-low" | "low" | "normal" (default) | "high".
+    #[serde(default)]
+    pub urgency: Option<String>,
+    /// Optional structured data forwarded verbatim to the service worker.
+    #[serde(default)]
+    #[schemars(schema_with = "metadata_schema")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// Pull the authenticated subject out of the MCP request context. The HTTP
+/// transport injects `http::request::Parts` into the request extensions, and
+/// `require_api_key` middleware upstream sets `SessionSubject` on the
+/// underlying axum request. Returns a user-facing error string when no
+/// subject is present (anonymous caller or missing extension).
+fn extract_subject(ctx: &RequestContext<RoleServer>) -> Result<String, String> {
+    let parts = ctx
+        .extensions
+        .get::<axum::http::request::Parts>()
+        .ok_or_else(|| "no http request context".to_owned())?;
+    let subject = parts
+        .extensions
+        .get::<crate::api::SessionSubject>()
+        .and_then(|s| s.0.clone())
+        .ok_or_else(|| "google integration requires an authenticated subject".to_owned())?;
+    Ok(subject)
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpRenameSessionParams {
+    pub session_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpRemoveTopicParams {
+    pub thread_id: i64,
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1713,8 +1993,17 @@ pub struct UpsertSchemaParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcceptOntologyReviewParams {
+    pub id: String,
+    #[serde(default)]
+    pub relation: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateGraphEdgeParams {
     pub id: String,
+    #[serde(default)]
+    pub relation: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: serde_json::Value,
 }

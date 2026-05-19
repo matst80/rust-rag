@@ -15,6 +15,7 @@ import { useSWRConfig } from "swr"
 import Link from "next/link"
 import { StructuredDataEditor } from "./structured-data-editor"
 import { AiRefineButton } from "../ai/ai-refine-button"
+import { WhisperTranscribe } from "./whisper-transcribe"
 
 interface EntryFormProps {
   entry?: Entry
@@ -165,7 +166,14 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <Label htmlFor="text">Content</Label>
-              <AiRefineButton content={text} onAccept={setText} />
+              <div className="flex items-center gap-2">
+                <WhisperTranscribe
+                  onTranscription={(transcription) => {
+                    setText((prev) => (prev ? `${prev}\n${transcription}` : transcription))
+                  }}
+                />
+                <AiRefineButton content={text} onAccept={setText} />
+              </div>
             </div>
             <Textarea
               id="text"

@@ -1,14 +1,16 @@
 use crate::{
     config::{
-        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, ManagerConfig,
-        MultimodalConfig, OntologyConfig, OpenAiChatConfig,
+        AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, GoogleOAuthConfig,
+        ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig, WebPushConfig,
     },
+    crypto::EncryptionKey,
     db::{
         AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
-        MessageUpdate, NewMessage, NewUserEvent, SearchHit, SortOrder, UserEventType,
-        UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW, PROFILE_REFRESH_AFTER,
+        MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, PushStore, SearchHit,
+        SortOrder, UserEventType, UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW,
+        PROFILE_REFRESH_AFTER,
     },
     embedding::EmbeddingService,
 };
@@ -55,6 +57,8 @@ pub mod schemas;
 mod tombstones;
 mod ingest_url;
 mod dreaming;
+mod integrations;
+mod push;
 
 pub use analysis::{
     AnalyzeEntryParams, ChatCompletionRequest, StoreAnalysis, chat_completion_text, run_analysis,
@@ -136,6 +140,20 @@ pub struct AppState {
     /// lifetime of the process; invalidated on schema upsert/delete.
     pub schema_cache: Arc<crate::validation::SchemaCache>,
     pub(in crate::api) pending_tokens: Arc<auth::PendingTokenCache>,
+    /// Per-user encrypted OAuth credentials for external integrations
+    /// (Google, etc.). `None` when no integrations backend is wired in
+    /// (e.g. minimal test fixtures).
+    pub oauth_creds: Option<Arc<dyn OAuthCredsStore>>,
+    pub google_oauth: Arc<GoogleOAuthConfig>,
+    /// Master AES-GCM key used by `oauth_creds`. `None` when
+    /// `OAUTH_TOKEN_ENC_KEY` is not configured — integrations endpoints
+    /// will refuse to start the OAuth flow in that case.
+    pub oauth_token_key: Option<Arc<EncryptionKey>>,
+    /// Per-subject Web Push subscriptions backend. `None` in minimal test
+    /// fixtures or when push is intentionally disabled.
+    pub push: Option<Arc<dyn PushStore>>,
+    pub web_push: Arc<WebPushConfig>,
+    pub whisper: Arc<crate::config::WhisperConfig>,
 }
 
 impl AppState {
@@ -188,7 +206,40 @@ impl AppState {
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
+            oauth_creds: None,
+            google_oauth: Arc::new(GoogleOAuthConfig::default()),
+            oauth_token_key: None,
+            push: None,
+            web_push: Arc::new(WebPushConfig::default()),
+            whisper: Arc::new(crate::config::WhisperConfig::default()),
         }
+    }
+
+    /// Wire the Web Push backend + VAPID config. Call once during startup.
+    /// `None` for the store disables all push paths (endpoints will 503).
+    pub fn with_web_push(
+        mut self,
+        config: WebPushConfig,
+        store: Arc<dyn PushStore>,
+    ) -> Self {
+        self.web_push = Arc::new(config);
+        self.push = Some(store);
+        self
+    }
+
+    /// Wire the per-user OAuth credential store + Google client config +
+    /// master encryption key for the integrations endpoints. Call once
+    /// during startup; safe to omit when integrations are disabled.
+    pub fn with_google_oauth(
+        mut self,
+        config: GoogleOAuthConfig,
+        store: Arc<dyn OAuthCredsStore>,
+        key: Option<Arc<EncryptionKey>>,
+    ) -> Self {
+        self.google_oauth = Arc::new(config);
+        self.oauth_creds = Some(store);
+        self.oauth_token_key = key;
+        self
     }
 
     pub fn with_analysis(mut self, analysis: AnalysisConfig) -> Self {
@@ -209,6 +260,11 @@ impl AppState {
 
     pub fn with_manager(mut self, manager: ManagerConfig) -> Self {
         self.manager_runtime = Some(Arc::new(manager));
+        self
+    }
+
+    pub fn with_whisper(mut self, whisper: crate::config::WhisperConfig) -> Self {
+        self.whisper = Arc::new(whisper);
         self
     }
 
@@ -279,6 +335,12 @@ impl AppState {
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
+            oauth_creds: None,
+            google_oauth: Arc::new(GoogleOAuthConfig::default()),
+            oauth_token_key: None,
+            push: None,
+            web_push: Arc::new(WebPushConfig::default()),
+            whisper: Arc::new(crate::config::WhisperConfig::default()),
         }
     }
 }
@@ -510,6 +572,7 @@ pub struct GraphNeighborhoodQuery {
 pub struct ListGraphEdgesQuery {
     pub item_id: Option<String>,
     pub edge_type: Option<GraphEdgeType>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -526,6 +589,7 @@ pub struct CreateManualEdgeRequest {
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateGraphEdgeRequest {
+    pub relation: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
 }
@@ -1041,6 +1105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/acp/register", post(register_acp_instance))
         .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
         .route("/api/acp/ws", get(acp_ws_proxy))
+        .route("/api/whisper/ws", get(whisper_proxy))
         .route(
             "/api/acp/register/{name}",
             delete(unregister_acp_instance),
@@ -1053,6 +1118,41 @@ pub fn router(state: AppState) -> Router {
             "/api/messages/{id}",
             axum::routing::patch(update_message).delete(delete_message),
         )
+        .route(
+            "/api/integrations/google/status",
+            get(integrations::google::status),
+        )
+        .route(
+            "/api/integrations/google/start",
+            get(integrations::google::start),
+        )
+        .route(
+            "/api/integrations/google/callback",
+            get(integrations::google::callback),
+        )
+        .route(
+            "/api/integrations/google/disconnect",
+            post(integrations::google::disconnect),
+        )
+        .route(
+            "/api/integrations/google/drive/search",
+            get(integrations::google::drive_search),
+        )
+        .route(
+            "/api/integrations/google/drive/fetch/{id}",
+            get(integrations::google::drive_fetch),
+        )
+        .route("/api/push/vapid-public-key", get(push::vapid_public_key))
+        .route("/api/push/subscribe", post(push::subscribe))
+        .route(
+            "/api/push/subscriptions",
+            get(push::list_subscriptions),
+        )
+        .route(
+            "/api/push/subscriptions/{id}",
+            delete(push::delete_subscription),
+        )
+        .route("/api/notify", post(push::notify))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,
@@ -1690,7 +1790,7 @@ pub(crate) async fn search_core(
                 let related = if let Some(top) = filtered.first() {
                     let top_id = top.id.clone();
                     let edges = store
-                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual))
+                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual), None)
                         .ok()
                         .unwrap_or_default();
 
@@ -1982,8 +2082,10 @@ async fn list_graph_edges(
     let item_id = query.item_id;
     let edge_type = query.edge_type;
 
+    let status = query.status;
+
     let edges =
-        tokio::task::spawn_blocking(move || store.list_graph_edges(item_id.as_deref(), edge_type))
+        tokio::task::spawn_blocking(move || store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref()))
             .await
             .map_err(ApiError::TaskJoin)?
             .map_err(map_graph_error)?;
@@ -2796,7 +2898,7 @@ async fn update_graph_edge(
     validate_metadata(&request.metadata)?;
 
     let store = state.store.clone();
-    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.metadata))
+    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.relation, request.metadata))
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(map_graph_error)?;
@@ -3372,6 +3474,87 @@ async fn acp_ws_proxy_task(
                 }
             }
         }
+    }
+}
+
+/// Proxy WebSocket connection to the Whisper transcription service.
+/// Upstream address is configurable via RAG_WHISPER_WS_URL, defaulting to
+/// the k8s service `whisper-slask-service.llm.svc.cluster.local`.
+async fn whisper_proxy(
+    ws: axum::extract::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, ApiError> {
+    let upstream_url = state.whisper.ws_url.clone();
+    Ok(ws.on_upgrade(move |socket| whisper_proxy_task(socket, upstream_url)))
+}
+
+async fn whisper_proxy_task(
+    client_socket: axum::extract::ws::WebSocket,
+    upstream_url: String,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+    let (mut client_sink, mut client_stream) = client_socket.split();
+
+    let (upstream_socket, _) = match connect_async(&upstream_url).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, url = %upstream_url, "whisper_proxy: failed to connect to upstream");
+            return;
+        }
+    };
+
+    let (mut upstream_sink, mut upstream_stream) = upstream_socket.split();
+
+    let client_to_upstream = async {
+        while let Some(Ok(msg)) = client_stream.next().await {
+            let tungsten_msg = match msg {
+                AxumMessage::Text(t) => TungsteniteMessage::Text(t.to_string()),
+                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.to_vec()),
+                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.to_vec().into()),
+                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.to_vec().into()),
+                AxumMessage::Close(c) => {
+                    let close_frame = c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: cf.code.into(),
+                        reason: cf.reason.to_string().into(),
+                    });
+                    TungsteniteMessage::Close(close_frame)
+                }
+            };
+            if upstream_sink.send(tungsten_msg).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let upstream_to_client = async {
+        while let Some(Ok(msg)) = upstream_stream.next().await {
+            let axum_msg = match msg {
+                TungsteniteMessage::Text(t) => AxumMessage::Text(t.to_string().into()),
+                TungsteniteMessage::Binary(b) => AxumMessage::Binary(b.into()),
+                TungsteniteMessage::Ping(p) => AxumMessage::Ping(p.into()),
+                TungsteniteMessage::Pong(p) => AxumMessage::Pong(p.into()),
+                TungsteniteMessage::Close(c) => {
+                    let close_frame = c.map(|cf| axum::extract::ws::CloseFrame {
+                        code: cf.code.into(),
+                        reason: cf.reason.to_string().into(),
+                    });
+                    AxumMessage::Close(close_frame)
+                }
+                TungsteniteMessage::Frame(_) => continue,
+            };
+            if client_sink.send(axum_msg).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_upstream => (),
+        _ = upstream_to_client => (),
     }
 }
 
@@ -4025,6 +4208,8 @@ mod tests {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        analysis: item.analysis.clone(),
+                        updated_at: item.updated_at,
                     });
                 }
             }
@@ -4158,7 +4343,7 @@ mod tests {
                 anyhow::bail!("item {center_id} not found");
             }
 
-            let edges = self.list_graph_edges(None, edge_type)?;
+            let edges = self.list_graph_edges(None, edge_type, None)?;
             let mut visited = HashSet::from([center_id.to_owned()]);
             let mut order = vec![center_id.to_owned()];
             let mut queue = VecDeque::from([(center_id.to_owned(), 0usize)]);
@@ -4205,10 +4390,16 @@ mod tests {
             })
         }
 
+        fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+            let edges = self.graph_edges.lock().expect("store mutex poisoned");
+            Ok(edges.iter().find(|e| e.id == id).cloned())
+        }
+
         fn list_graph_edges(
             &self,
             item_id: Option<&str>,
             edge_type: Option<GraphEdgeType>,
+            _status: Option<&str>,
         ) -> Result<Vec<GraphEdgeRecord>> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");
@@ -4272,7 +4463,7 @@ mod tests {
             Ok(edge)
         }
 
-        fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+        fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");
             }
@@ -4283,6 +4474,7 @@ mod tests {
                 .find(|edge| edge.id == id)
                 .ok_or_else(|| anyhow!("edge {} not found", id))?;
 
+            edge.relation = relation;
             edge.metadata = metadata;
             edge.updated_at += 1;
             Ok(edge.clone())
@@ -4813,6 +5005,7 @@ mod tests {
             metadata: json!({ "label": "match" }),
             source_id: "memory".to_owned(),
             created_at: 1234,
+            updated_at: 1234,
             distance: 0.0125,
             section_path: Vec::new(),
             retrievers: Vec::new(),
@@ -4820,6 +5013,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -4873,6 +5067,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 1,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -4887,6 +5083,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 2,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -4914,9 +5112,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        updated_at: 1,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -4927,9 +5127,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        updated_at: 2,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -4940,9 +5142,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 3,
+                        updated_at: 3,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -4954,6 +5158,7 @@ mod tests {
                 metadata: json!({}),
                 source_id: "memory".to_owned(),
                 created_at: 1,
+                updated_at: 1,
                 distance: 0.2,
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
@@ -4961,6 +5166,7 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -4999,6 +5205,7 @@ mod tests {
             metadata: json!({}),
             source_id: "memory".to_owned(),
             created_at: 1,
+            updated_at: 1,
             distance: 0.1,
             section_path: Vec::new(),
             retrievers: Vec::new(),
@@ -5006,6 +5213,7 @@ mod tests {
             path: None,
             type_name: None,
             tags: Vec::new(),
+            analysis: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -5031,9 +5239,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 1,
+                        updated_at: 1,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5044,9 +5254,11 @@ mod tests {
                         metadata: json!({}),
                         source_id: "memory".to_owned(),
                         created_at: 2,
+                        updated_at: 2,
                         path: None,
                         type_name: None,
                         data: None,
+                        analysis: None,
                     },
                     Vec::new(),
                 ),
@@ -5059,6 +5271,7 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 1,
+                    updated_at: 1,
                     distance: 0.1,
                     section_path: Vec::new(),
                     retrievers: Vec::new(),
@@ -5066,6 +5279,7 @@ mod tests {
                     path: None,
                     type_name: None,
                     tags: Vec::new(),
+                    analysis: None,
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -5073,6 +5287,7 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 2,
+                    updated_at: 2,
                     distance: 0.4,
                     section_path: Vec::new(),
                     retrievers: Vec::new(),
@@ -5080,6 +5295,7 @@ mod tests {
                     path: None,
                     type_name: None,
                     tags: Vec::new(),
+                    analysis: None,
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -5121,6 +5337,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 1,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -5135,6 +5353,8 @@ mod tests {
                 path: None,
                 type_name: None,
                 tags: Vec::new(),
+                analysis: None,
+                updated_at: 2,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5181,9 +5401,11 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    updated_at: 100,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -5191,9 +5413,11 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    updated_at: 200,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-3".to_owned(),
@@ -5201,9 +5425,11 @@ mod tests {
                     metadata: json!({"kind":"c"}),
                     source_id: "memory".to_owned(),
                     created_at: 300,
+                    updated_at: 300,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
             ],
             vec![
@@ -5284,9 +5510,11 @@ mod tests {
                     metadata: json!({"kind":"a"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 100,
+                    updated_at: 100,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -5294,9 +5522,11 @@ mod tests {
                     metadata: json!({"kind":"b"}),
                     source_id: "memory".to_owned(),
                     created_at: 200,
+                    updated_at: 200,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
             ],
             vec![],
@@ -5349,9 +5579,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             }],
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
@@ -5383,9 +5615,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -5393,9 +5627,11 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                updated_at: 200,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-3".to_owned(),
@@ -5403,9 +5639,11 @@ mod tests {
                 metadata: json!({"kind":"c"}),
                 source_id: "memory".to_owned(),
                 created_at: 300,
+                updated_at: 300,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -5431,9 +5669,11 @@ mod tests {
                 metadata: json!({"kind":"a"}),
                 source_id: "knowledge".to_owned(),
                 created_at: 100,
+                updated_at: 100,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -5441,9 +5681,11 @@ mod tests {
                 metadata: json!({"kind":"b"}),
                 source_id: "memory".to_owned(),
                 created_at: 200,
+                updated_at: 200,
                 path: None,
                 type_name: None,
                 data: None,
+                analysis: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -5472,9 +5714,11 @@ mod tests {
             metadata: json!({ "kind": "reference" }),
             source_id: "knowledge".to_owned(),
             created_at: 42,
+            updated_at: 42,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -5508,9 +5752,11 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            updated_at: 123,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -5551,9 +5797,11 @@ mod tests {
             metadata: json!({"kind":"old"}),
             source_id: "knowledge".to_owned(),
             created_at: 123,
+            updated_at: 123,
             path: None,
             type_name: None,
             data: None,
+            analysis: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(

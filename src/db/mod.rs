@@ -1,6 +1,8 @@
 mod auth;
 mod graph;
+mod oauth_creds;
 pub mod postgres;
+mod push;
 mod schema;
 
 use anyhow::{Context, Result, anyhow};
@@ -19,7 +21,8 @@ use std::{
 };
 
 use graph::{
-    list_graph_edges_internal, list_pairwise_distances_for_ids, rebuild_similarity_graph_locked,
+    list_graph_edges_internal, list_pairwise_distances_for_ids, map_graph_edge_row,
+    rebuild_similarity_graph_locked,
 };
 use schema::{initialize_schema, register_sqlite_vec};
 
@@ -549,6 +552,88 @@ pub trait AuthStore: Send + Sync {
     fn expire_auth_codes(&self, now: i64) -> Result<usize>;
 }
 
+/// Encrypted OAuth credentials for third-party integrations (Google, etc.).
+/// Tokens are stored already-encrypted by the caller using `crate::crypto`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCredentialsRecord {
+    pub subject: String,
+    pub provider: String,
+    pub access_token_enc: Option<String>,
+    pub refresh_token_enc: Option<String>,
+    pub scopes: String,
+    pub expires_at: Option<i64>,
+    pub account_email: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertOAuthCredentials {
+    pub subject: String,
+    pub provider: String,
+    pub access_token_enc: Option<String>,
+    pub refresh_token_enc: Option<String>,
+    pub scopes: String,
+    pub expires_at: Option<i64>,
+    pub account_email: Option<String>,
+    pub now: i64,
+}
+
+pub trait OAuthCredsStore: Send + Sync {
+    fn upsert_oauth_credentials(
+        &self,
+        creds: UpsertOAuthCredentials,
+    ) -> Result<OAuthCredentialsRecord>;
+    fn find_oauth_credentials(
+        &self,
+        subject: &str,
+        provider: &str,
+    ) -> Result<Option<OAuthCredentialsRecord>>;
+    fn delete_oauth_credentials(&self, subject: &str, provider: &str) -> Result<bool>;
+    fn list_oauth_providers(&self, subject: &str) -> Result<Vec<OAuthCredentialsRecord>>;
+}
+
+/// One row per browser/device the user has authorized for Web Push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscriptionRecord {
+    pub id: String,
+    pub subject: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub user_agent: Option<String>,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertPushSubscription {
+    pub subject: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub user_agent: Option<String>,
+    pub now: i64,
+}
+
+pub trait PushStore: Send + Sync {
+    /// Insert or update a subscription. (subject, endpoint) is unique; an
+    /// existing row's keys and user_agent are refreshed and `created_at`
+    /// preserved.
+    fn upsert_push_subscription(
+        &self,
+        sub: UpsertPushSubscription,
+    ) -> Result<PushSubscriptionRecord>;
+    fn list_push_subscriptions(&self, subject: &str) -> Result<Vec<PushSubscriptionRecord>>;
+    /// Delete by `id`, scoped to `subject` so users can only remove their
+    /// own subscriptions. Returns true if a row was deleted.
+    fn delete_push_subscription(&self, id: &str, subject: &str) -> Result<bool>;
+    /// Delete by endpoint (used by the send loop when the push service
+    /// returns 410/404 → subscription is dead).
+    fn delete_push_subscription_by_endpoint(&self, endpoint: &str) -> Result<bool>;
+    fn touch_push_subscription(&self, id: &str, now: i64) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
@@ -864,14 +949,16 @@ pub trait VectorStore: Send + Sync {
         limit: usize,
         edge_type: Option<GraphEdgeType>,
     ) -> Result<GraphNeighborhood>;
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>>;
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>>;
     fn rebuild_similarity_graph(&self) -> Result<usize>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord>;
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
     fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
     fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
@@ -1726,7 +1813,7 @@ impl VectorStore for SqliteVectorStore {
                 continue;
             }
 
-            for edge in list_graph_edges_internal(connection, Some(&current_id), edge_type)? {
+            for edge in list_graph_edges_internal(connection, Some(&current_id), edge_type, None)? {
                 edge_map
                     .entry(edge.id.clone())
                     .or_insert_with(|| edge.clone());
@@ -1766,10 +1853,29 @@ impl VectorStore for SqliteVectorStore {
         })
     }
 
+    fn get_graph_edge(&self, id: &str) -> Result<Option<GraphEdgeRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("sqlite connection not open"))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+             FROM graph_edges WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], map_graph_edge_row)?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn list_graph_edges(
         &self,
         item_id: Option<&str>,
         edge_type: Option<GraphEdgeType>,
+        status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>> {
         self.ensure_graph_enabled()?;
         self.ensure_graph_fresh()?;
@@ -1778,7 +1884,7 @@ impl VectorStore for SqliteVectorStore {
         let connection = guard
             .as_ref()
             .context("sqlite connection has already been closed")?;
-        list_graph_edges_internal(connection, item_id, edge_type)
+        list_graph_edges_internal(connection, item_id, edge_type, status)
     }
 
     fn rebuild_similarity_graph(&self) -> Result<usize> {
@@ -1864,7 +1970,7 @@ impl VectorStore for SqliteVectorStore {
             updated_at: timestamp,
         })
     }
-    fn update_graph_edge(&self, id: &str, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let conn = guard
             .as_ref()
@@ -1874,8 +1980,8 @@ impl VectorStore for SqliteVectorStore {
         let now = current_timestamp_millis()?;
 
         conn.execute(
-            "UPDATE graph_edges SET metadata = ?, updated_at = ? WHERE id = ?",
-            params![metadata_str, now, id],
+            "UPDATE graph_edges SET relation = ?, metadata = ?, updated_at = ? WHERE id = ?",
+            params![relation, metadata_str, now, id],
         )?;
 
         let mut stmt = conn.prepare(
@@ -3140,9 +3246,11 @@ mod tests {
                     metadata: json!({"kind": "alpha"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3155,9 +3263,11 @@ mod tests {
                     metadata: json!({"kind": "beta"}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3185,9 +3295,11 @@ mod tests {
                     metadata: json!({"version": 1}),
                     source_id: "knowledge".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3200,9 +3312,11 @@ mod tests {
                     metadata: json!({"version": 2}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3227,9 +3341,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3242,9 +3358,11 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3269,9 +3387,11 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: Some("todo".to_owned()),
                     data: Some(json!({"status": "pending"})),
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3284,9 +3404,11 @@ mod tests {
                     metadata: json!({}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: Some("note".to_owned()),
                     data: None,
+                    analysis: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3319,9 +3441,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3334,9 +3458,11 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3387,9 +3513,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3413,9 +3541,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3442,9 +3572,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1000,
+                    updated_at: 1000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3457,9 +3589,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 2000,
+                    updated_at: 2000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.95, 0.05, 0.0],
             )
@@ -3472,9 +3606,11 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 3000,
+                    updated_at: 3000,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3494,7 +3630,7 @@ mod tests {
         let rebuilt = store.rebuild_similarity_graph().unwrap();
         assert_eq!(rebuilt, 1);
 
-        let edges = store.list_graph_edges(None, None).unwrap();
+        let edges = store.list_graph_edges(None, None, None).unwrap();
         assert_eq!(edges.len(), 2);
         assert!(
             edges
@@ -3527,9 +3663,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 1,
+                    updated_at: 1,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3542,9 +3680,11 @@ mod tests {
                     metadata: json!({"kind": "memory"}),
                     source_id: "memory".to_owned(),
                     created_at: 2,
+                    updated_at: 2,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3557,9 +3697,11 @@ mod tests {
                     metadata: json!({"kind": "knowledge"}),
                     source_id: "knowledge".to_owned(),
                     created_at: 3,
+                    updated_at: 3,
                     path: None,
                     type_name: None,
                     data: None,
+                    analysis: None,
                 },
                 &[0.0, 1.0, 0.0],
             )

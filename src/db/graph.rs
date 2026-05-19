@@ -11,6 +11,7 @@ pub(super) fn list_graph_edges_internal(
     connection: &Connection,
     item_id: Option<&str>,
     edge_type: Option<GraphEdgeType>,
+    status: Option<&str>,
 ) -> Result<Vec<GraphEdgeRecord>> {
     let edge_type = edge_type.map(GraphEdgeType::as_str);
     let mut statement = connection.prepare(
@@ -29,10 +30,11 @@ pub(super) fn list_graph_edges_internal(
         FROM graph_edges
         WHERE (?1 IS NULL OR from_item_id = ?1 OR to_item_id = ?1)
           AND (?2 IS NULL OR edge_type = ?2)
+          AND (?3 IS NULL OR json_extract(metadata, '$.status') = ?3)
         ORDER BY updated_at DESC, id ASC
         ",
     )?;
-    let rows = statement.query_map(params![item_id, edge_type], map_graph_edge_row)?;
+    let rows = statement.query_map(params![item_id, edge_type, status], map_graph_edge_row)?;
 
     let mut edges = Vec::new();
     for row in rows {

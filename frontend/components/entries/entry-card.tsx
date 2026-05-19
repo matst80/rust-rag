@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { MoreVertical, Share2, ChevronRight, Database, Clock, Layers, ChevronsRight, Maximize2, Sparkles, ChevronDown, ChevronUp, Eye } from "lucide-react"
+import { MoreVertical, Share2, ChevronRight, Database, Clock, History, Layers, ChevronsRight, Maximize2, Sparkles, ChevronDown, ChevronUp, Eye } from "lucide-react"
 import { useState } from "react"
 import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils"
 import { ComboButton } from "@/components/ui/combo-button"
@@ -118,9 +118,17 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
               {entry.source_id}
             </Badge>
 
-            <div className="flex items-center gap-1 font-mono text-[9px] text-muted-foreground/60 uppercase tracking-widest">
-              <Clock className="size-2.5" />
-              {formatRelativeTime(entry.created_at)}
+            <div className="flex items-center gap-3 font-mono text-[9px] text-muted-foreground/60 uppercase tracking-widest">
+              <div className="flex items-center gap-1" title={`Created: ${new Date(entry.created_at).toLocaleString()}`}>
+                <Clock className="size-2.5" />
+                {formatRelativeTime(entry.created_at)}
+              </div>
+              {entry.updated_at > entry.created_at + 1000 && (
+                <div className="flex items-center gap-1" title={`Modified: ${new Date(entry.updated_at).toLocaleString()}`}>
+                  <History className="size-2.5" />
+                  {formatRelativeTime(entry.updated_at)}
+                </div>
+              )}
             </div>
 
             {"type" in entry && entry.type && (

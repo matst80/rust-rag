@@ -898,6 +898,22 @@ export const api = {
     runBatch: runOntologyBatch,
     runForItem: runOntologyForItem,
   },
+  integrations: {
+    google: {
+      drive: {
+        search: (q: string, mimeType?: string, pageSize?: number) => {
+          const params = new URLSearchParams({ q })
+          if (mimeType) params.append("mime_type", mimeType)
+          if (pageSize) params.append("page_size", pageSize.toString())
+          return request<DriveSearchResult>(
+            `/api/integrations/google/drive/search?${params.toString()}`
+          )
+        },
+        fetch: (id: string) =>
+          request<FetchedDriveDoc>(`/api/integrations/google/drive/fetch/${id}`),
+      },
+    },
+  },
   schemas: {
     list: listSchemas,
     get: getSchema,

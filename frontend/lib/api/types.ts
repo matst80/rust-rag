@@ -10,6 +10,7 @@ export interface Entry {
   metadata: EntryMetadata
   source_id: string
   created_at: number
+  updated_at: number
   /** Optional: populated by endpoints that opt in to token counting. */
   token_count?: number
   /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
@@ -144,6 +145,7 @@ export interface SearchResult {
   metadata: EntryMetadata
   source_id: string
   created_at: number
+  updated_at: number
   score: number
   /** Header breadcrumb of the chunk that matched best (e.g. ["Architecture", "Embedding execution"]). */
   section_path?: string[]
@@ -550,4 +552,27 @@ export interface AssistedQueryHandlers {
   onMerged?: (event: AssistedQueryMergedEvent) => void
   onError?: (error: ChatCompletionStreamError) => void
   onDone?: () => void
+}
+export interface DriveFile {
+  id: string
+  name: string
+  mimeType: string
+  modifiedTime?: string
+  webViewLink?: string
+}
+
+export interface DriveSearchResult {
+  files: DriveFile[]
+  query: string
+}
+
+export interface FetchedDriveDoc {
+  id: string
+  name: string
+  mime_type: string
+  returned_mime: string
+  content: string
+  truncated: boolean
+  size_bytes: number
+  web_view_link?: string
 }

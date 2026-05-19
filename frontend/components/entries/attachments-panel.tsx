@@ -9,8 +9,9 @@ import {
 } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Paperclip, Trash2, Upload, Link2 } from "lucide-react"
+import { Paperclip, Trash2, Upload, Link2, Cloud } from "lucide-react"
 import { toast } from "sonner"
+import { GoogleDriveLinker } from "./google-drive-linker"
 
 interface AttachmentsPanelProps {
   itemId: string
@@ -31,6 +32,7 @@ export function AttachmentsPanel({ itemId }: AttachmentsPanelProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [urlInput, setUrlInput] = useState("")
   const [showUrl, setShowUrl] = useState(false)
+  const [showDrive, setShowDrive] = useState(false)
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -97,13 +99,40 @@ export function AttachmentsPanel({ itemId }: AttachmentsPanelProps) {
             variant="outline"
             size="sm"
             className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
-            onClick={() => setShowUrl((v) => !v)}
+            onClick={() => {
+              setShowUrl((v) => !v)
+              if (!showUrl) setShowDrive(false)
+            }}
           >
             <Link2 className="size-3.5 mr-1.5" />
             URL
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
+            onClick={() => {
+              setShowDrive((v) => !v)
+              if (!showDrive) setShowUrl(false)
+            }}
+          >
+            <Cloud className="size-3.5 mr-1.5" />
+            Drive
+          </Button>
         </div>
       </div>
+
+      {showDrive && (
+        <div className="mb-4">
+          <GoogleDriveLinker 
+            itemId={itemId} 
+            onAttached={() => {
+              mutate()
+              setShowDrive(false)
+            }} 
+          />
+        </div>
+      )}
 
       {showUrl && (
         <div className="flex gap-2 mb-3">
