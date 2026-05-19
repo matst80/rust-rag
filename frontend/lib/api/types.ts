@@ -10,6 +10,7 @@ export interface Entry {
   metadata: EntryMetadata
   source_id: string
   created_at: number
+  updated_at: number
   /** Optional: populated by endpoints that opt in to token counting. */
   token_count?: number
   /** Wiki-style hierarchical path (slash-separated), e.g. "team/handbook". */
@@ -144,6 +145,7 @@ export interface SearchResult {
   metadata: EntryMetadata
   source_id: string
   created_at: number
+  updated_at: number
   score: number
   /** Header breadcrumb of the chunk that matched best (e.g. ["Architecture", "Embedding execution"]). */
   section_path?: string[]

@@ -3,13 +3,13 @@
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { ArrowLeft, Pencil, Trash2, GitBranch, Save, Copy, Check, Terminal } from "lucide-react"
+import { ArrowLeft, Pencil, Trash2, GitBranch, Save, Copy, Check, Terminal, Clock, History } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ComboButton } from "@/components/ui/combo-button"
 import { Badge } from "@/components/ui/badge"
 import { useItem, useDeleteItem, useEdgesForItem, useGraphStatus } from "@/lib/api"
 import { RELATION_STYLES } from "../graph/relation-item"
-import { cn } from "@/lib/utils"
+import { cn, formatRelativeTime } from "@/lib/utils"
 import { useSchema, useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
 import {
@@ -165,6 +165,25 @@ export function EntryDetail({ id }: EntryDetailProps) {
                 ↗
               </Link>
             )}
+
+            <div className="hidden sm:flex items-center gap-3 ml-2 border-l border-border pl-3">
+              <div 
+                className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground/60"
+                title={`Created: ${new Date(entry.created_at).toLocaleString()}`}
+              >
+                <Clock className="size-3 opacity-50" />
+                <span>{formatRelativeTime(entry.created_at)}</span>
+              </div>
+              {entry.updated_at > entry.created_at + 1000 && (
+                <div 
+                  className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground/60"
+                  title={`Modified: ${new Date(entry.updated_at).toLocaleString()}`}
+                >
+                  <History className="size-3 opacity-50" />
+                  <span>{formatRelativeTime(entry.updated_at)}</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -200,8 +219,8 @@ export function EntryDetail({ id }: EntryDetailProps) {
 
   // ── Main content section ───────────────────────────────
   const contentSection = (
-    <div className="flex h-full flex-col overflow-y-auto px-5 md:px-10 py-6 md:py-8">
-      <div className="mx-auto w-full max-w-3xl space-y-8">
+    <div className="flex h-full flex-col overflow-y-auto px-5 md:px-10 py-8 md:py-12">
+      <div className="mx-auto w-full max-w-3xl space-y-16">
         {isEditing ? (
           <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
             <div className="flex items-center justify-between">

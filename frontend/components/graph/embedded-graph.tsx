@@ -34,22 +34,24 @@ function buildEmbeddedTheme(isDark: boolean): Theme {
         ...base.node.label,
         color: isDark ? "#e2e8f0" : "#1e293b",
         stroke: bg,
+        fontSize: 10,
       },
       subLabel: {
         ...(base.node.subLabel ?? { color: isDark ? "#94a3b8" : "#64748b", activeColor: "#4338ca" }),
         color: isDark ? "#94a3b8" : "#64748b",
         stroke: bg,
+        fontSize: 7,
       },
     },
     cluster: {
       stroke: isDark ? "#475569" : "#cbd5e1",
-      opacity: 0.4,
-      selectedOpacity: 0.6,
-      inactiveOpacity: 0.15,
+      opacity: 0.2,
+      selectedOpacity: 0.5,
+      inactiveOpacity: 0.05,
       label: {
         color: isDark ? "#94a3b8" : "#64748b",
         stroke: bg,
-        fontSize: 11,
+        fontSize: 13,
       },
     },
   }
@@ -190,7 +192,7 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         id: `sim-${d.from_item_id}-${d.to_item_id}`,
         source: d.from_item_id,
         target: d.to_item_id,
-        size: 0.6,
+        size: 0.4,
       })
     }
     for (const s of semanticEdges) {
@@ -202,7 +204,7 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         id: `sem-${s.from}-${s.to}`,
         source: s.from,
         target: s.to,
-        size: 0.5,
+        size: 0.3,
       })
     }
     return out
@@ -227,7 +229,10 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         layoutOverrides={{
           clusterType: "treemap",
           linkStrengthIntraCluster: 0.85,
-          linkStrengthInterCluster: 0.02,
+          linkStrengthInterCluster: 0.005,
+          nodeStrength: -250,
+          clusterPadding: 80,
+          linkDistance: 100,
         }}
         labelType="auto"
         actives={[centerId]}

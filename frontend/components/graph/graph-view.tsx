@@ -333,6 +333,13 @@ function GraphViewContent() {
     if (selectedNode) handleCenterNodeChange(selectedNode)
   }, [handleCenterNodeChange, selectedNode])
 
+  const handleFocusEdge = useCallback((edgeId: string, nodeId: string) => {
+    setCenterNode(nodeId)
+    setSelectedEdge(edgeId)
+    setSelectedNode(null)
+    setDepth(1)
+  }, [])
+
   const handleDeleteEdge = useCallback(
     async (edgeId: string) => {
       await deleteEdge(edgeId)
@@ -973,6 +980,7 @@ function GraphViewContent() {
               <EdgeReviewList
                 onReviewComplete={mutateNeighborhood}
                 onFocusNode={handleCenterNodeChange}
+                onFocusEdge={handleFocusEdge}
               />
             </div>
           </TabsContent>
