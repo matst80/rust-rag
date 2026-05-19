@@ -493,33 +493,55 @@ impl VectorStore for PostgresVectorStore {
             .await?;
             tx.execute("DELETE FROM chunks WHERE document_id = $1", &[&item.id])
                 .await?;
-            for chunk in &chunks {
-                let vector = pgvector::Vector::from(chunk.embedding.clone());
-                let section_path: Option<&[String]> = if chunk.section_path.is_empty() {
-                    None
-                } else {
-                    Some(&chunk.section_path)
-                };
-                let sparse = chunk
-                    .sparse
-                    .as_deref()
-                    .and_then(build_sparsevec);
-                tx.execute(
-                    "INSERT INTO chunks (document_id, position, content, section_path, dense_embedding, sparse_embedding, embedding_model, embedding_version) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                    &[
-                        &item.id,
-                        &chunk.position,
-                        &chunk.content,
-                        &section_path,
-                        &vector,
-                        &sparse,
-                        &EMBEDDING_MODEL,
-                        &EMBEDDING_VERSION,
-                    ],
-                )
-                .await?;
+
+            use tokio_postgres::types::ToSql;
+
+            // Batch up to 1000 chunks per INSERT to avoid query size limits
+            for chunk_batch in chunks.chunks(1000) {
+                let mut query = String::from(
+                    "INSERT INTO chunks (document_id, position, content, section_path, dense_embedding, sparse_embedding, embedding_model, embedding_version) VALUES "
+                );
+                let mut params: Vec<&(dyn ToSql + Sync)> = Vec::with_capacity(chunk_batch.len() * 8);
+
+                // We need to store these locally in parallel vecs so they live long enough to be referenced in `params`
+                let mut vectors = Vec::with_capacity(chunk_batch.len());
+                let mut sparses = Vec::with_capacity(chunk_batch.len());
+                let mut section_paths = Vec::with_capacity(chunk_batch.len());
+
+                for chunk in chunk_batch {
+                    vectors.push(pgvector::Vector::from(chunk.embedding.clone()));
+                    sparses.push(chunk.sparse.as_deref().and_then(build_sparsevec));
+                    section_paths.push(if chunk.section_path.is_empty() {
+                        None
+                    } else {
+                        Some(chunk.section_path.as_slice())
+                    });
+                }
+
+                for (i, chunk) in chunk_batch.iter().enumerate() {
+                    if i > 0 {
+                        query.push_str(", ");
+                    }
+                    let base = i * 8;
+                    use std::fmt::Write;
+                    write!(&mut query, "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                        base + 1, base + 2, base + 3, base + 4,
+                        base + 5, base + 6, base + 7, base + 8
+                    ).unwrap();
+
+                    params.push(&item.id);
+                    params.push(&chunk.position);
+                    params.push(&chunk.content);
+                    params.push(&section_paths[i]);
+                    params.push(&vectors[i]);
+                    params.push(&sparses[i]);
+                    params.push(&EMBEDDING_MODEL);
+                    params.push(&EMBEDDING_VERSION);
+                }
+
+                tx.execute(&query, &params).await?;
             }
+
             tx.commit().await?;
             Ok(())
         })
