@@ -39,6 +39,9 @@ pub struct MapPoint {
     pub cluster_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_description: Option<String>,
+    /// Populated by `map_get`/`map_nearest` when a `center_id` is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f32>,
 }
 
 struct ClusterResult {

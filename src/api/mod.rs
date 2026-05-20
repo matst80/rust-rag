@@ -1159,6 +1159,7 @@ pub async fn build_map_points(
                     tags: tags.filter(|t| !t.is_empty()),
                     cluster_name,
                     cluster_description,
+                    distance: None,
                 });
             }
         }

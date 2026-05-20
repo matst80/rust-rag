@@ -2063,17 +2063,176 @@ code embedder and returns top chunks. Optional filters: `repo` (name), `language
     // ===== Projection map =================================================
 
     #[tool(
-        description = "Return the global projection map: one point per item with PCA \
-3D coords (x,y,z), KMeans `cluster` id, and LLM-generated `cluster_name`/\
-`cluster_description` when available. Source of the data visualised at \
-`/visualize`. Items without projection metadata are omitted (rebuild required \
-after new items)."
+        description = "Return the projection map (points + clusters). For large stores, \
+filter to keep the response small. Optional params: \
+`center_id` (sort by 3D distance from this point; populates `distance`), \
+`radius` (only points within this distance of `center_id`), \
+`cluster` (only this cluster id, post-override), \
+`ids` (explicit subset), \
+`limit` (cap result count after sort), \
+`compact` (drop snippet/tags/cluster_description — ~6× smaller), \
+`include_distance` (force distance field even without filtering). \
+Response also includes a `summary` block with per-cluster counts so callers \
+can browse without fetching every point."
     )]
-    async fn map_get(&self) -> Result<Json<MapGetResponse>, String> {
-        let points = crate::api::build_map_points(self.state.clone())
+    async fn map_get(
+        &self,
+        Parameters(params): Parameters<MapGetParams>,
+    ) -> Result<Json<MapGetResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Json(MapGetResponse { points }))
+        let total = all.len();
+
+        // Summary built from full set (pre-filter) so callers always see the
+        // whole cluster landscape.
+        let summary = build_map_summary(&all);
+
+        let center = params.center_id.as_ref().and_then(|cid| {
+            all.iter().find(|p| &p.id == cid).map(|p| (p.x, p.y, p.z))
+        });
+        if params.center_id.is_some() && center.is_none() {
+            return Err(format!(
+                "center_id not found in map: {}",
+                params.center_id.unwrap_or_default()
+            ));
+        }
+
+        let ids_filter: Option<std::collections::HashSet<String>> =
+            params.ids.map(|v| v.into_iter().collect());
+
+        let want_distance = center.is_some()
+            && (params.include_distance.unwrap_or(false) || params.radius.is_some() || params.center_id.is_some());
+
+        let mut points: Vec<crate::projection::MapPoint> = all
+            .into_iter()
+            .filter(|p| match (&ids_filter, params.cluster) {
+                (Some(set), _) if !set.contains(&p.id) => false,
+                (_, Some(c)) if p.cluster != c => false,
+                _ => true,
+            })
+            .map(|mut p| {
+                if let Some((cx, cy, cz)) = center {
+                    let dx = p.x - cx;
+                    let dy = p.y - cy;
+                    let dz = p.z - cz;
+                    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if want_distance {
+                        p.distance = Some(d);
+                    }
+                }
+                p
+            })
+            .filter(|p| match (params.radius, p.distance) {
+                (Some(r), Some(d)) => d <= r,
+                (Some(_), None) => false,
+                _ => true,
+            })
+            .collect();
+
+        if center.is_some() {
+            points.sort_by(|a, b| {
+                a.distance
+                    .unwrap_or(f32::INFINITY)
+                    .partial_cmp(&b.distance.unwrap_or(f32::INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        if let Some(lim) = params.limit {
+            points.truncate(lim);
+        }
+
+        if params.compact.unwrap_or(false) {
+            for p in &mut points {
+                p.snippet = None;
+                p.tags = None;
+                p.cluster_description = None;
+            }
+        }
+
+        Ok(Json(MapGetResponse {
+            points,
+            summary: Some(MapSummary {
+                total_points: total,
+                clusters: summary,
+            }),
+        }))
+    }
+
+    #[tool(
+        description = "Lightweight cluster index: returns one row per cluster with \
+`cluster` id, `name`, `description`, and `count`. Use this before `map_get` to \
+pick a target cluster cheaply without loading every point."
+    )]
+    async fn map_clusters(&self) -> Result<Json<MapClustersResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(MapClustersResponse {
+            clusters: build_map_summary(&all),
+        }))
+    }
+
+    #[tool(
+        description = "Find the k nearest points (3D PCA distance) to `center_id`. \
+Optional `exclude_cluster` skips points already in that cluster (useful when \
+hunting misclassified neighbours). `k` defaults to 20. The center point itself \
+is always excluded."
+    )]
+    async fn map_nearest(
+        &self,
+        Parameters(params): Parameters<MapNearestParams>,
+    ) -> Result<Json<MapGetResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let total = all.len();
+        let center = all
+            .iter()
+            .find(|p| p.id == params.center_id)
+            .map(|p| (p.x, p.y, p.z))
+            .ok_or_else(|| format!("center_id not found in map: {}", params.center_id))?;
+        let k = params.k.unwrap_or(20);
+
+        let mut points: Vec<crate::projection::MapPoint> = all
+            .into_iter()
+            .filter(|p| p.id != params.center_id)
+            .filter(|p| match params.exclude_cluster {
+                Some(c) => p.cluster != c,
+                None => true,
+            })
+            .map(|mut p| {
+                let dx = p.x - center.0;
+                let dy = p.y - center.1;
+                let dz = p.z - center.2;
+                p.distance = Some((dx * dx + dy * dy + dz * dz).sqrt());
+                p
+            })
+            .collect();
+        points.sort_by(|a, b| {
+            a.distance
+                .unwrap_or(f32::INFINITY)
+                .partial_cmp(&b.distance.unwrap_or(f32::INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        points.truncate(k);
+
+        if params.compact.unwrap_or(true) {
+            for p in &mut points {
+                p.snippet = None;
+                p.tags = None;
+                p.cluster_description = None;
+            }
+        }
+
+        Ok(Json(MapGetResponse {
+            points,
+            summary: Some(MapSummary {
+                total_points: total,
+                clusters: vec![],
+            }),
+        }))
     }
 
     #[tool(
@@ -2293,6 +2452,91 @@ pub struct CodeSearchResponse {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MapGetResponse {
     pub points: Vec<crate::projection::MapPoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<MapSummary>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapSummary {
+    pub total_points: usize,
+    pub clusters: Vec<MapClusterRow>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapClusterRow {
+    pub cluster: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapClustersResponse {
+    pub clusters: Vec<MapClusterRow>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapGetParams {
+    /// Anchor point. Result is sorted by 3D distance from it.
+    #[serde(default)]
+    pub center_id: Option<String>,
+    /// Only return points within this 3D distance of `center_id`.
+    #[serde(default)]
+    pub radius: Option<f32>,
+    /// Only return points in this cluster (post-override).
+    #[serde(default)]
+    pub cluster: Option<usize>,
+    /// Explicit subset of item ids.
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    /// Cap result count after sorting.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Drop snippet/tags/cluster_description to shrink payload (~6× smaller).
+    #[serde(default)]
+    pub compact: Option<bool>,
+    /// Populate `distance` even when not filtering by radius (requires `center_id`).
+    #[serde(default)]
+    pub include_distance: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapNearestParams {
+    /// Anchor point.
+    pub center_id: String,
+    /// Number of neighbours to return. Default 20.
+    #[serde(default)]
+    pub k: Option<usize>,
+    /// Skip points already in this cluster. Handy for hunting misclassified
+    /// items near a cluster the anchor belongs to.
+    #[serde(default)]
+    pub exclude_cluster: Option<usize>,
+    /// Drop snippet/tags/cluster_description (default true for this tool).
+    #[serde(default)]
+    pub compact: Option<bool>,
+}
+
+fn build_map_summary(points: &[crate::projection::MapPoint]) -> Vec<MapClusterRow> {
+    use std::collections::BTreeMap;
+    let mut by: BTreeMap<usize, MapClusterRow> = BTreeMap::new();
+    for p in points {
+        let row = by.entry(p.cluster).or_insert_with(|| MapClusterRow {
+            cluster: p.cluster,
+            name: None,
+            description: None,
+            count: 0,
+        });
+        row.count += 1;
+        if row.name.is_none() {
+            row.name = p.cluster_name.clone();
+        }
+        if row.description.is_none() {
+            row.description = p.cluster_description.clone();
+        }
+    }
+    by.into_values().collect()
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
