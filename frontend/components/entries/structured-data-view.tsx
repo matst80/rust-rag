@@ -1,7 +1,7 @@
 "use client"
 
 import { Badge } from "@/components/ui/badge"
-import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User, Activity, AlertCircle, ShieldAlert, Wrench, Server } from "lucide-react"
+import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User, Activity, AlertCircle, ShieldAlert, Wrench, Server, Dumbbell, Timer, Footprints, TrendingUp } from "lucide-react"
 import { EntryTagList } from "../ui/entry-tag"
 import { MarkdownView } from "./markdown-view"
 
@@ -395,6 +395,115 @@ function FactView({ data }: { data: any }) {
 }
 
 /**
+ * Specialized view for 'workout' entries
+ */
+function WorkoutView({ data }: { data: any }) {
+  return (
+    <div className="space-y-8">
+      {/* Header section */}
+      <div className="flex flex-wrap items-end justify-between gap-6 pb-6 border-b border-border/40">
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-primary/60">
+            <TrendingUp className="size-4" />
+            <span className="font-mono text-[10px] font-black uppercase tracking-[3px]">Performance Log</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="size-12 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
+              <Dumbbell className="size-6 text-primary" />
+            </div>
+            <div>
+              <h3 className="text-2xl font-bold tracking-tight text-foreground/90">Training Session</h3>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground mt-1">
+                <Calendar className="size-3.5" />
+                <span>{data.date}</span>
+                {data.duration_minutes && (
+                  <>
+                    <span className="mx-1 opacity-30">|</span>
+                    <Timer className="size-3.5" />
+                    <span>{data.duration_minutes}m</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {data.notes && (
+          <div className="max-w-md p-4 rounded-xl bg-muted/30 border border-border/40 italic text-sm text-muted-foreground leading-relaxed">
+            {data.notes}
+          </div>
+        )}
+      </div>
+
+      {/* Exercises List */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {data.exercises?.map((ex: any, i: number) => (
+          <div key={i} className="group relative p-6 rounded-2xl border border-border/60 bg-card hover:border-primary/40 hover:bg-primary/[0.01] transition-all overflow-hidden">
+            <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+               {ex.sets?.[0]?.distance_m ? <Footprints className="size-12" /> : <Dumbbell className="size-12" />}
+            </div>
+            
+            <div className="space-y-4">
+              <h4 className="font-bold text-lg text-foreground/90 group-hover:text-primary transition-colors flex items-center gap-2">
+                {ex.name}
+              </h4>
+
+              <div className="flex flex-wrap gap-2">
+                {ex.sets?.map((set: any, si: number) => (
+                  <div key={si} className="px-3 py-2 rounded-lg bg-muted/40 border border-border/40 flex flex-col items-center min-w-[60px] group/set hover:border-primary/30 transition-colors">
+                    <span className="text-[9px] font-mono font-black uppercase tracking-widest text-muted-foreground/60 group-hover/set:text-primary/60 transition-colors">
+                      Set {si + 1}
+                    </span>
+                    <div className="flex items-baseline gap-0.5">
+                      {set.reps !== undefined && (
+                        <>
+                          <span className="text-sm font-bold">{set.reps}</span>
+                          <span className="text-[10px] text-muted-foreground">x</span>
+                        </>
+                      )}
+                      {set.weight_kg !== undefined && (
+                        <>
+                          <span className="text-sm font-bold">{set.weight_kg}</span>
+                          <span className="text-[10px] text-muted-foreground">kg</span>
+                        </>
+                      )}
+                      {set.distance_m !== undefined && (
+                        <>
+                          <span className="text-sm font-bold">{set.distance_m / 1000}</span>
+                          <span className="text-[10px] text-muted-foreground">km</span>
+                        </>
+                      )}
+                      {set.duration_seconds !== undefined && (
+                        <>
+                          <span className="text-sm font-bold">{set.duration_seconds}</span>
+                          <span className="text-[10px] text-muted-foreground">s</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {ex.notes && (
+                <p className="text-xs text-muted-foreground border-l-2 border-primary/20 pl-3 py-0.5 mt-2 line-clamp-2 italic">
+                  {ex.notes}
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {data.tags && data.tags.length > 0 && (
+        <div className="pt-4 flex flex-wrap gap-2">
+          <EntryTagList tags={data.tags} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * Specialized view for 'incident' entries
  */
 function IncidentView({ data }: { data: any }) {
@@ -594,6 +703,8 @@ export function StructuredDataView({ type, data }: StructuredDataViewProps) {
           <IncidentView data={data} />
         ) : type === "fact" ? (
           <FactView data={data} />
+        ) : type === "workout" ? (
+          <WorkoutView data={data} />
         ) : (
           <GenericDataView data={data} />
         )}
