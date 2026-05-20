@@ -108,16 +108,6 @@ export function CategorySidebar({
           ))
         )}
       </nav>
-      
-      <div className="mt-auto pt-6 hidden md:block">
-        <div className="rounded-3xl bg-primary/5 p-5 border border-primary/10">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-primary/60 mb-2">Memory Status</p>
-          <div className="flex items-center justify-between text-xs font-semibold">
-            <span className="opacity-60">Synced</span>
-            <span className="text-primary truncate ml-2">Real-time</span>
-          </div>
-        </div>
-      </div>
     </aside>
   )
 }
