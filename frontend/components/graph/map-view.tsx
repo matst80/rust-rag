@@ -65,7 +65,7 @@ export function MapView() {
   const [isFullscreen, setIsFullscreen] = React.useState(false)
   const [focusedCluster, setFocusedCluster] = React.useState<number | null>(null)
   const [showLegend, setShowLegend] = React.useState(true)
-  const [mode, setMode] = React.useState<"2d" | "3d">("2d")
+  const [mode, setMode] = React.useState<"2d" | "3d">("3d")
   const dragStart = React.useRef<{ x: number; y: number; tx: number; ty: number } | null>(null)
   const didDrag = React.useRef(false)
 
@@ -260,7 +260,7 @@ export function MapView() {
         : "flex flex-col h-full bg-background/50"
     }>
       <div className="flex items-center justify-between px-8 py-4 border-b border-primary/5 bg-background/30 backdrop-blur-md">
-        <div className="flex flex-col">
+        <div className="flex flex-col pl-72">
           <h2 className="text-xs font-black uppercase tracking-[0.2em] text-foreground/80">Neural Manifold</h2>
           <p className="text-[10px] text-muted-foreground font-mono uppercase tracking-widest mt-1 opacity-50">
             PCA · {mode.toUpperCase()} · {mapPoints.length} points · {clusterCount} clusters{mode === "2d" ? ` · zoom ${transform.scale.toFixed(2)}×` : ""}

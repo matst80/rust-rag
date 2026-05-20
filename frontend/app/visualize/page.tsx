@@ -16,7 +16,7 @@ export default function VisualizePage() {
       <AppHeader />
       <main className="h-[calc(100vh-3.5rem)] flex flex-col overflow-hidden">
         <Tabs defaultValue="topology" className="flex-1 flex flex-col h-full relative">
-          <div className="absolute top-8 right-8 z-50 pointer-events-none">
+          <div className="absolute top-3 left-4 z-50 pointer-events-none">
             <div className="pointer-events-auto bg-background/60 backdrop-blur-xl border border-primary/10 rounded-full p-1 shadow-2xl">
               <TabsList className="bg-transparent h-9 gap-1">
                 <TabsTrigger 

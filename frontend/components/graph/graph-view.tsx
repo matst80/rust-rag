@@ -486,7 +486,7 @@ function GraphViewContent() {
           onCanvasClick={onCanvasClick}
         />
 
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center pt-8">
+        <div className="pointer-events-none absolute left-72 right-0 top-0 flex justify-center pt-8">
           <div className="pointer-events-auto w-full max-w-2xl">
             <div className="rounded-full bg-background/60 backdrop-blur-3xl border border-primary/5 shadow-2xl p-1.5 flex items-center gap-2 animate-in fade-in slide-in-from-top-4 duration-1000">
               <Popover open={open} onOpenChange={setOpen}>
