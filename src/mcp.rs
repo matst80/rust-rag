@@ -2236,10 +2236,13 @@ is always excluded."
     }
 
     #[tool(
-        description = "Move an item to a different cluster. Writes \
-`metadata.projection.cluster_override` and updates the displayed cluster \
-immediately. The override is preserved across rebuilds. Pass `clear: true` to \
-remove the override and let the next rebuild pick the cluster from scratch."
+        description = "Move an item to a different cluster. Two ways: \
+(a) `anchor_id` — pin to the cluster of another item; survives rebuilds even \
+when numeric cluster ids shuffle (RECOMMENDED). \
+(b) `cluster` — numeric id; legacy, breaks if the algorithm renumbers \
+clusters. Pass `clear: true` to drop the override and revert to the \
+algorithm-assigned cluster on next rebuild. The change is reflected \
+immediately in `map_get`."
     )]
     async fn map_reassign(
         &self,
@@ -2266,15 +2269,48 @@ remove the override and let the next rebuild pick the cluster from scratch."
             .cloned()
             .unwrap_or_default();
         let clear = params.clear.unwrap_or(false);
+
+        let mut resolved_cluster: Option<usize> = None;
+        let mut resolved_anchor: Option<String> = None;
+
         if clear {
             proj.remove("cluster_override");
-        } else {
-            let cluster = params
-                .cluster
-                .ok_or_else(|| "cluster required unless clear=true".to_string())?;
+            proj.remove("cluster_anchor_id");
+        } else if let Some(anchor_id) = params.anchor_id.as_ref() {
+            // Resolve anchor's current raw cluster so `cluster` shows the
+            // right bucket immediately. The anchor itself is what survives
+            // rebuilds though.
+            let store = state.store.clone();
+            let anchor_lookup = anchor_id.clone();
+            let anchor_item = tokio::task::spawn_blocking(move || store.get_item(&anchor_lookup))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("anchor_id not found: {anchor_id}"))?;
+            let anchor_raw = anchor_item
+                .metadata
+                .get("projection")
+                .and_then(|p| {
+                    p.get("cluster_raw")
+                        .or_else(|| p.get("cluster"))
+                        .and_then(|v| v.as_u64())
+                })
+                .ok_or_else(|| format!("anchor_id has no projection cluster yet: {anchor_id}"))?
+                as usize;
+            proj.insert("cluster_anchor_id".into(), serde_json::json!(anchor_id));
+            proj.remove("cluster_override");
+            proj.insert("cluster".into(), serde_json::json!(anchor_raw));
+            resolved_anchor = Some(anchor_id.clone());
+            resolved_cluster = Some(anchor_raw);
+        } else if let Some(cluster) = params.cluster {
             proj.insert("cluster_override".into(), serde_json::json!(cluster));
+            proj.remove("cluster_anchor_id");
             proj.insert("cluster".into(), serde_json::json!(cluster));
+            resolved_cluster = Some(cluster);
+        } else {
+            return Err("provide anchor_id, cluster, or clear=true".into());
         }
+
         obj.insert("projection".into(), serde_json::Value::Object(proj));
 
         let store = state.store.clone();
@@ -2289,7 +2325,8 @@ remove the override and let the next rebuild pick the cluster from scratch."
 
         Ok(Json(MapReassignResponse {
             id,
-            cluster: params.cluster,
+            cluster: resolved_cluster,
+            anchor_id: resolved_anchor,
             cleared: clear,
         }))
     }
@@ -2543,10 +2580,17 @@ fn build_map_summary(points: &[crate::projection::MapPoint]) -> Vec<MapClusterRo
 pub struct MapReassignParams {
     /// Item id to move.
     pub id: String,
-    /// Target cluster id. Required unless `clear: true`.
+    /// RECOMMENDED. Id of an item already in the target cluster. The reassignment
+    /// pins to that item so it survives even when numeric cluster ids shuffle
+    /// on the next rebuild.
+    #[serde(default)]
+    pub anchor_id: Option<String>,
+    /// Legacy numeric cluster id. Will break across rebuilds if HDBSCAN
+    /// renumbers — prefer `anchor_id`.
     #[serde(default)]
     pub cluster: Option<usize>,
-    /// Remove the override and revert to algorithm-assigned cluster on next rebuild.
+    /// Remove any override (numeric or anchor) and revert to the
+    /// algorithm-assigned cluster on next rebuild.
     #[serde(default)]
     pub clear: Option<bool>,
 }
@@ -2554,7 +2598,10 @@ pub struct MapReassignParams {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MapReassignResponse {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_id: Option<String>,
     pub cleared: bool,
 }
 

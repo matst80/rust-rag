@@ -1,7 +1,7 @@
 "use client"
 
 import { Badge } from "@/components/ui/badge"
-import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User } from "lucide-react"
+import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User, Activity, AlertCircle, ShieldAlert, Wrench, Server } from "lucide-react"
 import { EntryTagList } from "../ui/entry-tag"
 import { MarkdownView } from "./markdown-view"
 
@@ -350,6 +350,190 @@ function RecipeView({ data }: { data: any }) {
 }
 
 /**
+ * Specialized view for 'fact' entries
+ */
+function FactView({ data }: { data: any }) {
+  const confidencePercent = Math.round((data.confidence || 0) * 100)
+  const confidenceColor = confidencePercent > 80 ? "text-emerald-500" : confidencePercent > 50 ? "text-amber-500" : "text-red-500"
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2 text-primary/60">
+            <ShieldCheck className="size-4" />
+            <span className="font-mono text-[10px] font-black uppercase tracking-[2px]">Fact</span>
+          </div>
+          <h3 className="text-xl font-bold tracking-tight text-foreground/90">{data.fact || "Untitled Fact"}</h3>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <div className={`text-xs font-mono font-bold ${confidenceColor}`}>
+            {confidencePercent}% Confidence
+          </div>
+          {data.last_verified && (
+            <div className="text-[10px] font-mono text-muted-foreground uppercase">
+              Verified: {data.last_verified}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {data.source && (
+        <div className="p-3 rounded bg-muted/30 border border-border/40 text-xs text-muted-foreground flex items-center gap-2">
+          <Link2 className="size-3" />
+          <span className="font-medium italic truncate max-w-md">Source: {data.source}</span>
+        </div>
+      )}
+
+      {data.tags && Array.isArray(data.tags) && data.tags.length > 0 && (
+        <div className="pt-2">
+          <EntryTagList tags={data.tags} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Specialized view for 'incident' entries
+ */
+function IncidentView({ data }: { data: any }) {
+  const statusConfig = {
+    active: { icon: <Activity className="size-4 text-red-500 animate-pulse" />, styles: "bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800" },
+    monitoring: { icon: <Clock className="size-4 text-amber-500" />, styles: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800" },
+    resolved: { icon: <CheckCircle2 className="size-4 text-emerald-500" />, styles: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800" },
+    post_mortem: { icon: <ShieldCheck className="size-4 text-blue-500" />, styles: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800" },
+  }
+
+  const severityConfig = {
+    sev1: { label: "Critical", styles: "bg-red-600 text-white border-red-700" },
+    sev2: { label: "High", styles: "bg-orange-500 text-white border-orange-600" },
+    sev3: { label: "Medium", styles: "bg-amber-500 text-white border-amber-600" },
+    sev4: { label: "Low", styles: "bg-blue-500 text-white border-blue-600" },
+  }
+
+  const currentStatus = (data.status as keyof typeof statusConfig) || "active"
+  const sConfig = statusConfig[currentStatus]
+  const currentSeverity = (data.severity as keyof typeof severityConfig) || "sev3"
+  const sevConfig = severityConfig[currentSeverity]
+
+  return (
+    <div className="space-y-8">
+      {/* Header section */}
+      <div className="flex flex-wrap items-start justify-between gap-6 pb-6 border-b border-border/40">
+        <div className="space-y-4 max-w-2xl">
+          <div className="flex items-center gap-2">
+             <div className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${sevConfig.styles}`}>
+              {sevConfig.label}
+            </div>
+            <h3 className="text-2xl font-bold tracking-tight text-foreground/90">{data.title || "Untitled Incident"}</h3>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className={`flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-semibold ${sConfig.styles}`}>
+              {sConfig.icon}
+              <span className="capitalize">{currentStatus.replace('_', ' ')}</span>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground font-medium">
+              <Calendar className="size-4" />
+              <span>{data.started_at}</span>
+              {data.resolved_at && (
+                <>
+                  <ArrowRight className="size-3" />
+                  <span>{data.resolved_at}</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+        
+        {data.responders && data.responders.length > 0 && (
+          <div className="space-y-2">
+            <span className="text-[10px] font-mono font-black uppercase tracking-wider text-muted-foreground/80 flex items-center gap-1.5">
+              <Users className="size-3" />
+              Responders
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {data.responders.map((responder: string, i: number) => (
+                <Badge key={i} variant="outline" className="rounded-sm font-medium px-2 py-0.5 bg-muted/30">
+                  {responder}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Main Content Sections */}
+      <div className="grid grid-cols-1 gap-8">
+        {/* Summary */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="size-6 rounded-md bg-muted flex items-center justify-center border border-border/60">
+              <Activity className="size-3.5 text-muted-foreground" />
+            </div>
+            <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary/80">Summary</span>
+          </div>
+          <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
+            <MarkdownView content={data.summary} />
+          </div>
+        </div>
+
+        {/* Affected Services */}
+        {data.affected_services && data.affected_services.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="size-6 rounded-md bg-muted flex items-center justify-center border border-border/60">
+                <Server className="size-3.5 text-muted-foreground" />
+              </div>
+              <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary/80">Affected Services</span>
+            </div>
+            <div className="flex flex-wrap gap-2 pl-9">
+              {data.affected_services.map((service: string, i: number) => (
+                <Badge key={i} variant="secondary" className="bg-primary/5 text-primary border-primary/10">
+                  {service}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Root Cause */}
+        {data.root_cause && (
+          <div className="space-y-3 p-6 rounded-xl bg-amber-500/[0.03] border border-amber-500/10 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-amber-500/40" />
+            <div className="flex items-center gap-3">
+              <div className="size-6 rounded-md bg-amber-500/10 flex items-center justify-center border border-amber-500/20">
+                <ShieldAlert className="size-3.5 text-amber-600" />
+              </div>
+              <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-amber-600">Root Cause</span>
+            </div>
+            <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
+              <MarkdownView content={data.root_cause} />
+            </div>
+          </div>
+        )}
+
+        {/* Resolution */}
+        {data.resolution && (
+          <div className="space-y-3 p-6 rounded-xl bg-emerald-500/[0.03] border border-emerald-500/10 relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500/40" />
+            <div className="flex items-center gap-3">
+              <div className="size-6 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                <Wrench className="size-3.5 text-emerald-600" />
+              </div>
+              <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-emerald-600">Resolution</span>
+            </div>
+            <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
+              <MarkdownView content={data.resolution} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
  * Generic Property Grid for any data type
  */
 function GenericDataView({ data }: { data: any }) {
@@ -406,6 +590,10 @@ export function StructuredDataView({ type, data }: StructuredDataViewProps) {
           <TodoView data={data} />
         ) : type === "recipe" ? (
           <RecipeView data={data} />
+        ) : type === "incident" ? (
+          <IncidentView data={data} />
+        ) : type === "fact" ? (
+          <FactView data={data} />
         ) : (
           <GenericDataView data={data} />
         )}

@@ -46,9 +46,15 @@ pub struct MapPoint {
 
 struct ClusterResult {
     items_to_update: Vec<ItemRecord>,
+    /// Raw algorithmic cluster id per item (parallel to items_to_update).
     assignments: Vec<usize>,
+    /// Effective cluster id after applying overrides + anchors. Same length.
+    effective: Vec<usize>,
     coords: Vec<(f32, f32, f32)>,
     noise_bucket: Option<usize>,
+    /// Persisted user overrides, parallel to items_to_update.
+    cluster_overrides: Vec<Option<usize>>,
+    cluster_anchor_ids: Vec<Option<String>>,
 }
 
 #[derive(Default, Clone, serde::Deserialize)]
@@ -183,6 +189,7 @@ fn compute_clusters(
     let mut vectors = Vec::new();
     let mut items_to_update = Vec::new();
     let mut overrides: Vec<Option<usize>> = Vec::new();
+    let mut anchor_ids: Vec<Option<String>> = Vec::new();
     let mut rng = rand::thread_rng();
     use rand::Rng;
 
@@ -224,13 +231,17 @@ fn compute_clusters(
             for v in avg.iter_mut() {
                 *v += (rng.r#gen::<f32>() - 0.5) * 1e-5;
             }
-            let cluster_override = item
-                .metadata
-                .get("projection")
+            let proj = item.metadata.get("projection");
+            let cluster_override = proj
                 .and_then(|p| p.get("cluster_override"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
+            let anchor_id = proj
+                .and_then(|p| p.get("cluster_anchor_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             overrides.push(cluster_override);
+            anchor_ids.push(anchor_id);
             vectors.push(avg);
             items_to_update.push(item);
         }
@@ -289,7 +300,7 @@ fn compute_clusters(
     let max_cluster = raw_assignments.iter().copied().max().unwrap_or(0).max(0) as usize;
     let has_noise = raw_assignments.iter().any(|&c| c < 0);
     let noise_bucket = if has_noise { Some(max_cluster + 1) } else { None };
-    let mut assignments: Vec<usize> = raw_assignments
+    let assignments: Vec<usize> = raw_assignments
         .iter()
         .map(|&c| {
             if c < 0 {
@@ -300,10 +311,103 @@ fn compute_clusters(
         })
         .collect();
 
-    // Apply user overrides last so manual reassignments survive every rebuild.
-    for (i, ov) in overrides.iter().enumerate() {
-        if let Some(c) = ov {
-            assignments[i] = *c;
+    // Effective assignments: anchors resolve to anchor's raw cluster, then
+    // numeric overrides apply, otherwise raw assignment wins.
+    let id_to_idx: std::collections::HashMap<String, usize> = items_to_update
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (item.id.clone(), i))
+        .collect();
+    let mut effective: Vec<usize> = (0..assignments.len())
+        .map(|i| {
+            if let Some(anchor) = anchor_ids[i].as_deref() {
+                if let Some(&j) = id_to_idx.get(anchor) {
+                    return assignments[j];
+                }
+            }
+            if let Some(c) = overrides[i] {
+                return c;
+            }
+            assignments[i]
+        })
+        .collect();
+
+    // Graph-edge label propagation: pull noise-bucket items into the cluster
+    // their confirmed manual neighbours belong to. Skip items that already
+    // carry a user override/anchor — those are explicit human decisions.
+    let propagate = std::env::var("RAG_PROJECTION_PROPAGATE_NOISE")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+        .unwrap_or(true);
+    let rounds = std::env::var("RAG_PROJECTION_PROPAGATE_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(2);
+    let min_score = std::env::var("RAG_PROJECTION_PROPAGATE_MIN_SCORE")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.5);
+
+    if propagate {
+        if let Some(noise) = noise_bucket {
+            let mut moved_total = 0usize;
+            for round in 0..rounds {
+                let mut moved = 0usize;
+                let snapshot = effective.clone();
+                for i in 0..effective.len() {
+                    if effective[i] != noise {
+                        continue;
+                    }
+                    if overrides[i].is_some() || anchor_ids[i].is_some() {
+                        continue;
+                    }
+                    let edges = match store.list_graph_edges(
+                        Some(&items_to_update[i].id),
+                        Some(crate::db::GraphEdgeType::Manual),
+                        None,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("list_graph_edges for {} failed: {e:?}", items_to_update[i].id);
+                            continue;
+                        }
+                    };
+                    let mut votes: std::collections::HashMap<usize, f32> =
+                        std::collections::HashMap::new();
+                    for edge in edges {
+                        if edge.weight <= 0.0 {
+                            continue;
+                        }
+                        let other = if edge.from_item_id == items_to_update[i].id {
+                            &edge.to_item_id
+                        } else {
+                            &edge.from_item_id
+                        };
+                        if let Some(&j) = id_to_idx.get(other) {
+                            let nc = snapshot[j];
+                            if nc == noise {
+                                continue;
+                            }
+                            *votes.entry(nc).or_insert(0.0) += edge.weight;
+                        }
+                    }
+                    if let Some((&winner, &score)) =
+                        votes.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    {
+                        if score >= min_score {
+                            effective[i] = winner;
+                            moved += 1;
+                        }
+                    }
+                }
+                moved_total += moved;
+                info!("propagation round {}: moved {} noise items", round + 1, moved);
+                if moved == 0 {
+                    break;
+                }
+            }
+            if moved_total > 0 {
+                info!("graph propagation rescued {moved_total} noise items into dense clusters");
+            }
         }
     }
 
@@ -336,8 +440,11 @@ fn compute_clusters(
     Ok(Some(ClusterResult {
         items_to_update,
         assignments,
+        effective,
         coords,
         noise_bucket,
+        cluster_overrides: overrides,
+        cluster_anchor_ids: anchor_ids,
     }))
 }
 
@@ -403,14 +510,52 @@ async fn generate_cluster_labels(
             response_format_json: true,
         };
 
+        // Compute a deterministic fallback up-front: first sample's title.
+        // Used when the LLM returns empty or unparseable JSON.
+        let fallback_name = indices
+            .first()
+            .and_then(|&i| {
+                items[i]
+                    .analysis
+                    .as_ref()
+                    .and_then(|a| a.get("title"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| format!("Cluster {cluster_id}"));
+
         match crate::api::analysis::chat_completion_text(http_client, req).await {
             Ok(raw) => {
                 let parsed = parse_label(&raw);
                 if parsed.name.is_some() {
                     out.insert(*cluster_id, parsed);
+                } else {
+                    warn!(
+                        "cluster {} label parse failed, falling back to '{}' — raw: {:?}",
+                        cluster_id, fallback_name, raw
+                    );
+                    out.insert(
+                        *cluster_id,
+                        ClusterLabel {
+                            name: Some(fallback_name),
+                            description: parsed.description,
+                        },
+                    );
                 }
             }
-            Err(e) => warn!("cluster {} label LLM error: {:?}", cluster_id, e),
+            Err(e) => {
+                warn!(
+                    "cluster {} label LLM error: {:?} — falling back to '{}'",
+                    cluster_id, e, fallback_name
+                );
+                out.insert(
+                    *cluster_id,
+                    ClusterLabel {
+                        name: Some(fallback_name),
+                        description: None,
+                    },
+                );
+            }
         }
     }
 
@@ -424,13 +569,41 @@ fn parse_label(raw: &str) -> ClusterLabel {
         .or_else(|| trimmed.strip_prefix("```"))
         .map(|s| s.trim_end_matches("```").trim())
         .unwrap_or(trimmed);
+
+    // Try strict JSON first (object slice between outer braces).
     let start = stripped.find('{');
     let end = stripped.rfind('}');
-    let candidate = match (start, end) {
-        (Some(s), Some(e)) if e > s => &stripped[s..=e],
-        _ => stripped,
-    };
-    serde_json::from_str::<ClusterLabel>(candidate).unwrap_or_default()
+    if let (Some(s), Some(e)) = (start, end) {
+        if e > s {
+            if let Ok(parsed) = serde_json::from_str::<ClusterLabel>(&stripped[s..=e]) {
+                if parsed.name.is_some() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    // Recover truncated JSON: opening brace but no closing.
+    if let Some(s) = start {
+        if end.map(|e| e <= s).unwrap_or(true) {
+            let patched = format!("{}}}", &stripped[s..]);
+            if let Ok(parsed) = serde_json::from_str::<ClusterLabel>(&patched) {
+                if parsed.name.is_some() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    // Bare-string fallback: model ignored JSON instruction. Strip quotes and
+    // trailing punctuation, take the first ≤ 60 chars as a label name.
+    let bare = stripped.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+    if !bare.is_empty() && bare.len() < 200 && !bare.contains('\n') {
+        let name: String = bare.chars().take(60).collect();
+        return ClusterLabel {
+            name: Some(name),
+            description: None,
+        };
+    }
+    ClusterLabel::default()
 }
 
 fn write_metadata(
@@ -451,19 +624,27 @@ fn write_metadata(
                 metadata.as_object_mut().unwrap()
             }
         };
-        let prior_override = obj
-            .get("projection")
-            .and_then(|p| p.get("cluster_override"))
-            .cloned();
+        let raw_cluster = result.assignments[i];
+        let effective_cluster = result.effective[i];
         let mut map_data = serde_json::Map::new();
         map_data.insert("x".to_string(), serde_json::json!(x));
         map_data.insert("y".to_string(), serde_json::json!(y));
         map_data.insert("z".to_string(), serde_json::json!(z));
-        map_data.insert("cluster".to_string(), serde_json::json!(cluster_id));
-        if let Some(v) = prior_override {
-            map_data.insert("cluster_override".to_string(), v);
+        // `cluster` is the EFFECTIVE id (post-override/anchor). `cluster_raw`
+        // is the algorithm's untouched assignment — render-time label
+        // resolution uses raw labels of organic members.
+        map_data.insert("cluster".to_string(), serde_json::json!(effective_cluster));
+        map_data.insert("cluster_raw".to_string(), serde_json::json!(raw_cluster));
+        if let Some(v) = result.cluster_overrides[i] {
+            map_data.insert("cluster_override".to_string(), serde_json::json!(v));
         }
-        if let Some(label) = labels.get(&cluster_id) {
+        if let Some(a) = &result.cluster_anchor_ids[i] {
+            map_data.insert("cluster_anchor_id".to_string(), serde_json::json!(a));
+        }
+        // Store the label for the EFFECTIVE cluster so legacy readers that
+        // don't do render-time resolution still see something sensible. The
+        // new build_map_points overrides this at render time anyway.
+        if let Some(label) = labels.get(&effective_cluster) {
             if let Some(name) = &label.name {
                 map_data.insert("cluster_name".to_string(), serde_json::json!(name));
             }
