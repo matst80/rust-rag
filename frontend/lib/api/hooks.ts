@@ -218,6 +218,13 @@ export function useCreateEdge() {
   )
 }
 
+export function useUpdateEdge(id: string) {
+  return useSWRMutation<Edge, Error, string, UpdateEdgeRequest>(
+    ["edge", id],
+    (_, { arg }) => api.edges.update(id, arg)
+  )
+}
+
 export function useDeleteEdge() {
   return useSWRMutation<void, Error, string, string>(
     "edges",
