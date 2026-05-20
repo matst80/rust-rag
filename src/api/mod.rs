@@ -45,9 +45,10 @@ use tracing::error;
 use uuid::Uuid;
 
 pub mod attachments;
-mod analysis;
+pub mod analysis;
 mod auth;
 mod chunking;
+pub mod code;
 mod multimodal;
 mod openai;
 mod ontology;
@@ -96,6 +97,14 @@ struct RequestAuthContext {
 #[derive(Clone)]
 pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
+    /// Second embedder dedicated to source-code chunks (BGE-Code-v1, 1536-d).
+    /// Loaded lazily; `None` when `RAG_CODE_EMBEDDER_PATH` is unset. Used by
+    /// the code-ingest pipeline and `code_*` MCP tools.
+    pub code_embedder: Option<Arc<EmbedderHandle>>,
+    /// Async data-access for `code_repos`/`code_files`/`code_chunks`. `None`
+    /// when running on pure-SQLite (no `RAG_DATABASE_URL`) — the code-ingest
+    /// subsystem stays disabled in that mode.
+    pub code_store: Option<Arc<crate::db::code_store::CodeStore>>,
     pub store: Arc<dyn VectorStore>,
     pub auth_store: Arc<dyn AuthStore>,
     pub user_memory: Arc<dyn UserMemoryStore>,
@@ -154,6 +163,7 @@ pub struct AppState {
     pub push: Option<Arc<dyn PushStore>>,
     pub web_push: Arc<WebPushConfig>,
     pub whisper: Arc<crate::config::WhisperConfig>,
+    pub projection_worker: Arc<crate::projection::ProjectionWorker>,
 }
 
 impl AppState {
@@ -173,7 +183,9 @@ impl AppState {
         let multimodal_timeout = multimodal.timeout_secs.max(1);
         Self {
             embedder,
-            store,
+            code_embedder: None,
+            code_store: None,
+            store: store.clone(),
             auth_store,
             user_memory,
             messages,
@@ -212,6 +224,7 @@ impl AppState {
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
+            projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
         }
     }
 
@@ -268,6 +281,20 @@ impl AppState {
         self
     }
 
+    /// Wire the code-embedder handle (BGE-Code-v1). Call once during startup.
+    /// Absent → `code_*` MCP tools refuse, code-ingest worker stays idle.
+    pub fn with_code_embedder(mut self, handle: Arc<EmbedderHandle>) -> Self {
+        self.code_embedder = Some(handle);
+        self
+    }
+
+    /// Wire the code-store (Postgres-backed). Only wired when running
+    /// against Postgres; pure-SQLite dev mode leaves it `None`.
+    pub fn with_code_store(mut self, store: Arc<crate::db::code_store::CodeStore>) -> Self {
+        self.code_store = Some(store);
+        self
+    }
+
     pub fn with_reranker(
         mut self,
         reranker: Arc<dyn crate::reranker::Reranker>,
@@ -302,7 +329,9 @@ impl AppState {
         };
         Self {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
-            store,
+            code_embedder: None,
+            code_store: None,
+            store: store.clone(),
             auth_store,
             user_memory: Arc::new(NoopUserMemory),
             messages: Arc::new(NoopMessages),
@@ -341,6 +370,7 @@ impl AppState {
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
+            projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
         }
     }
 }
@@ -374,6 +404,19 @@ impl EmbedderHandle {
 
     pub fn mark_failed(&self, error: String) {
         *self.inner.write().expect("embedder state lock poisoned") = EmbedderState::Failed(error);
+    }
+
+    /// Public, non-API variant of `get_ready` for use by background workers
+    /// (e.g. code-ingest). Returns `anyhow::Error` so it composes with
+    /// non-axum call sites.
+    pub fn try_ready(&self) -> anyhow::Result<Arc<dyn EmbeddingService>> {
+        match &*self.inner.read().expect("embedder state lock poisoned") {
+            EmbedderState::Loading => anyhow::bail!("embedder is still loading"),
+            EmbedderState::Ready(embedder) => Ok(embedder.clone()),
+            EmbedderState::Failed(error) => {
+                anyhow::bail!("embedder failed to initialize: {error}")
+            }
+        }
     }
 
     pub(crate) fn get_ready(&self) -> Result<Arc<dyn EmbeddingService>, ApiError> {
@@ -1031,6 +1074,99 @@ impl UserMemoryStore for NoopUserMemory {
     }
 }
 
+async fn rebuild_map(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .projection_worker
+        .run_rebuild(state.http_client.clone(), state.analysis.clone())
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({ "status": "started" })))
+}
+
+async fn get_map(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::projection::MapPoint>>, ApiError> {
+    Ok(Json(build_map_points(state).await?))
+}
+
+pub async fn build_map_points(
+    state: AppState,
+) -> Result<Vec<crate::projection::MapPoint>, ApiError> {
+    let (items, _) = tokio::task::spawn_blocking(move || {
+        state.store.list_items(ListItemsRequest {
+            limit: Some(10000), // High limit for the global map
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(proj) = item.metadata.get("projection") {
+            if let (Some(x), Some(y), Some(cluster)) = (
+                proj.get("x").and_then(|v| v.as_f64()),
+                proj.get("y").and_then(|v| v.as_f64()),
+                proj.get("cluster").and_then(|v| v.as_u64()),
+            ) {
+                let z = proj.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let cluster_name = proj
+                    .get("cluster_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let cluster_description = proj
+                    .get("cluster_description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let (title, doc_type, tags) = match item.analysis.as_ref() {
+                    Some(a) => (
+                        a.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        a.get("doc_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        a.get("tags").and_then(|v| v.as_array()).map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                                .collect::<Vec<_>>()
+                        }),
+                    ),
+                    None => (None, None, None),
+                };
+                let snippet = {
+                    let t = item.text.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        let mut s: String = t.chars().take(160).collect();
+                        if t.chars().count() > 160 {
+                            s.push('…');
+                        }
+                        Some(s)
+                    }
+                };
+                out.push(crate::projection::MapPoint {
+                    id: item.id,
+                    x: x as f32,
+                    y: y as f32,
+                    z: z as f32,
+                    cluster: cluster as usize,
+                    title,
+                    snippet,
+                    source_id: Some(item.source_id),
+                    path: item.path,
+                    doc_type,
+                    tags: tags.filter(|t| !t.is_empty()),
+                    cluster_name,
+                    cluster_description,
+                });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
@@ -1050,6 +1186,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/edges", get(list_graph_edges))
         .route("/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
+        .route("/api/map", get(get_map))
+        .route("/admin/map/rebuild", post(rebuild_map))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
         .route("/admin/tokens/count", post(count_tokens))
@@ -1142,6 +1280,16 @@ pub fn router(state: AppState) -> Router {
             "/api/integrations/google/drive/fetch/{id}",
             get(integrations::google::drive_fetch),
         )
+        .route(
+            "/api/code/repos",
+            get(code::list_repos).post(code::upsert_repo),
+        )
+        .route("/api/code/repos/{name}", delete(code::delete_repo))
+        .route("/api/code/repos/{name}/plan", post(code::plan_ingest))
+        .route("/api/code/repos/{name}/files", post(code::ingest_batch).get(code::list_files))
+        .route("/api/code/repos/{name}/files/{*path}", get(code::get_file_detail))
+        .route("/api/code/repos/{name}/sweep", post(code::sweep))
+        .route("/api/code/search", post(code::search_code))
         .route("/api/push/vapid-public-key", get(push::vapid_public_key))
         .route("/api/push/subscribe", post(push::subscribe))
         .route(

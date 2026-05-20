@@ -170,6 +170,17 @@ export function useGraphStatus() {
   })
 }
 
+export function useMap() {
+  return useSWR<MapPoint[]>("api-map", api.map.get, {
+    revalidateOnFocus: false,
+    revalidateIfStale: false,
+  })
+}
+
+export function useRebuildMap() {
+  return useSWRMutation("/admin/map/rebuild", api.map.rebuild)
+}
+
 export function useEdges() {
   return useSWR<Edge[]>("edges", api.edges.list)
 }

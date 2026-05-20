@@ -1878,6 +1878,440 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map(Json)
             .map_err(|e| e.to_string())
     }
+
+    // ===== Code-repo ingestion ============================================
+
+    #[tool(
+        description = "Register a local source-repo for ingestion into the code-search store. \
+`root_path` must be an absolute path on the server. Include/exclude globs are \
+optional (defaults respect .gitignore + skip target/, node_modules/, etc.). \
+After registration this tool kicks off a full scan synchronously and returns \
+ingest stats."
+    )]
+    async fn code_add_repo(
+        &self,
+        Parameters(params): Parameters<CodeAddRepoParams>,
+    ) -> Result<Json<CodeIngestResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let repo = crate::db::code::CodeRepo {
+            id: format!("cr_{}", uuid::Uuid::now_v7().simple()),
+            name: params.name.clone(),
+            root_path: params.root_path.clone(),
+            include_globs: params.include_globs.clone().unwrap_or_default(),
+            exclude_globs: params.exclude_globs.clone().unwrap_or_default(),
+            enabled: true,
+            default_branch: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        // Preserve id when name already exists.
+        let stored = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?;
+        let repo = match stored {
+            Some(existing) => crate::db::code::CodeRepo {
+                id: existing.id,
+                created_at: existing.created_at,
+                ..repo
+            },
+            None => repo,
+        };
+        store.upsert_repo(&repo).await.map_err(|e| e.to_string())?;
+        let report = crate::code::ingest::ingest_repo(
+            &repo,
+            store.clone(),
+            embedder.clone(),
+            crate::code::ingest::IngestOptions::default(),
+        )
+        .await
+        .map_err(|e| format!("ingest failed: {e:#}"))?;
+        Ok(Json(CodeIngestResponse::from_report(&repo.name, report)))
+    }
+
+    #[tool(
+        description = "Re-walk an already-registered code repo. Skips files whose \
+content_hash matches the DB unless `force` is true. Returns ingest stats."
+    )]
+    async fn code_reindex(
+        &self,
+        Parameters(params): Parameters<CodeReindexParams>,
+    ) -> Result<Json<CodeIngestResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let repo = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {}", params.name))?;
+        let opts = crate::code::ingest::IngestOptions {
+            force: params.force.unwrap_or(false),
+            ..Default::default()
+        };
+        let report = crate::code::ingest::ingest_repo(
+            &repo,
+            store.clone(),
+            embedder.clone(),
+            opts,
+        )
+        .await
+        .map_err(|e| format!("ingest failed: {e:#}"))?;
+        Ok(Json(CodeIngestResponse::from_report(&repo.name, report)))
+    }
+
+    #[tool(description = "List all registered code repos with file/chunk counts.")]
+    async fn code_list_repos(&self) -> Result<Json<CodeRepoListResponse>, String> {
+        let store = self
+            .state
+            .code_store
+            .clone()
+            .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+        let repos = store.list_repos(false).await.map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(repos.len());
+        for r in repos {
+            let files = store.list_file_paths(&r.id).await.map_err(|e| e.to_string())?;
+            out.push(CodeRepoSummary {
+                name: r.name,
+                root_path: r.root_path,
+                enabled: r.enabled,
+                file_count: files.len(),
+            });
+        }
+        Ok(Json(CodeRepoListResponse { repos: out }))
+    }
+
+    #[tool(
+        description = "Remove a registered code repo and all its files+chunks. \
+Does not touch the filesystem."
+    )]
+    async fn code_remove_repo(
+        &self,
+        Parameters(params): Parameters<CodeRemoveRepoParams>,
+    ) -> Result<Json<CodeRemoveResponse>, String> {
+        let store = self
+            .state
+            .code_store
+            .clone()
+            .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+        let repo = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {}", params.name))?;
+        store.delete_repo(&repo.id).await.map_err(|e| e.to_string())?;
+        Ok(Json(CodeRemoveResponse { deleted: params.name }))
+    }
+
+    #[tool(
+        description = "Semantic code search across registered repos. Embeds `query` with the \
+code embedder and returns top chunks. Optional filters: `repo` (name), `language` \
+(rust|ts|tsx|js|py|...), `path_prefix`. `limit` defaults to 10, max 50."
+    )]
+    async fn code_search(
+        &self,
+        Parameters(params): Parameters<CodeSearchParams>,
+    ) -> Result<Json<CodeSearchResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let embedder = embedder.try_ready().map_err(|e| e.to_string())?;
+        let q = params.query.trim();
+        if q.is_empty() {
+            return Err("empty query".into());
+        }
+        let q_owned = q.to_string();
+        let svc = embedder.clone();
+        let embedding = tokio::task::spawn_blocking(move || svc.embed(&q_owned))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let hits = store
+            .search(&crate::db::code::CodeQuery {
+                embedding,
+                repo: params.repo,
+                language: params.language,
+                path_prefix: params.path_prefix,
+                limit: params.limit.unwrap_or(10).min(50),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(CodeSearchResponse {
+            hits: hits
+                .into_iter()
+                .map(|h| {
+                    let snippet = h
+                        .chunk
+                        .content
+                        .lines()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    CodeSearchHit {
+                        repo: h.chunk.repo_name,
+                        path: h.chunk.path,
+                        language: h.chunk.language,
+                        symbol_kind: h.chunk.symbol_kind,
+                        symbol_name: h.chunk.symbol_name,
+                        signature: h.chunk.signature,
+                        start_line: h.chunk.start_line,
+                        end_line: h.chunk.end_line,
+                        snippet,
+                        score: h.score,
+                    }
+                })
+                .collect(),
+        }))
+    }
+
+    // ===== Projection map =================================================
+
+    #[tool(
+        description = "Return the global projection map: one point per item with PCA \
+3D coords (x,y,z), KMeans `cluster` id, and LLM-generated `cluster_name`/\
+`cluster_description` when available. Source of the data visualised at \
+`/visualize`. Items without projection metadata are omitted (rebuild required \
+after new items)."
+    )]
+    async fn map_get(&self) -> Result<Json<MapGetResponse>, String> {
+        let points = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(MapGetResponse { points }))
+    }
+
+    #[tool(
+        description = "Move an item to a different cluster. Writes \
+`metadata.projection.cluster_override` and updates the displayed cluster \
+immediately. The override is preserved across rebuilds. Pass `clear: true` to \
+remove the override and let the next rebuild pick the cluster from scratch."
+    )]
+    async fn map_reassign(
+        &self,
+        Parameters(params): Parameters<MapReassignParams>,
+    ) -> Result<Json<MapReassignResponse>, String> {
+        let state = self.state.clone();
+        let id = params.id.clone();
+        let store = state.store.clone();
+        let id_for_fetch = id.clone();
+        let item = tokio::task::spawn_blocking(move || store.get_item(&id_for_fetch))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("item not found: {id}"))?;
+
+        let mut metadata = item.metadata.clone();
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        let obj = metadata.as_object_mut().expect("metadata is object");
+        let mut proj = obj
+            .get("projection")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let clear = params.clear.unwrap_or(false);
+        if clear {
+            proj.remove("cluster_override");
+        } else {
+            let cluster = params
+                .cluster
+                .ok_or_else(|| "cluster required unless clear=true".to_string())?;
+            proj.insert("cluster_override".into(), serde_json::json!(cluster));
+            proj.insert("cluster".into(), serde_json::json!(cluster));
+        }
+        obj.insert("projection".into(), serde_json::Value::Object(proj));
+
+        let store = state.store.clone();
+        let id_for_write = id.clone();
+        let meta_for_write = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            store.update_item_metadata(&id_for_write, meta_for_write)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        Ok(Json(MapReassignResponse {
+            id,
+            cluster: params.cluster,
+            cleared: clear,
+        }))
+    }
+
+    #[tool(
+        description = "Kick off a background rebuild of the projection map (KMeans + PCA \
+on item embeddings, then LLM cluster labelling). Set `RAG_PROJECTION_ALGO=hdbscan` \
+on the server to use HDBSCAN instead. Returns immediately; a second call while a \
+rebuild is running is a no-op."
+    )]
+    async fn map_rebuild(&self) -> Result<Json<MapRebuildResponse>, String> {
+        if self.state.projection_worker.is_processing().await {
+            return Ok(Json(MapRebuildResponse {
+                status: "already_running".into(),
+            }));
+        }
+        self.state
+            .projection_worker
+            .run_rebuild(self.state.http_client.clone(), self.state.analysis.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(MapRebuildResponse {
+            status: "started".into(),
+        }))
+    }
+}
+
+fn code_subsystem(
+    state: &AppState,
+) -> Result<(Arc<crate::db::code_store::CodeStore>, Arc<crate::api::EmbedderHandle>), String> {
+    let store = state
+        .code_store
+        .clone()
+        .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+    let embedder = state
+        .code_embedder
+        .clone()
+        .ok_or_else(|| {
+            "code embedder not configured (set RAG_CODE_EMBEDDER_PATH and RAG_CODE_TOKENIZER_PATH)"
+                .to_string()
+        })?;
+    Ok((store, embedder))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeAddRepoParams {
+    /// Short unique name (used as filter in `code_search`).
+    pub name: String,
+    /// Absolute filesystem path on the server.
+    pub root_path: String,
+    /// Optional include globs (relative to root). Matches against `globset` syntax.
+    #[serde(default)]
+    pub include_globs: Option<Vec<String>>,
+    /// Optional exclude globs (relative to root). Default excludes (target/,
+    /// node_modules/, lockfiles, .min.js, etc.) always apply on top.
+    #[serde(default)]
+    pub exclude_globs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeReindexParams {
+    pub name: String,
+    /// Re-embed even when content_hash matches.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeRemoveRepoParams {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeIngestResponse {
+    pub repo: String,
+    pub files_scanned: usize,
+    pub files_changed: usize,
+    pub files_deleted: usize,
+    pub chunks_inserted: usize,
+    pub skipped_binary: usize,
+    pub skipped_too_large: usize,
+    pub errors: Vec<String>,
+}
+
+impl CodeIngestResponse {
+    fn from_report(repo: &str, r: crate::code::ingest::IngestReport) -> Self {
+        Self {
+            repo: repo.to_string(),
+            files_scanned: r.files_scanned,
+            files_changed: r.files_changed,
+            files_deleted: r.files_deleted,
+            chunks_inserted: r.chunks_inserted,
+            skipped_binary: r.skipped_binary,
+            skipped_too_large: r.skipped_too_large,
+            errors: r.errors,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRepoSummary {
+    pub name: String,
+    pub root_path: String,
+    pub enabled: bool,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRepoListResponse {
+    pub repos: Vec<CodeRepoSummary>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRemoveResponse {
+    pub deleted: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeSearchParams {
+    /// Natural-language or code query.
+    pub query: String,
+    /// Restrict to a single repo (matches `code_list_repos` name).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Restrict to one language (e.g. `rust`, `ts`, `tsx`, `py`).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Restrict to paths starting with this prefix.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// 1-50, default 10.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeSearchHit {
+    pub repo: String,
+    pub path: String,
+    pub language: Option<String>,
+    pub symbol_kind: Option<String>,
+    pub symbol_name: Option<String>,
+    pub signature: Option<String>,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub snippet: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapRebuildResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeSearchResponse {
+    pub hits: Vec<CodeSearchHit>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapGetResponse {
+    pub points: Vec<crate::projection::MapPoint>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapReassignParams {
+    /// Item id to move.
+    pub id: String,
+    /// Target cluster id. Required unless `clear: true`.
+    #[serde(default)]
+    pub cluster: Option<usize>,
+    /// Remove the override and revert to algorithm-assigned cluster on next rebuild.
+    #[serde(default)]
+    pub clear: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapReassignResponse {
+    pub id: String,
+    pub cluster: Option<usize>,
+    pub cleared: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

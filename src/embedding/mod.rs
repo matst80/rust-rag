@@ -442,8 +442,30 @@ impl InferenceBackend for OrtBackend {
     }
 }
 
+/// Per-thread switch: when set, `execution_providers()` returns CPU-only.
+/// Used by callers (e.g. main.rs loading the code embedder) that want one
+/// session pinned to CPU without disturbing the rest of the process.
+thread_local! {
+    static FORCE_CPU_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the thread-local "CPU-only" flag set. Restored on return.
+pub fn with_cpu_only<R>(f: impl FnOnce() -> R) -> R {
+    FORCE_CPU_ONLY.with(|c| {
+        let prev = c.get();
+        c.set(true);
+        let r = f();
+        c.set(prev);
+        r
+    })
+}
+
 #[cfg(feature = "cuda")]
 fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispatch> {
+    if FORCE_CPU_ONLY.with(|c| c.get()) {
+        println!("embedder: CPU-only EP (per-thread override)");
+        return vec![CPUExecutionProvider::default().build()];
+    }
     use ort::ep::{ArenaExtendStrategy, CUDA, cuda::ConvAlgorithmSearch};
 
     let mem_limit_mb: usize = std::env::var("RAG_CUDA_MEM_LIMIT_MB")

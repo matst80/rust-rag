@@ -1,4 +1,6 @@
 mod auth;
+pub mod code;
+pub mod code_store;
 mod graph;
 mod oauth_creds;
 pub mod postgres;
@@ -899,6 +901,12 @@ pub trait VectorStore: Send + Sync {
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
+    fn get_item_chunks(&self, _id: &str) -> Result<Vec<DocChunk>> {
+        Ok(Vec::new())
+    }
+    fn update_item_metadata(&self, _id: &str, _metadata: Value) -> Result<()> {
+        anyhow::bail!("update_item_metadata not supported by this store")
+    }
     fn delete_item(&self, id: &str) -> Result<bool>;
 
     /// Insert an attachment row. Caller persists the file to disk first.

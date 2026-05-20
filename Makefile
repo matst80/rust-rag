@@ -598,11 +598,23 @@ docker-run-cuda:
 		-e ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
 		"$(CUDA_IMAGE_NAME)"
 
+## Frontend image: amd64-only (k8s Deployment pins amd64 nodes). On an
+## amd64 host: plain `docker build`/`push` — no buildx, no QEMU, fast
+## local layer cache. On non-amd64: buildx with QEMU for amd64 target.
 frontend-docker-build:
-	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+else
+	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+endif
 
 frontend-docker-push:
-	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+	docker push "$(FRONTEND_IMAGE_NAME)"
+else
+	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
+endif
 
 frontend-docker-run:
 	docker run --rm \

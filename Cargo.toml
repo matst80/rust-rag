@@ -25,7 +25,12 @@ async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["multipart", "ws"] }
 bytemuck = "1.25.0"
 futures-util = "0.3.31"
-ndarray = "0.17.2"
+ndarray = { version = "0.17.2", features = ["serde"] }
+linfa-ndarray = { package = "ndarray", version = "0.15.6" }
+linfa = "0.7.1"
+linfa-clustering = "0.7.1"
+linfa-reduction = "0.7.1"
+rand = "0.8.5"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "tracing", "std", "api-24", "tls-native", "copy-dylibs"] }
 openssl = { version = "0.10", features = ["vendored"] }
 openssl-sys = { version = "0.9", features = ["vendored"] }
@@ -70,6 +75,22 @@ deadpool-postgres = "0.14"
 pgvector = { version = "0.4", features = ["postgres"] }
 chrono = { version = "0.4", features = ["serde"] }
 text-splitter = { version = "0.30", features = ["markdown", "tokenizers"] }
+# Code-repo ingestion (see src/code/).
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-typescript = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-go = "0.21"
+ignore = "0.4"
+notify = "6"
+notify-debouncer-full = "0.3"
+globset = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+hdbscan = { version = "0.12.0", default-features = false, features = ["parallel"] }
+
+[[bin]]
+name = "rust-rag-ingest"
+path = "src/bin/ingest.rs"
 
 [dev-dependencies]
 ahash = "0.8.12"

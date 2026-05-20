@@ -33,6 +33,18 @@ data:
   RAG_TOKENIZER_PATH: "/app/assets/bge-m3/tokenizer.json"
   RAG_EMBEDDING_DIMENSION: "1024"
   RAG_EMBEDDING_POOLING: "cls"
+  ## Second embedder: BGE-Code-v1 (Qwen2.5-Coder-1.5B base, 1536-d, mean-pooled).
+  ## Used by the code-ingestion subsystem (code_repos / code_chunks / code_*
+  ## MCP + /api/code/*). Fetched from babybirdprd/bge-code-v1-onnx by the
+  ## fetch-bge-code-v1 init container; ~6.2 GB fp32, lives on its own PVC.
+  RAG_CODE_EMBEDDER_PATH: "/app/assets/bge-code-v1/model.onnx"
+  RAG_CODE_TOKENIZER_PATH: "/app/assets/bge-code-v1/tokenizer.json"
+  RAG_CODE_EMBEDDING_POOLING: "mean"
+  ## bge-code-v1 fp32 (~6 GB VRAM) does not fit alongside bge-m3 (~2 GB) +
+  ## reranker (~2 GB) on the RTX 2080's 8 GB. Pin to CPU until an fp16
+  ## export is available. Slower per-call (~1s vs ~100ms on CUDA) but only
+  ## hits the code-ingestion path, not steady-state retrieval.
+  RAG_CODE_FORCE_CPU: "true"
   ## Header-aware chunking via `text-splitter`, sized in real bge-m3 tokens.
   RAG_CHUNK_MAX_TOKENS: "500"
   RAG_CHUNK_OVERLAP_TOKENS: "50"
@@ -41,7 +53,10 @@ data:
   ## RTX 2080 (serber) — 8 GB total, ~7500 MB usable. Tensor cores
   ## present, so fp16 actually accelerates here unlike on the 1660 SUPER.
   ## Embedder bge-m3 + reranker bge-reranker-base both fit comfortably.
-  RAG_CUDA_MEM_LIMIT_MB: "4000"
+  ## Lowered from 4000 to 2500 to coexist with the reranker (2000 MB) and
+  ## other GPU tenants on serber. bge-m3 needs ~2 GB; ORT arena pre-alloc
+  ## of 4 GB fails when the card is shared.
+  RAG_CUDA_MEM_LIMIT_MB: "2500"
   ## Hard-fail at session creation if CUDA EP doesn't register (instead of
   ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
   RAG_CUDA_STRICT: "true"
@@ -65,6 +80,9 @@ data:
   RAG_RERANKER_CUDA_MEM_LIMIT_MB: "2000"
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
+  RAG_PROJECTION_ALGO: "hdbscan"
+  RAG_HDBSCAN_MIN_CLUSTER_SIZE: "3"
+  RAG_HDBSCAN_MIN_SAMPLES: "2"
   RAG_AUTH_ENABLED: "true"
   ## DNS rebinding guard for /mcp. Default allowlist is localhost only;
   ## must include the public hostname so VSCode/Cursor over the ingress
@@ -158,6 +176,23 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+## Separate PVC for the BGE-Code-v1 ONNX export (~6.2 GB fp32). Kept apart
+## from `rust-rag-cuda-models` because nfs-client doesn't allow volume
+## expansion, and the bge-m3 PVC is already provisioned at 5Gi.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rust-rag-cuda-models-code
+  labels:
+    app.kubernetes.io/name: rust-rag
+    app.kubernetes.io/variant: cuda
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -278,6 +313,49 @@ spec:
             limits:
               cpu: "1"
               memory: 3Gi
+        ## BGE-Code-v1 ONNX export (Qwen2.5-Coder-1.5B base, 1536-d).
+        ## babybirdprd/bge-code-v1-onnx mirrors BAAI/bge-code-v1 with model.onnx
+        ## + model.onnx_data + tokenizer.json. ~6.2 GB fp32 weights, fetched
+        ## once into the code-models PVC. Powers the code-ingest subsystem.
+        - name: fetch-bge-code-v1
+          image: curlimages/curl:8.10.1
+          env:
+            - name: HF_REPO
+              value: "https://huggingface.co/babybirdprd/bge-code-v1-onnx/resolve/main"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              cd /models-code
+              mkdir -p bge-code-v1 && cd bge-code-v1
+              fetch() {
+                local name=$1
+                local url=$2
+                local min_bytes=${3:-1}
+                if [ -s "$name" ] && [ "$(stat -c%s "$name")" -ge "$min_bytes" ]; then
+                  echo "skip: $name already present ($(stat -c%s "$name") bytes)"
+                  return
+                fi
+                echo "fetching $name from $url"
+                curl --fail --location --retry 5 --retry-delay 5 \
+                  --output "$name.tmp" "$url"
+                mv "$name.tmp" "$name"
+              }
+              fetch model.onnx       "$HF_REPO/model.onnx"       1000000
+              fetch model.onnx_data  "$HF_REPO/model.onnx_data"  6000000000
+              fetch tokenizer.json   "$HF_REPO/tokenizer.json"   1000000
+              echo "code embedder cache ready:"
+              ls -lh
+          volumeMounts:
+            - name: models-code
+              mountPath: /models-code
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 3Gi
       containers:
         - name: rust-rag
           image: matst80/rust-rag:cuda
@@ -331,6 +409,10 @@ spec:
               mountPath: /app/assets/bge-reranker-base
               subPath: bge-reranker-base
               readOnly: true
+            - name: models-code
+              mountPath: /app/assets/bge-code-v1
+              subPath: bge-code-v1
+              readOnly: true
           startupProbe:
             httpGet:
               path: /healthz
@@ -364,6 +446,9 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: rust-rag-cuda-models
+        - name: models-code
+          persistentVolumeClaim:
+            claimName: rust-rag-cuda-models-code
 ---
 apiVersion: v1
 kind: Service

@@ -290,6 +290,108 @@ pub(super) fn initialize_schema(
         "
     ))?;
 
+    // Code-repo ingestion tables. Dim 1536 = BGE-Code-v1.
+    // sqlite-vec vec0 needs static dim per virtual table → separate from vec_items.
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS code_repos (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL UNIQUE,
+            root_path       TEXT NOT NULL,
+            include_globs   TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(include_globs)),
+            exclude_globs   TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(exclude_globs)),
+            enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+            default_branch  TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS code_files (
+            id              TEXT PRIMARY KEY,
+            repo_id         TEXT NOT NULL REFERENCES code_repos(id) ON DELETE CASCADE,
+            repo_name       TEXT NOT NULL,
+            path            TEXT NOT NULL,
+            basename        TEXT NOT NULL,
+            dir             TEXT NOT NULL DEFAULT '',
+            extension       TEXT,
+            language        TEXT,
+            size_bytes      INTEGER NOT NULL DEFAULT 0,
+            line_count      INTEGER NOT NULL DEFAULT 0,
+            git_sha         TEXT,
+            git_branch      TEXT,
+            content_hash    TEXT NOT NULL,
+            mtime           INTEGER,
+            indexed_at      INTEGER NOT NULL,
+            summary         TEXT,
+            role            TEXT,
+            imports         TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(imports)),
+            outline         TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(outline)),
+            todos           TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(todos)),
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_code_files_repo_path ON code_files(repo_id, path);
+        CREATE INDEX IF NOT EXISTS idx_code_files_basename ON code_files(basename);
+        CREATE INDEX IF NOT EXISTS idx_code_files_language ON code_files(language);
+        CREATE INDEX IF NOT EXISTS idx_code_files_repo_dir ON code_files(repo_id, dir);
+
+        CREATE TABLE IF NOT EXISTS code_chunks (
+            id                 TEXT PRIMARY KEY,
+            file_id            TEXT NOT NULL REFERENCES code_files(id) ON DELETE CASCADE,
+            repo_id            TEXT NOT NULL REFERENCES code_repos(id) ON DELETE CASCADE,
+            repo_name          TEXT NOT NULL,
+            path               TEXT NOT NULL,
+            basename           TEXT NOT NULL,
+            language           TEXT,
+            ordinal            INTEGER NOT NULL,
+            start_line         INTEGER NOT NULL,
+            end_line           INTEGER NOT NULL,
+            byte_start         INTEGER NOT NULL DEFAULT 0,
+            byte_end           INTEGER NOT NULL DEFAULT 0,
+            symbol_kind        TEXT,
+            symbol_name        TEXT,
+            symbol_path        TEXT,
+            parent_symbol      TEXT,
+            visibility         TEXT,
+            doc_comment        TEXT,
+            signature          TEXT,
+            is_test            INTEGER NOT NULL DEFAULT 0 CHECK (is_test IN (0,1)),
+            is_public          INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0,1)),
+            calls              TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(calls)),
+            content            TEXT NOT NULL,
+            content_hash       TEXT NOT NULL,
+            token_count        INTEGER,
+            file_content_hash  TEXT NOT NULL,
+            git_sha            TEXT,
+            prev_chunk_id      TEXT,
+            next_chunk_id      TEXT,
+            embedding_model    TEXT NOT NULL,
+            embedding_version  INTEGER NOT NULL,
+            created_at         INTEGER NOT NULL,
+            updated_at         INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_code_chunks_file_ordinal ON code_chunks(file_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_repo_path ON code_chunks(repo_id, path, start_line);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_basename ON code_chunks(basename);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_symbol ON code_chunks(repo_id, symbol_name);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_language ON code_chunks(language);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_is_test ON code_chunks(is_test);
+        CREATE INDEX IF NOT EXISTS idx_code_chunks_is_public ON code_chunks(is_public);
+        CREATE INDEX IF NOT EXISTS idx_code_files_role ON code_files(role);
+        ",
+    )?;
+
+    connection.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS vec_code_chunks USING vec0(
+            id TEXT PRIMARY KEY,
+            embedding FLOAT[1536]
+        );
+        ",
+    )?;
+
     Ok(())
 }
 

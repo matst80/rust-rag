@@ -180,6 +180,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0014_push_subscriptions",
         include_str!("../../migrations/0014_push_subscriptions.sql"),
     ),
+    (
+        "0015_code_ingestion",
+        include_str!("../../migrations/0015_code_ingestion.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -240,6 +244,13 @@ impl PostgresVectorStore {
             runtime,
             graph_config,
         }
+    }
+
+    /// Borrow the connection pool. Used by `CodeStore` so that the
+    /// code-ingestion subsystem can share the same pgvector-enabled pool
+    /// without standing up a second one.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Bridge sync trait method → async tokio-postgres call. Safe to invoke
@@ -1150,6 +1161,48 @@ impl VectorStore for PostgresVectorStore {
                     })
                 })
                 .collect()
+        })
+    }
+
+    fn get_item_chunks(&self, id: &str) -> Result<Vec<DocChunk>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    "SELECT position, content, dense_embedding, section_path \
+                     FROM chunks WHERE document_id = $1 ORDER BY position",
+                    &[&id],
+                )
+                .await?;
+            rows.into_iter()
+                .map(|row| {
+                    let embedding: pgvector::Vector = row.try_get(2)?;
+                    Ok(DocChunk {
+                        position: row.try_get(0)?,
+                        content: row.try_get(1)?,
+                        embedding: embedding.to_vec(),
+                        section_path: row.try_get::<_, Option<Vec<String>>>(3)?.unwrap_or_default(),
+                        sparse: None,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn update_item_metadata(&self, id: &str, metadata: serde_json::Value) -> Result<()> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            client
+                .execute(
+                    "UPDATE documents SET metadata = $1, updated_at = now() WHERE id = $2",
+                    &[&metadata, &id],
+                )
+                .await?;
+            Ok(())
         })
     }
 

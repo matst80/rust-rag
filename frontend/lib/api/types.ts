@@ -116,6 +116,22 @@ export interface TreeChild {
   has_children: boolean
 }
 
+export interface MapPoint {
+  id: string
+  x: number
+  y: number
+  z?: number
+  cluster: number
+  title?: string
+  snippet?: string
+  source_id?: string
+  path?: string
+  doc_type?: string
+  tags?: string[]
+  cluster_name?: string
+  cluster_description?: string
+}
+
 export interface EntriesTreeResponse {
   source_id: string
   prefix: string | null
@@ -575,4 +591,65 @@ export interface FetchedDriveDoc {
   truncated: boolean
   size_bytes: number
   web_view_link?: string
+}
+
+// Code-repo ingestion
+export interface CodeRepoSummary {
+  name: string
+  root_path: string
+  enabled: boolean
+  file_count: number
+}
+
+export interface CodeFileMeta {
+  path: string
+  basename: string
+  language?: string | null
+  role?: string | null
+  summary?: string | null
+  size_bytes: number
+  line_count: number
+  indexed_at: number
+}
+
+export interface CodeOutlineEntry {
+  kind: string
+  name: string
+  line: number
+  signature?: string | null
+  is_public?: boolean
+  is_test?: boolean
+}
+
+export interface CodeTodoEntry {
+  kind: string
+  line: number
+  text: string
+}
+
+export interface CodeFileDetail extends CodeFileMeta {
+  outline: CodeOutlineEntry[]
+  todos: CodeTodoEntry[]
+  imports: string[]
+}
+
+export interface CodeSearchHit {
+  repo: string
+  path: string
+  language?: string | null
+  symbol_kind?: string | null
+  symbol_name?: string | null
+  signature?: string | null
+  start_line: number
+  end_line: number
+  snippet: string
+  score: number
+}
+
+export interface CodeSearchRequest {
+  query: string
+  repo?: string
+  language?: string
+  path_prefix?: string
+  limit?: number
 }
