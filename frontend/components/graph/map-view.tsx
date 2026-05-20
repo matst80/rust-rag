@@ -6,6 +6,7 @@ import { RefreshCw, Map as MapIcon, Loader2, Info, ZoomIn, ZoomOut, Maximize2, M
 import dynamic from "next/dynamic"
 import { useMap, useRebuildMap } from "@/lib/api"
 import type { MapPoint } from "@/lib/api/types"
+import { CLUSTER_PALETTE } from "./clusters"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -13,11 +14,7 @@ import { toast } from "sonner"
 
 const MapView3D = dynamic(() => import("./map-view-3d").then(m => m.MapView3D), { ssr: false })
 
-const CLUSTER_COLORS = [
-  "#6366f1", "#8b5cf6", "#ec4899", "#f43f5e", "#f97316",
-  "#eab308", "#22c55e", "#06b6d4", "#3b82f6", "#64748b",
-  "#a855f7", "#f97316", "#14b8a6", "#facc15", "#ef4444",
-]
+const CLUSTER_COLORS = CLUSTER_PALETTE
 
 const POINT_RADIUS = 5
 const HOVER_RADIUS = 12

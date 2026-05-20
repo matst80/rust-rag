@@ -947,11 +947,11 @@ function GraphViewContent() {
                           key={label}
                           className="group flex items-center justify-between p-3 rounded-xl bg-muted/5 border border-transparent hover:border-primary/10 hover:bg-muted/10 transition-all cursor-default"
                         >
-                          <div className="flex items-center gap-3">
-                            <div className="size-2 rounded-full shadow-[0_0_8px_currentcolor]" style={{ backgroundColor: color, color }} />
-                            <span className="text-[11px] font-bold text-foreground/70">{label}</span>
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="size-2 rounded-full shrink-0 shadow-[0_0_8px_currentcolor]" style={{ backgroundColor: color, color }} />
+                            <span className="text-[11px] font-bold text-foreground/70 truncate">{label}</span>
                           </div>
-                          <Badge variant="outline" className="text-[9px] opacity-30 group-hover:opacity-100 transition-opacity">
+                          <Badge variant="outline" className="text-[9px] opacity-30 group-hover:opacity-100 transition-opacity shrink-0">
                             {graphEntries.filter(e => clusters.byNode.get(e.id) === label).length}
                           </Badge>
                         </div>
