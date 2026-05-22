@@ -171,7 +171,7 @@ export function WhisperTranscribe({ onTranscription }: WhisperTranscribeProps) {
             ) : (
               <Mic className="size-4" />
             )}
-            <span className="text-xs font-medium">
+            <span className="text-xs font-medium hidden md:inline">
               {isConnecting ? "Connecting..." : isRecording ? "Stop Rec" : "Transcribe"}
             </span>
           </Button>

@@ -5,7 +5,7 @@ use crate::{
     },
     crypto::EncryptionKey,
     db::{
-        AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
+        AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
         MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, PushStore, SearchHit,
@@ -1311,6 +1311,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/items/{id}/rechunk", post(rechunk_item))
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
+        .route("/admin/graph/duplicates", get(list_duplicate_edges))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/ontology/run", post(ontology::run_batch))
         .route("/admin/ontology/run/{id}", post(ontology::run_for_item))
@@ -3124,6 +3125,19 @@ async fn rebuild_graph(
     Ok(Json(GraphRebuildResponse { rebuilt_edges }))
 }
 
+#[tracing::instrument(name = "api.graph.list_duplicates", skip(state))]
+async fn list_duplicate_edges(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DuplicateEdgeGroup>>, ApiError> {
+    let store = state.store.clone();
+    let groups = tokio::task::spawn_blocking(move || store.list_duplicate_edges())
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    Ok(Json(groups))
+}
+
 async fn create_manual_edge(
     State(state): State<AppState>,
     Json(request): Json<CreateManualEdgeRequest>,
@@ -4690,6 +4704,10 @@ mod tests {
                 .iter()
                 .filter(|edge| edge.edge_type == GraphEdgeType::Similarity)
                 .count())
+        }
+
+        fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>> {
+            Ok(Vec::new())
         }
 
         fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord> {

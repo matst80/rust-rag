@@ -25,7 +25,7 @@ use crate::db::code_store::CodeStore;
 
 /// Reasonable defaults; tuned for BGE-Code-v1's 32k ctx but keeping chunks
 /// small enough for good retrieval granularity.
-pub const DEFAULT_MAX_CHUNK_BYTES: usize = 4096;
+pub const DEFAULT_MAX_CHUNK_BYTES: usize = 32768;
 pub const EMBED_BATCH_SIZE: usize = 8;
 /// Skip files larger than this — generated bundles, lockfiles, binaries.
 pub const MAX_FILE_BYTES: u64 = 1_500_000;

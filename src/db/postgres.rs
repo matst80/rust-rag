@@ -1514,6 +1514,56 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn list_duplicate_edges(&self) -> Result<Vec<super::DuplicateEdgeGroup>> {
+        if !self.graph_config.enabled {
+            anyhow::bail!("graph features are disabled");
+        }
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            
+            // Find pairs with > 1 edge
+            let rows = client
+                .query(
+                    "SELECT from_item_id, to_item_id \
+                     FROM graph_edges \
+                     GROUP BY from_item_id, to_item_id \
+                     HAVING COUNT(*) > 1",
+                    &[],
+                )
+                .await?;
+
+            let mut groups = Vec::with_capacity(rows.len());
+            for row in rows {
+                let from: String = row.get(0);
+                let to: String = row.get(1);
+                
+                let edge_rows = client
+                    .query(
+                        "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                                directed, metadata, created_at, updated_at \
+                         FROM graph_edges \
+                         WHERE from_item_id = $1 AND to_item_id = $2 \
+                         ORDER BY updated_at DESC",
+                        &[&from, &to],
+                    )
+                    .await?;
+                
+                let mut edges = Vec::with_capacity(edge_rows.len());
+                for er in edge_rows {
+                    edges.push(row_to_graph_edge(&er)?);
+                }
+                
+                groups.push(super::DuplicateEdgeGroup {
+                    from_item_id: from,
+                    to_item_id: to,
+                    edges,
+                });
+            }
+            Ok(groups)
+        })
+    }
+
     fn add_manual_edge(&self, mut input: ManualEdgeInput) -> Result<GraphEdgeRecord> {
         if !self.graph_config.enabled {
             anyhow::bail!("graph features are disabled");

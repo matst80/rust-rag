@@ -151,16 +151,18 @@ function DecisionView({ data }: { data: any }) {
           </div>
         </div>
 
-        <div className="space-y-3 p-6 rounded-xl bg-primary/[0.03] border border-primary/10 relative overflow-hidden group/decision">
-          <div className="absolute top-0 left-0 w-1 h-full bg-primary/40" />
+        <div className="space-y-3">
           <div className="flex items-center gap-3">
             <div className="size-6 rounded-md bg-primary/10 flex items-center justify-center border border-primary/20">
               <Gavel className="size-3.5 text-primary" />
             </div>
             <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary">Decision</span>
           </div>
-          <div className="text-[16px] font-medium leading-relaxed text-foreground pl-9">
-            <MarkdownView content={data.decision} />
+          <div className="py-4 pr-4 pl-9 rounded-xl bg-primary/[0.03] border border-primary/10 relative overflow-hidden group/decision">
+            <div className="absolute top-0 left-0 w-1 h-full bg-primary/40" />
+            <div className="text-[16px] font-medium leading-relaxed text-foreground">
+              <MarkdownView content={data.decision} />
+            </div>
           </div>
         </div>
 
@@ -608,32 +610,36 @@ function IncidentView({ data }: { data: any }) {
 
         {/* Root Cause */}
         {data.root_cause && (
-          <div className="space-y-3 p-6 rounded-xl bg-amber-500/[0.03] border border-amber-500/10 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-amber-500/40" />
+          <div className="space-y-3">
             <div className="flex items-center gap-3">
               <div className="size-6 rounded-md bg-amber-500/10 flex items-center justify-center border border-amber-500/20">
                 <ShieldAlert className="size-3.5 text-amber-600" />
               </div>
               <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-amber-600">Root Cause</span>
             </div>
-            <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
-              <MarkdownView content={data.root_cause} />
+            <div className="py-4 pr-4 pl-9 rounded-xl bg-amber-500/[0.03] border border-amber-500/10 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-1 h-full bg-amber-500/40" />
+              <div className="text-[15px] leading-relaxed text-foreground/80">
+                <MarkdownView content={data.root_cause} />
+              </div>
             </div>
           </div>
         )}
 
         {/* Resolution */}
         {data.resolution && (
-          <div className="space-y-3 p-6 rounded-xl bg-emerald-500/[0.03] border border-emerald-500/10 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500/40" />
+          <div className="space-y-3">
             <div className="flex items-center gap-3">
               <div className="size-6 rounded-md bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
                 <Wrench className="size-3.5 text-emerald-600" />
               </div>
               <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-emerald-600">Resolution</span>
             </div>
-            <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
-              <MarkdownView content={data.resolution} />
+            <div className="py-4 pr-4 pl-9 rounded-xl bg-emerald-500/[0.03] border border-emerald-500/10 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500/40" />
+              <div className="text-[15px] leading-relaxed text-foreground/80">
+                <MarkdownView content={data.resolution} />
+              </div>
             </div>
           </div>
         )}
@@ -686,7 +692,7 @@ export function StructuredDataView({ type, data }: StructuredDataViewProps) {
   if (!data) return null
 
   return (
-    <div className="relative group overflow-hidden rounded-xl border border-border bg-card/50 dark:bg-black/40 backdrop-blur-md p-6 md:p-8 shadow-sm dark:shadow-[0_0_40px_rgba(var(--primary-rgb),0.03)]">
+    <div className="relative group overflow-hidden rounded-xl border border-border bg-card/50 dark:bg-black/40 backdrop-blur-md p-6 shadow-sm dark:shadow-[0_0_30px_rgba(var(--primary-rgb),0.02)]">
       {/* Background decoration */}
       <div className="absolute -left-20 -bottom-20 size-60 bg-primary/5 blur-[80px] pointer-events-none opacity-40 group-hover:opacity-70 transition-opacity duration-700" />
 

@@ -1,9 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { Bot, Circle, Link2, Loader2, Plus, Send, Square, User2, X } from "lucide-react"
+import { Bot, Circle, Link2, Loader2, Menu, Plus, Send, Square, User2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { MessageMarkdown } from "@/components/messages/message-markdown"
+import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 const EMPTY_USERS: Set<string> = new Set()
 
@@ -108,6 +109,21 @@ export function AgentChat() {
 	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
 	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
 	const [projectPickerHighlight, setProjectPickerHighlight] = useState(0)
+	const [sidebarOpen, setSidebarOpen] = useState(true)
+
+	// Auto-close sidebar on mobile on mount
+	useEffect(() => {
+		if (typeof window !== "undefined" && window.innerWidth < 768) {
+			setSidebarOpen(false)
+		}
+	}, [])
+
+	// Close sidebar on mobile when session changes
+	useEffect(() => {
+		if (typeof window !== "undefined" && window.innerWidth < 768) {
+			setSidebarOpen(false)
+		}
+	}, [activeSessionId])
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
@@ -684,9 +700,21 @@ export function AgentChat() {
 					"text-muted-foreground"
 
 	return (
-		<div className="relative flex h-[calc(100dvh-49px)]">
+		<div className="relative flex h-[calc(100dvh - 49px)] overflow-hidden">
+			{/* Mobile Overlay */}
+			{sidebarOpen && (
+				<div
+					className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm md:hidden"
+					onClick={() => setSidebarOpen(false)}
+				/>
+			)}
+
 			{/* Sidebar */}
-			<aside className="z-40 flex w-72 flex-col border-r border-border bg-background md:bg-muted/20">
+			<aside className={cn(
+				"z-40 flex w-72 flex-col border-r border-border bg-background md:bg-muted/20 transition-transform duration-300 ease-in-out",
+				"absolute inset-y-0 left-0 md:relative md:translate-x-0",
+				sidebarOpen ? "translate-x-0" : "-translate-x-full md:hidden",
+			)}>
 				<div className="flex items-center justify-between px-4 py-3 border-b border-border">
 					<span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground">
 						Sessions
@@ -701,6 +729,14 @@ export function AgentChat() {
 							title="Spawn headless session"
 						>
 							<Plus className="size-4" />
+						</button>
+						<button
+							type="button"
+							onClick={() => setSidebarOpen(false)}
+							className="text-muted-foreground hover:text-foreground md:hidden"
+							aria-label="Close sidebar"
+						>
+							<X className="size-4" />
 						</button>
 					</div>
 				</div>
@@ -795,12 +831,35 @@ export function AgentChat() {
 			{/* Thread */}
 			<section className="flex min-w-0 flex-1 flex-col">
 				{!activeSessionId ? (
-					<div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-						Select or spawn a session
+					<div className="flex-1 flex flex-col">
+						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
+							<button
+								type="button"
+								onClick={() => setSidebarOpen(!sidebarOpen)}
+								className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+								aria-label="Toggle sidebar"
+								title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+							>
+								<Menu className={cn("size-4 transition-transform", !sidebarOpen && "rotate-90")} />
+							</button>
+							<span className="text-sm font-medium text-muted-foreground">ACP Agent Sessions</span>
+						</header>
+						<div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+							Select or spawn a session
+						</div>
 					</div>
 				) : (
 					<>
 						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
+							<button
+								type="button"
+								onClick={() => setSidebarOpen(!sidebarOpen)}
+								className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+								aria-label="Toggle sidebar"
+								title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+							>
+								<Menu className={cn("size-4 transition-transform", !sidebarOpen && "rotate-90")} />
+							</button>
 							<Bot className="size-4 shrink-0 text-muted-foreground" />
 							<div className="flex min-w-0 flex-1 flex-col cursor-pointer group/title" onClick={renameSession} title="Click to rename session">
 								<div className="flex items-center gap-1.5 min-w-0">
@@ -910,7 +969,7 @@ export function AgentChat() {
 						)}
 
 						<form
-							className="border-t border-border p-4"
+							className="border-t border-border p-2 md:p-4"
 							onSubmit={(e) => {
 								e.preventDefault()
 								sendPrompt()
@@ -931,23 +990,30 @@ export function AgentChat() {
 									rows={1}
 									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
 								/>
-								<button
-									type="submit"
-									disabled={!draft.trim() || conn.status !== "open"}
-									className={cn(
-										"flex size-9 items-center justify-center rounded-md transition-colors",
-										draft.trim() && conn.status === "open"
-											? "bg-primary text-primary-foreground hover:bg-primary/90"
-											: "bg-muted text-muted-foreground",
-									)}
-									aria-label="Send"
-								>
-									{conn.status !== "open" ? (
-										<Loader2 className="size-4 animate-spin" />
-									) : (
-										<Send className="size-4" />
-									)}
-								</button>
+								<div className="flex items-center gap-1.5 mb-0.5">
+									<WhisperTranscribe
+										onTranscription={(transcription) => {
+											setDraft(draft ? `${draft} ${transcription}` : transcription)
+										}}
+									/>
+									<button
+										type="submit"
+										disabled={!draft.trim() || conn.status !== "open"}
+										className={cn(
+											"flex size-9 items-center justify-center rounded-md transition-colors",
+											draft.trim() && conn.status === "open"
+												? "bg-primary text-primary-foreground hover:bg-primary/90"
+												: "bg-muted text-muted-foreground",
+										)}
+										aria-label="Send"
+									>
+										{conn.status !== "open" ? (
+											<Loader2 className="size-4 animate-spin" />
+										) : (
+											<Send className="size-4" />
+										)}
+									</button>
+								</div>
 							</div>
 						</form>
 					</>

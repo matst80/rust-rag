@@ -663,6 +663,15 @@ export async function getEdgesForItem(itemId: string): Promise<Edge[]> {
   return ensureArray(response.edges, "graph edges").map(toEdge)
 }
 
+export async function getDuplicateEdges(): Promise<DuplicateEdgeGroup[]> {
+  const response = await request<any[]>("/admin/graph/duplicates")
+  return ensureArray(response, "duplicate edges").map(group => ({
+    from_item_id: group.from_item_id,
+    to_item_id: group.to_item_id,
+    edges: ensureArray(group.edges, "duplicate edges list").map(toEdge),
+  }))
+}
+
 export async function getGraphNeighborhood(
   itemId: string,
   depth: number,
@@ -908,6 +917,7 @@ export const api = {
   edges: {
     list: getEdges,
     listForItem: getEdgesForItem,
+    listDuplicates: getDuplicateEdges,
     neighborhood: getGraphNeighborhood,
     create: createEdge,
     update: updateEdge,
