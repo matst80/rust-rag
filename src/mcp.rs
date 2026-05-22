@@ -2942,6 +2942,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
                 path: None,
+                analysis: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

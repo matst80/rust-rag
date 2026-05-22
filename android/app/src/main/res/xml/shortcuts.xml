@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <capability android:name="actions.intent.GET_THING">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.rustrag.app"
+            android:targetClass="com.rustrag.app.MainActivity"
+            android:data="rustrag://search">
+            <!-- Maps the Assistant/Gemini search query parameter 'thing.name' to intent extra 'query' -->
+            <parameter
+                android:name="thing.name"
+                android:key="query" />
+        </intent>
+    </capability>
+
+</shortcuts>

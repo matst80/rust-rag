@@ -682,6 +682,10 @@ pub struct SearchResultPayload {
     /// has no path set. Distinct from chunk-level `section_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, etc.).
+    /// `None` when no analysis has been run yet.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -4097,6 +4101,7 @@ impl From<SearchHit> for SearchResultPayload {
             section_path: value.section_path,
             retrievers: value.retrievers,
             path: value.path,
+            analysis: value.analysis,
         }
     }
 }
