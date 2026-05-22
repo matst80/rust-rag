@@ -412,54 +412,54 @@ ${(entry.text ?? "").slice(0, 6000)}`
             )}
 
             {/* Analysis */}
-            <AnalysisPanel entry={entry} />
+            <AnalysisPanel entry={entry} edges={edges} />
 
-            {/* Similar Entries (Contextual Expansion) */}
-            {entry.neighbors && entry.neighbors.length > 0 && (
-              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-500">
+            {/* Connected Connections (on mobile only, since right panel is hidden) */}
+            {isMobile && edges && edges.length > 0 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700">
                 <div className="flex items-center gap-2">
-                  <div className="size-1.5 rounded-full bg-primary/60 shadow-[0_0_8px_rgba(var(--primary-rgb),0.3)]" />
+                  <GitBranch className="size-3.5 text-primary/60" />
                   <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                    Similar Entries
+                    Connections ({edges.length})
                   </h2>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {entry.neighbors.map((neighbor) => (
-                    <Link
-                      key={neighbor.id}
-                      href={`/entries/${encodeURIComponent(neighbor.id)}`}
-                      className="group relative flex flex-col gap-1 border border-border bg-card p-4 hover:border-primary/40 hover:bg-primary/5 transition-all duration-300"
-                    >
-                      {neighbor.thumbnail && (
-                        <div className="absolute top-3 right-3 size-12 border border-border/40 overflow-hidden bg-muted/50 rounded-sm">
-                          <img
-                            src={neighbor.thumbnail}
-                            alt=""
-                            className="size-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500"
-                          />
-                        </div>
-                      )}
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors">
-                          {neighbor.id.substring(0, 12)}...
-                        </span>
-                        {neighbor.relationship && (
+                  {edges.map((edge) => {
+                    const targetId = edge.source_id === id ? edge.target_id : edge.source_id
+                    const isManual = edge.edge_type === "manual"
+                    
+                    return (
+                      <Link
+                        key={edge.id}
+                        href={`/entries/${encodeURIComponent(targetId)}`}
+                        className={cn(
+                          "group relative flex flex-col gap-1 border p-4 hover:border-primary/40 hover:bg-primary/5 transition-all duration-300 rounded-xl bg-card",
+                          isManual ? "border-primary/20" : "border-border"
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors truncate">
+                            {targetId.substring(0, 20)}...
+                          </span>
                           <Badge
                             variant="outline"
                             className={cn(
-                              "h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-primary/20 text-primary/80 bg-primary/5 leading-none transition-colors",
-                              RELATION_STYLES[neighbor.relationship.toLowerCase()]
+                              "h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter leading-none border-primary/20 text-primary/80 bg-primary/5",
+                              RELATION_STYLES[edge.relationship.toLowerCase()]
                             )}
                           >
-                            {neighbor.relationship}
+                            {edge.relationship.replace(/_/g, " ")}
                           </Badge>
-                        )}
-                      </div>
-                      <div className="text-sm font-medium text-foreground line-clamp-1 pr-12">
-                        {neighbor.title || (neighbor.source_type === "image" ? "Image Fragment" : neighbor.id)}
-                      </div>
-                    </Link>
-                  ))}
+                        </div>
+                        <div className="flex items-center justify-between text-[9px] font-mono text-muted-foreground/60">
+                          <span>{isManual ? "Manual Connection" : "Similarity Connection"}</span>
+                          {edge.edge_type === "similarity" && (
+                            <span className="opacity-80">w = {edge.weight.toFixed(2)}</span>
+                          )}
+                        </div>
+                      </Link>
+                    )
+                  })}
                 </div>
               </div>
             )}

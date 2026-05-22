@@ -92,6 +92,10 @@ hdbscan = { version = "0.12.0", default-features = false, features = ["parallel"
 name = "rust-rag-ingest"
 path = "src/bin/ingest.rs"
 
+[[bin]]
+name = "chunk-stats"
+path = "src/bin/chunk_stats.rs"
+
 [dev-dependencies]
 ahash = "0.8.12"
 axum-test = "20.0.0"

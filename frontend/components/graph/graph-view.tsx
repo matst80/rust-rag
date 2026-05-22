@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils"
 import { computeCommunities, getNodeTitle } from "./clusters"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { EdgeReviewList } from "./edge-review-list"
+import { DuplicateEdgeList } from "./duplicate-edge-list"
 import { RelationItem } from "./relation-item"
 
 function ExpandableMarkdown({ content }: { content: string }) {
@@ -636,12 +637,15 @@ function GraphViewContent() {
       <aside className="w-120 border-l bg-card/10 backdrop-blur-md p-0 overflow-hidden flex flex-col">
         <Tabs defaultValue="insights" className="flex-1 flex flex-col h-full">
           <div className="px-6 pt-6 pb-2 border-b border-primary/5">
-            <TabsList className="grid w-full grid-cols-2 bg-muted/20 p-1 rounded-xl">
+            <TabsList className="grid w-full grid-cols-3 bg-muted/20 p-1 rounded-xl">
               <TabsTrigger value="insights" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2">
                 Insights
               </TabsTrigger>
               <TabsTrigger value="review" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2 relative">
                 Review
+              </TabsTrigger>
+              <TabsTrigger value="duplicates" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2 relative">
+                Duplicates
               </TabsTrigger>
             </TabsList>
           </div>
@@ -981,6 +985,18 @@ function GraphViewContent() {
                 onReviewComplete={mutateNeighborhood}
                 onFocusNode={handleCenterNodeChange}
                 onFocusEdge={handleFocusEdge}
+              />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="duplicates" className="flex-1 overflow-hidden p-6 m-0 flex flex-col">
+            <div className="flex flex-col gap-6 h-full">
+              <div className="flex items-center gap-2">
+                <div className="size-1.5 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]" />
+                <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-foreground/80">Duplicate Resolution</h4>
+              </div>
+              <DuplicateEdgeList
+                onFocusNode={handleCenterNodeChange}
               />
             </div>
           </TabsContent>

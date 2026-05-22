@@ -11,6 +11,7 @@ import type {
   CreateEdgeRequest,
   GraphNeighborhood,
   GraphStatus,
+  DuplicateEdgeGroup,
   ListItemsRequest,
   RechunkRequest,
   LlmRechunkRequest,
@@ -190,6 +191,10 @@ export function useEdgesForItem(itemId: string | null) {
     itemId ? ["edges", itemId] : null,
     ([, edgeItemId]) => api.edges.listForItem(edgeItemId as string)
   )
+}
+
+export function useDuplicateEdges() {
+  return useSWR<DuplicateEdgeGroup[]>("duplicate-edges", api.edges.listDuplicates)
 }
 
 export function useGraphNeighborhood(

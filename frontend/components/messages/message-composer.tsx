@@ -10,6 +10,7 @@ import {
 } from "react"
 import { Circle, Loader2, Send, User2 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 const MENTION_TRIGGER_RE = /(?:^|\s)@([\w.\-]*)$/
 
@@ -202,23 +203,30 @@ function MessageComposerInner({
             rows={1}
             className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
           />
-          <button
-            type="submit"
-            disabled={sending || !draft.trim()}
-            className={cn(
-              "flex size-9 items-center justify-center rounded-md transition-colors",
-              draft.trim() && !sending
-                ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                : "bg-muted text-muted-foreground"
-            )}
-            aria-label="Send"
-          >
-            {sending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Send className="size-4" />
-            )}
-          </button>
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <WhisperTranscribe
+              onTranscription={(transcription) => {
+                setDraft((prev) => (prev ? `${prev} ${transcription}` : transcription))
+              }}
+            />
+            <button
+              type="submit"
+              disabled={sending || !draft.trim()}
+              className={cn(
+                "flex size-9 items-center justify-center rounded-md transition-colors",
+                draft.trim() && !sending
+                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                  : "bg-muted text-muted-foreground"
+              )}
+              aria-label="Send"
+            >
+              {sending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Send className="size-4" />
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </form>

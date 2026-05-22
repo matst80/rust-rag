@@ -210,15 +210,21 @@ export interface GraphNeighborhood {
 }
 
 export interface GraphStatus {
-  enabled: boolean
-  build_on_startup: boolean
+  enabled: bool
+  build_on_startup: bool
   similarity_top_k: number
   similarity_max_distance: number
-  cross_source: boolean
+  cross_source: bool
   item_count: number
   edge_count: number
   similarity_edge_count: number
   manual_edge_count: number
+}
+
+export interface DuplicateEdgeGroup {
+  from_item_id: string
+  to_item_id: string
+  edges: Edge[]
 }
 
 export interface StoreRequest {

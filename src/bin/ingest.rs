@@ -307,7 +307,7 @@ impl Client {
             base: base.trim_end_matches('/').to_string(),
             token,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(900))
                 .build()
                 .expect("build http client"),
         }

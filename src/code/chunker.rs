@@ -206,6 +206,12 @@ fn chunk_ast(lang: Lang, content: &str, max_bytes: usize) -> Option<Vec<CodeChun
         // decorators that precede the symbol — they belong with the chunk.
         let start = extend_start_for_decorations(lang, content, start);
         let slice = &content[start..end];
+        // Skip trivial declarations that have no semantic body. Pure
+        // re-exports / module declarations / one-line interfaces collide
+        // in embedding space and flood top-K.
+        if is_trivial_decl(kind_str, slice) {
+            continue;
+        }
         if slice.len() <= max_bytes {
             let (sl, el) = line_range_for(content, start, end);
             let visibility = detect_visibility(lang, slice);
@@ -431,6 +437,40 @@ fn detect_visibility(lang: Lang, slice: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn is_trivial_decl(kind: &str, slice: &str) -> bool {
+    let kind_trivial = matches!(
+        kind,
+        "mod_item"
+            | "use_declaration"
+            | "import_statement"
+            | "import_declaration"
+            | "import_from_statement"
+            | "extern_crate_declaration"
+            | "type_alias_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "const_item"
+            | "lexical_declaration"
+    );
+    // Strip line comments and blank lines so a tiny decl preceded by a
+    // long doc comment still counts as trivial — the doc is metadata,
+    // not body.
+    let body_bytes: usize = slice
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("//")
+                && !l.starts_with("#")
+                && !l.starts_with("*")
+                && !l.starts_with("/*")
+                && !l.starts_with("///")
+        })
+        .map(|l| l.len() + 1)
+        .sum();
+    kind_trivial && body_bytes < 220
 }
 
 fn looks_like_test(lang: Lang, slice: &str, name: Option<&str>) -> bool {
@@ -841,6 +881,41 @@ fn t_add() { assert_eq!(add(1, 2), 3); }
         assert_eq!(todos.len(), 2);
         assert_eq!(todos[0].kind, "TODO");
         assert_eq!(todos[1].kind, "FIXME");
+    }
+
+    #[test]
+    fn skips_trivial_mod_and_use_decls() {
+        let src = r#"
+pub mod foo;
+pub mod bar;
+use std::path::Path;
+
+/// real fn
+pub fn work() -> i32 { 42 }
+"#;
+        let r = analyze_file("src/lib.rs", Lang::Rust, src, 32768);
+        let kinds: Vec<&str> = r.chunks.iter().map(|c| c.kind.as_str()).collect();
+        assert!(!kinds.contains(&"mod_item"), "trivial mod chunks emitted: {kinds:?}");
+        assert!(!kinds.contains(&"use_declaration"), "trivial use chunks emitted: {kinds:?}");
+        assert!(r.chunks.iter().any(|c| c.name.as_deref() == Some("work")));
+    }
+
+    #[test]
+    fn keeps_mod_with_inline_body() {
+        let src = r#"
+pub mod inner {
+    pub fn hello() -> &'static str { "hi" }
+    pub fn world() -> &'static str { "wld" }
+    pub const N: usize = 42;
+}
+"#;
+        let r = analyze_file("src/lib.rs", Lang::Rust, src, 32768);
+        // Either the outer mod (with body) survives, or its inner fns do.
+        let has_real_signal = r
+            .chunks
+            .iter()
+            .any(|c| c.name.as_deref() == Some("hello") || c.name.as_deref() == Some("inner"));
+        assert!(has_real_signal, "lost real content: {:?}", r.chunks);
     }
 
     #[test]

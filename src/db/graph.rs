@@ -3,9 +3,51 @@ use rusqlite::{Connection, params};
 use std::collections::HashSet;
 
 use super::{
-    GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNodeDistance, bool_to_sqlite,
-    current_timestamp_millis, parse_json_column,
+    DuplicateEdgeGroup, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNodeDistance,
+    bool_to_sqlite, current_timestamp_millis, parse_json_column,
 };
+
+pub(super) fn list_duplicate_edges_internal(
+    connection: &Connection,
+) -> Result<Vec<DuplicateEdgeGroup>> {
+    let mut stmt = connection.prepare(
+        "
+        SELECT from_item_id, to_item_id
+        FROM graph_edges
+        GROUP BY from_item_id, to_item_id
+        HAVING COUNT(*) > 1
+        ",
+    )?;
+
+    let pairs = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut groups = Vec::new();
+    for pair in pairs {
+        let (from, to) = pair?;
+        let mut edge_stmt = connection.prepare(
+            "
+            SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+            FROM graph_edges
+            WHERE from_item_id = ?1 AND to_item_id = ?2
+            ORDER BY updated_at DESC
+            ",
+        )?;
+        let edges = edge_stmt.query_map(params![from, to], map_graph_edge_row)?;
+        let mut group_edges = Vec::new();
+        for edge in edges {
+            group_edges.push(edge?);
+        }
+        groups.push(DuplicateEdgeGroup {
+            from_item_id: from,
+            to_item_id: to,
+            edges: group_edges,
+        });
+    }
+
+    Ok(groups)
+}
 
 pub(super) fn list_graph_edges_internal(
     connection: &Connection,
