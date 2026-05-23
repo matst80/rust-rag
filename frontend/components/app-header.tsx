@@ -13,7 +13,6 @@ import {
   GitBranch,
   Github,
   Hash,
-  ImagePlus,
   KeyRound,
   LayoutGrid,
   LogIn,
@@ -36,7 +35,6 @@ const navigation = [
   { name: "Kanban", href: "/kanban", icon: LayoutGrid },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Wiki", href: "/wiki", icon: FolderTree },
-  { name: "Upload", href: "/entries/upload", icon: ImagePlus },
   { name: "Graph", href: "/visualize", icon: GitBranch },
 ]
 

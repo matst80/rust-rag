@@ -25,7 +25,11 @@ If the image contains readable text (screenshot, document, whiteboard), transcri
 If it is a photo or diagram, write 2-4 sentences describing the scene, then list any visible text.
 Output plain markdown only, no preamble.`
 
-export function ImageUpload() {
+interface ImageUploadProps {
+  minimal?: boolean
+}
+
+export function ImageUpload({ minimal = false }: ImageUploadProps = {}) {
   const router = useRouter()
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
@@ -239,23 +243,25 @@ export function ImageUpload() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
+    <div className={cn("mx-auto w-full", !minimal && "max-w-2xl px-4 py-8", "space-y-6")}>
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" className="size-8 shrink-0" asChild>
-          <Link href="/entries">
-            <ArrowLeft className="size-4" />
-          </Link>
-        </Button>
-        <div>
-          <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground">
-            Upload Image
-          </h1>
-          <p className="font-mono text-[10px] text-muted-foreground mt-0.5">
-            Extract and index content from an image using a multimodal model
-          </p>
+      {!minimal && (
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" className="size-8 shrink-0" asChild>
+            <Link href="/entries">
+              <ArrowLeft className="size-4" />
+            </Link>
+          </Button>
+          <div>
+            <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground">
+              Upload Image
+            </h1>
+            <p className="font-mono text-[10px] text-muted-foreground mt-0.5">
+              Extract and index content from an image using a multimodal model
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Drop zone */}
       {!file ? (

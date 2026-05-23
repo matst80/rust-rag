@@ -9,7 +9,11 @@ import { api } from "@/lib/api"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 
-export function UrlIngest() {
+interface UrlIngestProps {
+  minimal?: boolean
+}
+
+export function UrlIngest({ minimal = false }: UrlIngestProps = {}) {
   const router = useRouter()
   const [url, setUrl] = useState("")
   const [sourceId, setSourceId] = useState("web")
@@ -41,18 +45,20 @@ export function UrlIngest() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-8 space-y-8">
+    <div className={cn("mx-auto w-full", !minimal && "max-w-2xl px-4 py-8", "space-y-8")}>
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <div>
-          <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground">
-            Ingest URL
-          </h1>
-          <p className="font-mono text-[10px] text-muted-foreground mt-0.5">
-            Fetch, clean, and index web content into your knowledge base
-          </p>
+      {!minimal && (
+        <div className="flex items-center gap-3">
+          <div>
+            <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground">
+              Ingest URL
+            </h1>
+            <p className="font-mono text-[10px] text-muted-foreground mt-0.5">
+              Fetch, clean, and index web content into your knowledge base
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       <form onSubmit={handleIngest} className="space-y-6">
         {/* URL Input */}
