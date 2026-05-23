@@ -1,77 +1,82 @@
-"use client"
+"use client";
 
-import { useState, useCallback, useRef, useEffect } from "react"
-import { useRouter, useSearchParams, usePathname } from "next/navigation"
-import { Brain, Sparkles, X } from "lucide-react"
-import { SearchInput } from "./search-input"
-import { SearchResults } from "./search-results"
-import { useSearch, api } from "@/lib/api"
-import { cn } from "@/lib/utils"
-import type { AssistedQueryRawResult, SearchResult } from "@/lib/api/types"
+import { useState, useCallback, useRef, useEffect } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { Brain, Sparkles, X } from "lucide-react";
+import { SearchInput } from "./search-input";
+import { SearchResults } from "./search-results";
+import { useSearch, api } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import type { AssistedQueryRawResult, SearchResult } from "@/lib/api/types";
 
 interface QueryBlock {
-  index: number
-  query: string
-  results?: AssistedQueryRawResult[]
-  status: "pending" | "done"
+  index: number;
+  query: string;
+  results?: AssistedQueryRawResult[];
+  status: "pending" | "done";
 }
 
-export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: boolean }) {
-  const [searchQuery, setSearchQuery] = useState("")
-  const [submittedQuery, setSubmittedQuery] = useState("")
-  const [categoryFilter, setCategoryFilter] = useState<string | null>(null)
-  const [isAssisted, setIsAssisted] = useState(defaultAssisted)
-  const [isHybrid, setIsHybrid] = useState(true)
-  const [isRerank, setIsRerank] = useState(true)
-  const [typeFilter, setTypeFilter] = useState<string | null>(null)
+export function SearchPage({
+  defaultAssisted = false,
+}: {
+  defaultAssisted?: boolean;
+}) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [isAssisted, setIsAssisted] = useState(defaultAssisted);
+  const [isHybrid, setIsHybrid] = useState(true);
+  const [isRerank, setIsRerank] = useState(true);
+  const [typeFilter, setTypeFilter] = useState<string | null>(null);
 
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const pathname = usePathname()
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
 
   // Assisted mode state
-  const [isStreaming, setIsStreaming] = useState(false)
-  const [queries, setQueries] = useState<QueryBlock[]>([])
-  const [merged, setMerged] = useState<SearchResult[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
-  const lastTriggeredQuery = useRef<string | null>(null)
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [queries, setQueries] = useState<QueryBlock[]>([]);
+  const [merged, setMerged] = useState<SearchResult[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const lastTriggeredQuery = useRef<string | null>(null);
 
   // Sync state from URL on mount and when searchParams change
   useEffect(() => {
-    const q = searchParams.get("q") || ""
-    const mode = searchParams.get("mode")
-    const hybrid = searchParams.get("hybrid")
-    const rerank = searchParams.get("rerank")
-    const category = searchParams.get("category")
-    const type = searchParams.get("type")
+    const q = searchParams.get("q") || "";
+    const mode = searchParams.get("mode");
+    const hybrid = searchParams.get("hybrid");
+    const rerank = searchParams.get("rerank");
+    const category = searchParams.get("category");
+    const type = searchParams.get("type");
 
     if (q !== submittedQuery) {
-      setSearchQuery(q)
-      setSubmittedQuery(q)
+      setSearchQuery(q);
+      setSubmittedQuery(q);
     }
 
-    if (mode === "assisted") setIsAssisted(true)
-    else if (mode === "basic") setIsAssisted(false)
+    if (mode === "assisted") setIsAssisted(true);
+    else if (mode === "basic") setIsAssisted(false);
 
-    if (hybrid !== null) setIsHybrid(hybrid === "true")
-    if (rerank !== null) setIsRerank(rerank === "true")
-    if (category !== null) setCategoryFilter(category === "all" ? null : category)
-    if (type !== null) setTypeFilter(type === "all" ? null : type)
+    if (hybrid !== null) setIsHybrid(hybrid === "true");
+    if (rerank !== null) setIsRerank(rerank === "true");
+    if (category !== null)
+      setCategoryFilter(category === "all" ? null : category);
+    if (type !== null) setTypeFilter(type === "all" ? null : type);
 
     // Auto-trigger search if q is present in URL
     if (q && q !== lastTriggeredQuery.current) {
-      lastTriggeredQuery.current = q
+      lastTriggeredQuery.current = q;
       if (mode === "assisted" || (mode === null && isAssisted)) {
-        runAssisted(q)
+        runAssisted(q);
       }
     } else if (!q) {
-      lastTriggeredQuery.current = null
-      setSubmittedQuery("")
-      setMerged(null)
-      setQueries([])
+      lastTriggeredQuery.current = null;
+      setSubmittedQuery("");
+      setMerged(null);
+      setQueries([]);
     }
-  }, [searchParams])
+  }, [searchParams]);
 
   // Basic search hook
   const { data: basicResults, isLoading: isBasicLoading } = useSearch(
@@ -80,95 +85,130 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
     typeFilter ?? undefined,
     isHybrid,
     10,
-    isRerank
-  )
+    isRerank,
+  );
 
   const runAssisted = async (q: string) => {
-    if (!q.trim() || isStreaming) return
-    setIsStreaming(true)
-    setQueries([])
-    setMerged(null)
-    setError(null)
-    setSubmittedQuery(q)
+    if (!q.trim() || isStreaming) return;
+    setIsStreaming(true);
+    setQueries([]);
+    setMerged(null);
+    setError(null);
+    setSubmittedQuery(q);
 
-    abortRef.current = new AbortController()
+    abortRef.current = new AbortController();
     try {
       await api.query.assisted(
-        { query: q, top_k: 8, type: typeFilter ?? undefined, source_id: categoryFilter ?? undefined },
+        {
+          query: q,
+          top_k: 8,
+          type: typeFilter ?? undefined,
+          source_id: categoryFilter ?? undefined,
+        },
         {
           onQueries: (event) => {
-            setQueries(event.queries.map((q, index) => ({ index, query: q, status: "pending" })))
+            setQueries(
+              event.queries.map((q, index) => ({
+                index,
+                query: q,
+                status: "pending",
+              })),
+            );
           },
           onResult: (event) => {
             setQueries((prev) => {
-              const next = [...prev]
-              const target = next.find((item) => item.index === event.index)
-              if (target) { target.results = event.results; target.status = "done" }
-              return next
-            })
+              const next = [...prev];
+              const target = next.find((item) => item.index === event.index);
+              if (target) {
+                target.results = event.results;
+                target.status = "done";
+              }
+              return next;
+            });
           },
           onMerged: (event) => {
-            const normalized: SearchResult[] = event.results.map(r => ({
-              ...r,
-              score: Math.max(0, 1 - r.distance)
-            }))
-            setMerged(normalized)
+            const normalized = event.results.map(
+              (r) =>
+                ({
+                  ...r,
+                  score: Math.max(0, 1 - r.distance),
+                }) satisfies SearchResult,
+            );
+            setMerged(normalized);
           },
-          onError: (err) => { setError(err.error.message) },
-          onDone: () => { setIsStreaming(false) },
+          onError: (err) => {
+            setError(err.error.message);
+          },
+          onDone: () => {
+            setIsStreaming(false);
+          },
         },
-        { signal: abortRef.current.signal }
-      )
+        { signal: abortRef.current.signal },
+      );
     } catch (err: unknown) {
       if ((err as { name?: string })?.name !== "AbortError") {
-        setError((err as { message?: string })?.message ?? String(err))
+        setError((err as { message?: string })?.message ?? String(err));
       }
-      setIsStreaming(false)
+      setIsStreaming(false);
     }
-  }
+  };
 
   const cancelAssisted = () => {
-    abortRef.current?.abort()
-    setIsStreaming(false)
-  }
+    abortRef.current?.abort();
+    setIsStreaming(false);
+  };
 
   const handleSubmit = useCallback(() => {
-    const q = searchQuery.trim()
-    const hasFilter = !!categoryFilter || !!typeFilter
-    if (!q && !hasFilter) return
+    const q = searchQuery.trim();
+    const hasFilter = !!categoryFilter || !!typeFilter;
+    if (!q && !hasFilter) return;
 
     // Update URL - this will trigger the useEffect above
-    const params = new URLSearchParams(searchParams.toString())
-    params.set("q", q)
-    params.set("mode", isAssisted ? "assisted" : "basic")
-    params.set("hybrid", isHybrid.toString())
-    params.set("rerank", isRerank.toString())
-    if (categoryFilter) params.set("category", categoryFilter)
-    else params.delete("category")
-    if (typeFilter) params.set("type", typeFilter)
-    else params.delete("type")
-    router.push(`${pathname}?${params.toString()}`)
-  }, [searchQuery, isAssisted, isHybrid, isRerank, categoryFilter, searchParams, pathname, router])
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("q", q);
+    params.set("mode", isAssisted ? "assisted" : "basic");
+    params.set("hybrid", isHybrid.toString());
+    params.set("rerank", isRerank.toString());
+    if (categoryFilter) params.set("category", categoryFilter);
+    else params.delete("category");
+    if (typeFilter) params.set("type", typeFilter);
+    else params.delete("type");
+    router.push(`${pathname}?${params.toString()}`);
+  }, [
+    searchQuery,
+    isAssisted,
+    isHybrid,
+    isRerank,
+    categoryFilter,
+    searchParams,
+    pathname,
+    router,
+  ]);
 
-  const isLoading = isAssisted ? isStreaming : isBasicLoading
-  const hasResults = isAssisted ? merged !== null : !!basicResults
+  const isLoading = isAssisted ? isStreaming : isBasicLoading;
+  const hasResults = isAssisted ? merged !== null : !!basicResults;
 
   return (
     <div className="relative flex w-full min-h-[calc(100vh-3rem)] flex-col overflow-hidden">
       <div className="mx-auto w-full max-w-5xl flex-1 flex flex-col px-4 md:px-6">
         {!submittedQuery ? (
           <div className="flex flex-1 flex-col items-center justify-start pt-10 md:justify-center md:-mt-16">
-
             <div className="animate-in fade-in zoom-in duration-700 fill-mode-both mb-8">
               {isAssisted ? (
                 <Sparkles
                   className="size-16 text-primary"
-                  style={{ filter: "drop-shadow(0 0 20px oklch(0.9 0.148 196.3 / 0.5))" }}
+                  style={{
+                    filter:
+                      "drop-shadow(0 0 20px oklch(0.9 0.148 196.3 / 0.5))",
+                  }}
                 />
               ) : (
                 <Brain
                   className="size-16 text-primary"
-                  style={{ filter: "drop-shadow(0 0 20px oklch(0.9 0.148 196.3 / 0.5))" }}
+                  style={{
+                    filter:
+                      "drop-shadow(0 0 20px oklch(0.9 0.148 196.3 / 0.5))",
+                  }}
                 />
               )}
             </div>
@@ -208,7 +248,7 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
           </div>
         ) : (
           <div className="flex flex-1 flex-col gap-6 py-8 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-both">
-            <div className="sticky top-12 z-40 pb-6 pt-2 -mx-6 px-6 border-b border-border bg-background/95 backdrop-blur">
+            <div className="sticky top-12 z-40 pb-6 pt-2 -mx-6 px-6">
               <SearchInput
                 query={searchQuery}
                 onQueryChange={setSearchQuery}
@@ -242,7 +282,8 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                     )}
                     {queries.length > 0 && (
                       <span className="font-mono text-[10px] text-muted-foreground ml-auto">
-                        {queries.filter((q) => q.status === "done").length}/{queries.length}
+                        {queries.filter((q) => q.status === "done").length}/
+                        {queries.length}
                       </span>
                     )}
                     {isStreaming && (
@@ -258,13 +299,15 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
 
                   <div className="flex flex-col divide-y divide-border max-h-48 overflow-y-auto">
                     {queries.map((block) => {
-                      const hits = block.results?.length ?? 0
+                      const hits = block.results?.length ?? 0;
                       return (
                         <div
                           key={block.index}
                           className={cn(
                             "flex items-center gap-3 px-4 py-2 transition-colors",
-                            block.status === "pending" ? "bg-primary/3" : "bg-transparent"
+                            block.status === "pending"
+                              ? "bg-primary/3"
+                              : "bg-transparent",
                           )}
                         >
                           <span className="font-mono text-[10px] text-muted-foreground/80 w-5 shrink-0 text-right">
@@ -286,14 +329,16 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
                               block.status === "pending"
                                 ? "text-muted-foreground/30 animate-pulse"
                                 : hits > 0
-                                ? "text-primary"
-                                : "text-muted-foreground/30"
+                                  ? "text-primary"
+                                  : "text-muted-foreground/30",
                             )}
                           >
-                            {block.status === "pending" ? "···" : `${hits} hit${hits !== 1 ? "s" : ""}`}
+                            {block.status === "pending"
+                              ? "···"
+                              : `${hits} hit${hits !== 1 ? "s" : ""}`}
                           </span>
                         </div>
-                      )
+                      );
                     })}
                   </div>
                 </div>
@@ -333,5 +378,5 @@ export function SearchPage({ defaultAssisted = false }: { defaultAssisted?: bool
         )}
       </div>
     </div>
-  )
+  );
 }

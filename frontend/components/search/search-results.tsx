@@ -1,18 +1,18 @@
-"use client"
+"use client";
 
-import { FileText, Link2, Sparkles } from "lucide-react"
-import type { SearchResult, RelatedResult } from "@/lib/api"
-import { EntryCard } from "../entries/entry-card"
-import { AiAssistPanel } from "../ai/ai-assist-panel"
+import { FileText, Link2, Sparkles } from "lucide-react";
+import type { SearchResult, RelatedResult } from "@/lib/api";
+import { EntryCard } from "../entries/entry-card";
+import { AiAssistPanel } from "../ai/ai-assist-panel";
 
 function buildSearchPrompt(query: string, results: SearchResult[]): string {
-  const top = results.slice(0, 6)
+  const top = results.slice(0, 6);
   const blocks = top
     .map((r, i) => {
-      const text = (r.text ?? "").slice(0, 600).replace(/\s+/g, " ")
-      return `[${i + 1}] (${r.source_id} · ${r.id})\n${text}`
+      const text = (r.text ?? "").slice(0, 600).replace(/\s+/g, " ");
+      return `[${i + 1}] (${r.source_id} · ${r.id})\n${text}`;
     })
-    .join("\n\n")
+    .join("\n\n");
   return `You are a careful assistant summarizing search hits for a personal knowledge base.
 
 Query: "${query}"
@@ -20,17 +20,22 @@ Query: "${query}"
 Top results:
 ${blocks}
 
-Write a concise answer (3-6 sentences, markdown). Cite the hit numbers like [1], [3]. If the results don't actually answer the query, say so plainly.`
+Write a concise answer (3-6 sentences, markdown). Cite the hit numbers like [1], [3]. If the results don't actually answer the query, say so plainly.`;
 }
 
 interface SearchResultsProps {
-  results: SearchResult[]
-  related?: RelatedResult[]
-  query: string
-  isAssisted?: boolean
+  results: SearchResult[];
+  related?: RelatedResult[];
+  query: string;
+  isAssisted?: boolean;
 }
 
-export function SearchResults({ results, related = [], query, isAssisted }: SearchResultsProps) {
+export function SearchResults({
+  results,
+  related = [],
+  query,
+  isAssisted,
+}: SearchResultsProps) {
   if (results.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -41,13 +46,15 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
             <FileText className="size-8 text-muted-foreground/60" />
           )}
         </div>
-        <h3 className="mb-3 text-2xl font-extrabold tracking-tight">No results match</h3>
+        <h3 className="mb-3 text-2xl font-extrabold tracking-tight">
+          No results match
+        </h3>
         <p className="text-muted-foreground max-w-sm text-sm leading-relaxed">
           No fragments matching{" "}
           <span className="font-mono text-primary">&ldquo;{query}&rdquo;</span>
         </p>
       </div>
-    )
+    );
   }
 
   return (
@@ -61,7 +68,8 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
             <div className="size-1.5 bg-primary animate-pulse" />
           )}
           <p className="font-mono text-[10px] font-black uppercase tracking-[3px] text-primary/80">
-            {results.length} {isAssisted ? "merged" : ""} fragment{results.length !== 1 ? "s" : ""}
+            {results.length} {isAssisted ? "merged" : ""} fragment
+            {results.length !== 1 ? "s" : ""}
           </p>
         </div>
         <div className="h-px flex-1 bg-border" />
@@ -73,7 +81,7 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
         buildPrompt={() => buildSearchPrompt(query, results)}
       />
 
-      <div className="flex flex-col divide-y divide-border border border-border">
+      <div className="flex flex-col divide-y divide-border">
         {results.map((result, index) => (
           <EntryCard key={result.id} entry={result} index={index} showScore />
         ))}
@@ -92,7 +100,7 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
             <div className="h-px flex-1 bg-border" />
           </div>
 
-          <div className="flex flex-col divide-y divide-border border border-dashed border-border">
+          <div className="flex flex-col divide-y divide-border">
             {related.map((item, index) => (
               <div key={item.id} className="relative">
                 {item.relation && (
@@ -115,5 +123,5 @@ export function SearchResults({ results, related = [], query, isAssisted }: Sear
         <div className="h-px w-8 bg-border" />
       </div>
     </div>
-  )
+  );
 }

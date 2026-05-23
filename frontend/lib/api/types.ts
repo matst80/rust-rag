@@ -161,7 +161,7 @@ export interface SearchResult {
   metadata: EntryMetadata;
   source_id: string;
   created_at: number;
-  updated_at: number;
+  //updated_at: number;
   score: number;
   /** Header breadcrumb of the chunk that matched best (e.g. ["Architecture", "Embedding execution"]). */
   section_path?: string[];

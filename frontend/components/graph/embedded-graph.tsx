@@ -71,6 +71,7 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
   const { data: semanticBundle } = useSearch(
     centerItem?.text ?? "",
     undefined,
+    undefined,
     true,
     SEMANTIC_TOP_K
   )

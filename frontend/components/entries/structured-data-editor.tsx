@@ -266,11 +266,7 @@ export function StructuredDataEditor({
 
         /* Array & Object Styling */
         .rjsf-wrapper fieldset {
-          border: 1px solid var(--border);
-          padding: 1rem;
-          border-radius: 0.5rem;
           margin-bottom: 1rem;
-          background: var(--muted) / 20;
         }
         .rjsf-wrapper fieldset legend {
           font-family: var(--font-mono), monospace;

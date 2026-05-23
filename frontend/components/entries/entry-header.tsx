@@ -61,9 +61,9 @@ export function EntryHeader({
           </Link>
         </Button>
         <div className="flex flex-col min-w-0">
-          <h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground leading-none">
+          {/*<h1 className="font-mono text-xs font-black uppercase tracking-[2px] text-foreground leading-none">
             Fragment
-          </h1>
+          </h1>*/}
           <div className="flex items-center gap-2 mt-1">
             <button
               type="button"

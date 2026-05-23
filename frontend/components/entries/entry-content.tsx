@@ -93,9 +93,9 @@ export function EntryContent({
 
               {editedType && schema && (
                 <div className="space-y-3 animate-in fade-in duration-300">
-                  <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                  {/*<span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
                     Structured Data ({editedType})
-                  </span>
+                  </span>*/}
                   <StructuredDataEditor
                     schema={schema.json_schema}
                     value={editedData}
