@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
 import { atomDark } from "react-syntax-highlighter/dist/esm/styles/prism"
-import { useState } from "react"
+import { useState, memo } from "react"
 import { Check, Copy } from "lucide-react"
 import { MermaidBlock } from "./mermaid-block"
 
@@ -14,7 +14,7 @@ interface MarkdownViewProps {
   className?: string
 }
 
-function CopyButton({ text }: { text: string }) {
+const CopyButton = memo(function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
 
   const copy = async () => {
@@ -26,7 +26,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={copy}
-      className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-white/50 backdrop-blur-sm transition-all hover:bg-white/10 hover:text-white active:scale-95"
+      className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-white/50 transition-colors hover:bg-white/10 hover:text-white active:scale-95"
       title="Copy to clipboard"
     >
       {copied ? (
@@ -42,9 +42,9 @@ function CopyButton({ text }: { text: string }) {
       )}
     </button>
   )
-}
+})
 
-export function MarkdownView({ content, className }: MarkdownViewProps) {
+function MarkdownViewInner({ content, className }: MarkdownViewProps) {
   return (
     <div
       className={cn(
@@ -71,7 +71,7 @@ export function MarkdownView({ content, className }: MarkdownViewProps) {
 
             if (isBlock) {
               return (
-                <div className="group relative my-8 overflow-hidden rounded-2xl border border-white/10 bg-[#0d1117]/80 shadow-2xl backdrop-blur-sm transition-all hover:border-white/20">
+                <div className="group relative my-8 overflow-hidden rounded-2xl border border-white/10 bg-[#0d1117]/80 shadow-2xl transition-colors hover:border-white/20">
                   {/* Terminal Header */}
                   <div className="flex h-12 items-center justify-between border-b border-white/5 bg-gradient-to-r from-white/[0.08] to-transparent px-4">
                     <div className="flex items-center gap-3">
@@ -134,3 +134,5 @@ export function MarkdownView({ content, className }: MarkdownViewProps) {
     </div>
   )
 }
+
+export const MarkdownView = memo(MarkdownViewInner)

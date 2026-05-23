@@ -444,7 +444,7 @@ pub struct AcpCommandAck {
     pub sent: String,
     /// Optional context (e.g. echoed `request_id` for permission_response).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "metadata_schema")]
+    #[schemars(schema_with = "metadata_schema", default)]
     pub context: Option<serde_json::Value>,
 }
 
@@ -3120,4 +3120,25 @@ pub fn streamable_http_service(
         Arc::new(LocalSessionManager::default()),
         config,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AcpCommandAck;
+    use schemars::schema_for;
+
+    #[test]
+    fn acp_command_ack_context_is_not_required() {
+        let schema = serde_json::to_value(schema_for!(AcpCommandAck)).expect("serialize schema");
+        let required = schema
+            .pointer("/required")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            !required.iter().any(|value| value.as_str() == Some("context")),
+            "context should stay optional in the generated schema: {schema}"
+        );
+    }
 }

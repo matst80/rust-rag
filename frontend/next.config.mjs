@@ -1,8 +1,15 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
 /** @type {import('next').NextConfig} */
 const RAG_API_URL = process.env.RAG_API_URL || 'http://localhost:4001';
 console.log('Next.js rewrites using RAG_API_URL:', RAG_API_URL);
 
 const nextConfig = {
+  output: 'standalone',
+  outputFileTracingRoot: path.join(__dirname, '..'),
   allowedDevOrigins: ["127.0.0.1", "10.10.11.135", "rag.k6n.net"],
   transpilePackages: ["@rust-rag/llm"],
   typescript: {

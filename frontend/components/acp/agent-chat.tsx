@@ -1,12 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { Bot, Circle, Link2, Loader2, Menu, Plus, Send, Square, User2, X } from "lucide-react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import Link from "next/link"
+import { Bot, Circle, Hash, Link2, Loader2, Menu, Plus, Send, Square, User2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { MessageMarkdown } from "@/components/messages/message-markdown"
 import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 const EMPTY_USERS: Set<string> = new Set()
+const EMPTY_ARRAY: any[] = []
 
 type AcpEnvelope = Record<string, unknown>
 
@@ -523,18 +525,24 @@ export function AgentChat() {
 	)
 
 	const sessionList = useMemo(() => Object.values(sessions), [sessions])
-	const activeEvents = useMemo(
-		() => (activeSessionId ? eventsBySession[activeSessionId] ?? [] : []),
-		[activeSessionId, eventsBySession],
-	)
-	const blocks = useMemo(() => buildBlocks(activeEvents), [activeEvents])
-	const pendingForActive = useMemo(
-		() =>
-			activeSessionId
-				? Object.values(pendingPermissions).filter((p) => sessionIdOf(p.payload) === activeSessionId)
-				: [],
-		[activeSessionId, pendingPermissions],
-	)
+	const activeEvents = useMemo(() => {
+		if (!activeSessionId) return EMPTY_ARRAY
+		return eventsBySession[activeSessionId] ?? EMPTY_ARRAY
+	}, [activeSessionId, eventsBySession[activeSessionId || ""]])
+
+	const prevBlocksRef = useRef<Block[]>([])
+	const blocks = useMemo(() => {
+		const next = buildBlocks(activeEvents, prevBlocksRef.current)
+		prevBlocksRef.current = next
+		return next
+	}, [activeEvents])
+	const pendingForActive = useMemo(() => {
+		if (!activeSessionId) return EMPTY_ARRAY
+		const filtered = Object.values(pendingPermissions).filter(
+			(p) => sessionIdOf(p.payload) === activeSessionId,
+		)
+		return filtered.length === 0 ? EMPTY_ARRAY : filtered
+	}, [activeSessionId, pendingPermissions])
 
 	const activeSession = useMemo(() => {
 		return sessions[activeSessionId ?? ""]
@@ -737,6 +745,14 @@ export function AgentChat() {
 						>
 							<Plus className="size-4" />
 						</button>
+						<Link
+							href="/messages"
+							className="text-muted-foreground hover:text-foreground"
+							aria-label="Swarm messages"
+							title="Go to Swarm"
+						>
+							<Hash className="size-4" />
+						</Link>
 						<button
 							type="button"
 							onClick={() => setSidebarOpen(false)}
@@ -759,7 +775,7 @@ export function AgentChat() {
 										key={inst.name}
 										onClick={() => void selectInstance(inst.name)}
 										className={cn(
-											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-all",
+											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-colors",
 											isSelected
 												? "bg-primary text-primary-foreground shadow-sm"
 												: "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -965,7 +981,7 @@ export function AgentChat() {
 										key={cmd.name}
 										type="button"
 										onClick={() => executeCommand(cmd.name)}
-										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-all hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
+										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
 										title={cmd.description}
 									>
 										<Plus className="size-3 opacity-50" />
@@ -1246,7 +1262,7 @@ function extractText(content: unknown): string {
 	return ""
 }
 
-function buildBlocks(events: AcpEvent[]): Block[] {
+function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 	const blocks: Block[] = []
 	const toolIndex: Record<string, number> = {}
 	let assistantBuf: { idx: number } | null = null
@@ -1417,6 +1433,32 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 		thoughtBuf = null
 	}
 
+	// Reference stability for previous blocks that haven't changed.
+	for (let i = 0; i < Math.min(blocks.length, prevBlocks.length); i++) {
+		const nb = blocks[i]
+		const ob = prevBlocks[i]
+		if (nb.key === ob.key && nb.kind === ob.kind) {
+			let identical = false
+			if (nb.kind === "user" && ob.kind === "user") identical = nb.text === ob.text
+			else if (nb.kind === "assistant" && ob.kind === "assistant") identical = nb.text === ob.text
+			else if (nb.kind === "thought" && ob.kind === "thought") identical = nb.text === ob.text
+			else if (nb.kind === "status" && ob.kind === "status") identical = nb.status === ob.status
+			else if (nb.kind === "tool" && ob.kind === "tool") {
+				identical = nb.status === ob.status && nb.content === ob.content && nb.title === ob.title
+			} else if (nb.kind === "plan" && ob.kind === "plan") {
+				// simple deep check for plan entries
+				identical = JSON.stringify(nb.entries) === JSON.stringify(ob.entries)
+			} else if (nb.kind === "error" && ob.kind === "error") identical = nb.text === ob.text
+			else if (nb.kind === "raw" && ob.kind === "raw") {
+				identical = nb.eventKind === ob.eventKind && JSON.stringify(nb.payload) === JSON.stringify(ob.payload)
+			}
+
+			if (identical) {
+				blocks[i] = ob
+			}
+		}
+	}
+
 	return blocks
 }
 
@@ -1424,7 +1466,7 @@ function timeOf(ts: number): string {
 	return new Date(ts).toLocaleTimeString()
 }
 
-function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
+const BlockView = memo(function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
 	if (block.kind === "user") {
 		return (
 			<div className="mb-3 flex gap-3">
@@ -1576,4 +1618,4 @@ function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: strin
 			<pre className="whitespace-pre-wrap break-words mt-1 text-[10px]">{JSON.stringify(block.payload, null, 2)}</pre>
 		</details>
 	)
-}
+})
