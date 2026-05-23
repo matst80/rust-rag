@@ -7,7 +7,8 @@ target/
 *.bak
 assets/
 !assets/schemas/
-data/
+data/*.db*
+data/uploads/
 *.sqlite
 .env
 .env.*
