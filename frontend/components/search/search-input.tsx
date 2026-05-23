@@ -1,41 +1,35 @@
-"use client"
+"use client";
 
-import { useState, useEffect } from "react"
-import { Wand2, ChevronDown, Sparkles, Layers, Award } from "lucide-react"
-import { Textarea } from "@/components/ui/textarea"
-import { Button } from "@/components/ui/button"
+import { useState, useEffect } from "react";
+import { Wand2, ChevronDown, Sparkles, Layers, Award } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
-import { useCategories, useSchemas } from "@/lib/api"
-import { cn } from "@/lib/utils"
+} from "@/components/ui/select";
+import { useCategories, useSchemas } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 interface SearchInputProps {
-  query: string
-  onQueryChange: (query: string) => void
-  categoryFilter: string | null
-  onCategoryFilterChange: (category: string | null) => void
-  isAssisted: boolean
-  onAssistedChange: (enabled: boolean) => void
-  isHybrid: boolean
-  onHybridChange: (enabled: boolean) => void
-  isRerank: boolean
-  onRerankChange: (enabled: boolean) => void
-  typeFilter: string | null
-  onTypeFilterChange: (type: string | null) => void
-  onSubmit: () => void
-  isLoading?: boolean
+  query: string;
+  onQueryChange: (query: string) => void;
+  categoryFilter: string | null;
+  onCategoryFilterChange: (category: string | null) => void;
+  isAssisted: boolean;
+  onAssistedChange: (enabled: boolean) => void;
+  isHybrid: boolean;
+  onHybridChange: (enabled: boolean) => void;
+  isRerank: boolean;
+  onRerankChange: (enabled: boolean) => void;
+  typeFilter: string | null;
+  onTypeFilterChange: (type: string | null) => void;
+  onSubmit: () => void;
+  isLoading?: boolean;
 }
-
-const SUGGESTIONS = [
-  "Summarize my latest entries",
-  "Find connections between rust and rag",
-  "Recent research notes",
-]
 
 export function SearchInput({
   query,
@@ -53,25 +47,25 @@ export function SearchInput({
   onSubmit,
   isLoading,
 }: SearchInputProps) {
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => setMounted(true), [])
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
-  const { data: categories } = useCategories()
-  const validCategories = categories?.filter((c) => c.id.trim().length > 0)
-  const { data: schemas } = useSchemas()
-  const validSchemas = schemas?.filter((s) => s.type_name.trim().length > 0)
+  const { data: categories } = useCategories();
+  const validCategories = categories?.filter((c) => c.id.trim().length > 0);
+  const { data: schemas } = useSchemas();
+  const validSchemas = schemas?.filter((s) => s.type_name.trim().length > 0);
 
   const handleSubmit = (e?: React.FormEvent) => {
-    e?.preventDefault()
-    if (query.trim() || categoryFilter || typeFilter) onSubmit()
-  }
+    e?.preventDefault();
+    if (query.trim() || categoryFilter || typeFilter) onSubmit();
+  };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      handleSubmit()
+      e.preventDefault();
+      handleSubmit();
     }
-  }
+  };
 
   return (
     <div className="w-full max-w-5xl mx-auto">
@@ -79,13 +73,17 @@ export function SearchInput({
         className={cn(
           "relative flex flex-col w-full border border-border bg-card transition-all duration-200",
           "focus-within:border-primary focus-within:[box-shadow:0_0_0_1px_oklch(0.9_0.148_196.3/0.15),inset_0_0_30px_oklch(0.9_0.148_196.3/0.03)]",
-          isAssisted && "focus-within:border-primary/60"
+          isAssisted && "focus-within:border-primary/60",
         )}
       >
         {/* Textarea */}
         <div className="flex-1 px-4 pt-5 pb-3 md:pt-4 md:pb-2">
           <Textarea
-            placeholder={isAssisted ? "Ask a complex question..." : "Search your knowledge base..."}
+            placeholder={
+              isAssisted
+                ? "Ask a complex question..."
+                : "Search your knowledge base..."
+            }
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             onKeyDown={onKeyDown}
@@ -105,10 +103,12 @@ export function SearchInput({
                 "h-8 px-2.5 flex items-center gap-1.5 border rounded-md font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all",
                 isAssisted
                   ? "border-primary/30 bg-primary/5 text-primary"
-                  : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70"
+                  : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70",
               )}
             >
-              <Sparkles className={cn("size-3", isAssisted && "animate-pulse")} />
+              <Sparkles
+                className={cn("size-3", isAssisted && "animate-pulse")}
+              />
               Assisted
             </button>
 
@@ -116,14 +116,16 @@ export function SearchInput({
               <button
                 type="button"
                 onClick={() => onHybridChange(!isHybrid)}
-                title={isHybrid
-                  ? "Hybrid retrieval (dense + sparse RRF). Click to switch to dense-only."
-                  : "Dense-only retrieval. Click to enable hybrid (dense + sparse RRF)."}
+                title={
+                  isHybrid
+                    ? "Hybrid retrieval (dense + sparse RRF). Click to switch to dense-only."
+                    : "Dense-only retrieval. Click to enable hybrid (dense + sparse RRF)."
+                }
                 className={cn(
                   "h-8 px-2.5 flex items-center gap-1.5 border rounded-md font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all",
                   isHybrid
                     ? "border-primary/30 bg-primary/5 text-primary"
-                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70"
+                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70",
                 )}
               >
                 <Layers className="size-3" />
@@ -135,14 +137,16 @@ export function SearchInput({
               <button
                 type="button"
                 onClick={() => onRerankChange(!isRerank)}
-                title={isRerank
-                  ? "Cross-encoder reranker active. Click to disable."
-                  : "Click to enable bge-reranker-v2-m3 reranking on top-50 candidates."}
+                title={
+                  isRerank
+                    ? "Cross-encoder reranker active. Click to disable."
+                    : "Click to enable bge-reranker-v2-m3 reranking on top-50 candidates."
+                }
                 className={cn(
                   "h-8 px-2.5 flex items-center gap-1.5 border rounded-md font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all",
                   isRerank
                     ? "border-primary/30 bg-primary/5 text-primary"
-                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70"
+                    : "border-border bg-transparent text-muted-foreground hover:border-primary/30 hover:text-primary/70",
                 )}
               >
                 <Award className="size-3" />
@@ -153,7 +157,9 @@ export function SearchInput({
             {!isAssisted && (
               <Select
                 value={typeFilter ?? "all"}
-                onValueChange={(v) => onTypeFilterChange(v === "all" ? null : v)}
+                onValueChange={(v) =>
+                  onTypeFilterChange(v === "all" ? null : v)
+                }
               >
                 <SelectTrigger
                   size="sm"
@@ -169,7 +175,9 @@ export function SearchInput({
                     <SelectItem key={s.type_name} value={s.type_name}>
                       {s.title || s.type_name}
                       {s.item_count !== undefined && s.item_count !== null && (
-                        <span className="opacity-40 ml-1.5">({s.item_count})</span>
+                        <span className="opacity-40 ml-1.5">
+                          ({s.item_count})
+                        </span>
                       )}
                     </SelectItem>
                   ))}
@@ -180,7 +188,9 @@ export function SearchInput({
             {!isAssisted && (
               <Select
                 value={categoryFilter ?? "all"}
-                onValueChange={(v) => onCategoryFilterChange(v === "all" ? null : v)}
+                onValueChange={(v) =>
+                  onCategoryFilterChange(v === "all" ? null : v)
+                }
               >
                 <SelectTrigger
                   size="sm"
@@ -206,40 +216,31 @@ export function SearchInput({
           <Button
             size="sm"
             onClick={() => handleSubmit()}
-            disabled={isLoading || (!query.trim() && !categoryFilter && !typeFilter)}
+            disabled={
+              isLoading || (!query.trim() && !categoryFilter && !typeFilter)
+            }
             className={cn(
               "px-4 font-mono text-[10px] font-black uppercase tracking-[2px] transition-all",
-              (query.trim() || categoryFilter || typeFilter)
+              query.trim() || categoryFilter || typeFilter
                 ? "bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.3)]"
-                : "bg-muted text-muted-foreground/30 cursor-not-allowed"
+                : "bg-muted text-muted-foreground/30 cursor-not-allowed",
             )}
           >
             {isLoading ? (
               <div className="size-3.5 animate-spin border border-current border-t-transparent" />
             ) : (
               <>
-                {isAssisted ? <Sparkles className="size-3.5 mr-1.5" /> : <Wand2 className="size-3.5 mr-1.5" />}
+                {isAssisted ? (
+                  <Sparkles className="size-3.5 mr-1.5" />
+                ) : (
+                  <Wand2 className="size-3.5 mr-1.5" />
+                )}
                 {isAssisted ? "AI Search" : "Search"}
               </>
             )}
           </Button>
         </div>
       </div>
-
-      {/* Suggestions */}
-      {!query && mounted && (
-        <div className="flex flex-wrap justify-center gap-2 mt-5 animate-in fade-in slide-in-from-top-2 duration-500 fill-mode-both">
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s}
-              onClick={() => { onQueryChange(s); onSubmit() }}
-              className="h-8 px-3 border border-border rounded-md bg-card font-mono text-[10px] uppercase tracking-[1px] text-muted-foreground transition-all hover:border-primary/50 hover:text-primary"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
-  )
+  );
 }

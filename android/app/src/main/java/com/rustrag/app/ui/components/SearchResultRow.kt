@@ -67,24 +67,12 @@ fun SearchResultRow(
     val displayBody = item.analysis?.summary ?: item.text
     val isSummary = item.analysis?.summary != null
 
-    OutlinedCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.outlinedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        border = BorderStroke(
-            1.dp,
-            if (isStrongMatch) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
-            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-        ),
-        shape = RoundedCornerShape(12.dp)
-    ) {
+
         Column(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxWidth()
-                .padding(14.dp)
+                .padding(vertical = 12.dp)
+                .clickable(onClick = onClick)
         ) {
             // Header Row
             Row(
@@ -253,7 +241,7 @@ fun SearchResultRow(
             }
         }
     }
-}
+
 
 @Preview(showBackground = true)
 @Composable

@@ -150,6 +150,7 @@ export function StructuredDataEditor({
         <TabsContent value="form" className="mt-3 min-h-[300px]">
           <div className="rjsf-wrapper">
             <Form
+              tagName="div"
               schema={schema as RJSFSchema}
               validator={validator}
               formData={value || {}}
