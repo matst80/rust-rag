@@ -460,7 +460,7 @@ impl EmbedderHandle {
 
 pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let serde_json::Value::Object(map) = serde_json::json!({
-        "type": "object",
+        "type": ["object", "null"],
         "additionalProperties": true,
         "description": "Free-form JSON object of string-keyed metadata.",
     }) else {

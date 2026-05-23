@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { MoreVertical, Share2, ChevronRight, Database, Clock, History, Layers, ChevronsRight, Maximize2, Sparkles, ChevronDown, ChevronUp, Eye } from "lucide-react"
-import { useState } from "react"
+import { memo, useState } from "react"
 import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils"
 import { ComboButton } from "@/components/ui/combo-button"
 import {
@@ -43,7 +43,7 @@ function retrieverLabel(retrievers: string[]): { label: string; tone: string } {
   return { label: "—", tone: "oklch(0.42 0 0)" }
 }
 
-export function EntryCard({ entry, index = 0, onDelete, showScore = false }: EntryCardProps) {
+function EntryCardInner({ entry, index = 0, onDelete, showScore = false }: EntryCardProps) {
   const isSearchResult = "score" in entry
   const search = isSearchResult ? (entry as SearchResult) : null
   const score = search?.score ?? null
@@ -62,7 +62,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
   return (
     <div
       className={cn(
-        "group/card relative flex flex-col transition-all duration-300",
+        "group/card relative flex flex-col transition-colors duration-300",
         "animate-in fade-in slide-in-from-bottom-2",
         isExpanded && "bg-card shadow-[0_8px_40px_rgb(0,0,0,0.15)] ring-1 ring-primary/20 z-10 my-4"
       )}
@@ -70,7 +70,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
     >
       <div
         className={cn(
-          "relative flex items-start gap-4 md:gap-6 p-4 md:p-5 overflow-hidden transition-all duration-300",
+          "relative flex items-start gap-4 md:gap-6 p-4 md:p-5 overflow-hidden transition-transform duration-300",
           "bg-card hover:bg-card/60 border-b border-border last:border-b-0",
           !isExpanded && "group-hover/card:translate-x-0.5"
         )}
@@ -79,7 +79,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
         {showScore && scorePercent !== null && (
           <div
             className={cn(
-              "absolute left-0 top-0 w-0.5 transition-all duration-500",
+              "absolute left-0 top-0 w-0.5 transition-[width] duration-500",
               !isExpanded && "group-hover/card:w-1"
             )}
             style={{
@@ -175,7 +175,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
                   variant="ghost"
                   size="icon"
                   className={cn(
-                    "size-7 rounded-full transition-all",
+                    "size-7 rounded-full transition-colors",
                     isExpanded ? "bg-primary/10 text-primary" : "text-muted-foreground/30 hover:text-primary hover:bg-primary/5"
                   )}
                   onClick={() => setIsExpanded(!isExpanded)}
@@ -204,7 +204,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
                 
                 <Link href={`/entries/${encodeURIComponent(entry.id)}`}>
                   <div className="p-1.5 rounded-full bg-primary/0 hover:bg-primary/5 transition-colors">
-                    <ChevronRight className="size-3.5 text-muted-foreground/30 hover:text-primary transition-all hover:translate-x-0.5" />
+                    <ChevronRight className="size-3.5 text-muted-foreground/30 hover:text-primary transition-colors hover:translate-x-0.5" />
                   </div>
                 </Link>
               </div>
@@ -281,3 +281,5 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
     </div>
   )
 }
+
+export const EntryCard = memo(EntryCardInner)

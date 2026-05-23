@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { cn } from "@/lib/utils"
 import { useCreateItem, useUpdateItem, type Entry, type EntryMetadata } from "@/lib/api"
 import { useSchemas } from "@/lib/api/hooks"
 import { useSWRConfig } from "swr"
@@ -19,26 +20,33 @@ import { WhisperTranscribe } from "./whisper-transcribe"
 
 interface EntryFormProps {
   entry?: Entry
-  mode: "create" | "edit"
+  mode?: "create" | "edit"
+  initialData?: Partial<Entry> & { type_name?: string }
+  onSuccess?: (entry: Entry) => void
+  onCancel?: () => void
+  minimal?: boolean
 }
 
-export function EntryForm({ entry, mode }: EntryFormProps) {
+export function EntryForm({ entry, mode: providedMode, initialData, onSuccess, onCancel, minimal = false }: EntryFormProps) {
   const router = useRouter()
   const { mutate } = useSWRConfig()
+  
+  const mode = providedMode || (entry?.id ? "edit" : "create")
+  
   const { trigger: createItem, isMutating: isCreating } = useCreateItem()
-  const { trigger: updateItem, isMutating: isUpdating } = useUpdateItem(entry?.id ?? "")
+  const { trigger: updateItem, isMutating: isUpdating } = useUpdateItem(entry?.id ?? initialData?.id ?? "")
 
-  const [id, setId] = useState(entry?.id ?? "")
-  const [text, setText] = useState(entry?.text ?? "")
-  const [sourceId, setSourceId] = useState(entry?.source_id ?? "knowledge")
-  const [path, setPath] = useState(entry?.path ?? "")
-  const [metadata, setMetadata] = useState<EntryMetadata>(entry?.metadata ?? {})
+  const [id, setId] = useState(entry?.id ?? initialData?.id ?? "")
+  const [text, setText] = useState(entry?.text ?? initialData?.text ?? "")
+  const [sourceId, setSourceId] = useState(entry?.source_id ?? initialData?.source_id ?? "knowledge")
+  const [path, setPath] = useState(entry?.path ?? initialData?.path ?? "")
+  const [metadata, setMetadata] = useState<EntryMetadata>(entry?.metadata ?? initialData?.metadata ?? {})
   const [newMetaKey, setNewMetaKey] = useState("")
   const [newMetaValue, setNewMetaValue] = useState("")
   const [error, setError] = useState<string | null>(null)
   
-  const [typeName, setTypeName] = useState<string>(entry?.type ?? "")
-  const [data, setData] = useState<any>(entry?.data ?? {})
+  const [typeName, setTypeName] = useState<string>(entry?.type ?? initialData?.type_name ?? "")
+  const [data, setData] = useState<any>(entry?.data ?? initialData?.data ?? {})
   
   const { data: schemas } = useSchemas()
   const isMutating = isCreating || isUpdating
@@ -78,8 +86,9 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
         ? { type: typeName, data: data }
         : { type: null, data: null }
       
+      let result: Entry
       if (mode === "create") {
-        await createItem({
+        result = await createItem({
           ...(id.trim() && { id: id.trim() }),
           text: text.trim(),
           source_id: sourceId.trim(),
@@ -88,7 +97,7 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
           ...(typeName && typedFields),
         })
       } else {
-        await updateItem({
+        result = await updateItem({
           text: text.trim(),
           source_id: sourceId.trim(),
           metadata,
@@ -98,24 +107,31 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
       }
       mutate("items")
       mutate("categories")
-      router.push("/entries")
+      
+      if (onSuccess) {
+        onSuccess(result)
+      } else {
+        router.push("/entries")
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save entry")
     }
   }
 
   return (
-    <form onSubmit={handleSubmit} className="mx-auto max-w-2xl p-4">
-      <div className="mb-6 flex items-center gap-4">
-        <Button variant="ghost" size="icon" asChild>
-          <Link href="/entries">
-            <ArrowLeft className="size-4" />
-          </Link>
-        </Button>
-        <h1 className="text-2xl font-bold">
-          {mode === "create" ? "Create Entry" : "Edit Entry"}
-        </h1>
-      </div>
+    <form onSubmit={handleSubmit} className={cn("mx-auto w-full", !minimal && "max-w-2xl p-4")}>
+      {!minimal && (
+        <div className="mb-6 flex items-center gap-4">
+          <Button variant="ghost" size="icon" asChild>
+            <Link href="/entries">
+              <ArrowLeft className="size-4" />
+            </Link>
+          </Button>
+          <h1 className="text-2xl font-bold">
+            {mode === "create" ? "Create Entry" : "Edit Entry"}
+          </h1>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
@@ -272,8 +288,15 @@ export function EntryForm({ entry, mode }: EntryFormProps) {
       </Card>
 
       <div className="mt-6 flex justify-end gap-2">
-        <Button variant="outline" asChild>
-          <Link href="/entries">Cancel</Link>
+        <Button 
+          type="button" 
+          variant="outline" 
+          onClick={() => {
+            if (onCancel) onCancel()
+            else router.push("/entries")
+          }}
+        >
+          Cancel
         </Button>
         <Button type="submit" disabled={isMutating}>
           <Save className="size-4" />

@@ -81,8 +81,9 @@ data:
   RAG_GRAPH_ENABLED: "true"
   RAG_GRAPH_BUILD_ON_STARTUP: "true"
   RAG_PROJECTION_ALGO: "hdbscan"
-  RAG_HDBSCAN_MIN_CLUSTER_SIZE: "3"
-  RAG_HDBSCAN_MIN_SAMPLES: "2"
+  RAG_HDBSCAN_MIN_CLUSTER_SIZE: "4"
+  RAG_HDBSCAN_MIN_SAMPLES: "4"
+  RAG_PROJECTION_PROPAGATE_NOISE: "0"
   RAG_AUTH_ENABLED: "true"
   ## DNS rebinding guard for /mcp. Default allowlist is localhost only;
   ## must include the public hostname so VSCode/Cursor over the ingress
