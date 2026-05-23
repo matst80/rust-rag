@@ -122,19 +122,29 @@ export function ToolResultView({ name, result }: { name: string; result: string 
             <MarkdownView content={entry.text} />
           </div>
 
-          {entry.metadata && Object.keys(entry.metadata).length > 0 && (
-            <div className="mt-2 pt-3 border-t border-border/30">
-              <div className="flex flex-wrap gap-1.5">
-                {Object.entries(entry.metadata).map(([k, v], idx) => (
-                  <div key={idx} className="flex items-center gap-1.5 px-2 py-0.5 bg-muted/50 border border-border/50 rounded-full">
-                    <Tag className="size-2.5 text-primary/60" />
-                    <span className="text-[9px] font-mono font-bold opacity-70">{k}:</span>
-                    <span className="text-[9px] font-mono opacity-90 truncate max-w-[120px]">{String(v)}</span>
-                  </div>
-                ))}
+          {(() => {
+            const visibleMetadata = Object.entries(entry.metadata || {}).filter(
+              ([k, v]) =>
+                k !== "source_type" &&
+                k !== "source_file" &&
+                k !== "projection" &&
+                typeof v !== "object"
+            );
+            if (visibleMetadata.length === 0) return null;
+            return (
+              <div className="mt-2 pt-3 border-t border-border/30">
+                <div className="flex flex-wrap gap-1.5">
+                  {visibleMetadata.map(([k, v], idx) => (
+                    <div key={idx} className="flex items-center gap-1.5 px-2 py-0.5 bg-muted/50 border border-border/50 rounded-full">
+                      <Tag className="size-2.5 text-primary/60" />
+                      <span className="text-[9px] font-mono font-bold opacity-70">{k}:</span>
+                      <span className="text-[9px] font-mono opacity-90 truncate max-w-[120px]">{String(v)}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       )
     }

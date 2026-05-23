@@ -41,7 +41,7 @@ export function RelationItem({ edge, neighborId, neighborEntry, onDelete }: Rela
 
   return (
     <div
-      className="group relative rounded-2xl border border-muted-foreground/10 bg-background/40 backdrop-blur-sm p-4 transition-all hover:border-primary/30 hover:bg-primary/5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] cursor-pointer"
+      className="group relative rounded-2xl border border-muted-foreground/10 bg-background/40 p-4 transition-colors hover:border-primary/30 hover:bg-primary/5 hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] cursor-pointer"
       onClick={() => router.push(`/entries/${encodeURIComponent(neighborId)}`)}
     >
       <div className="flex items-start justify-between gap-3">

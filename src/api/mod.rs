@@ -5,7 +5,7 @@ use crate::{
     },
     crypto::EncryptionKey,
     db::{
-        AuthStore, CategorySummary, ChannelSummary, GraphEdgeRecord, GraphEdgeType,
+        AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord, GraphEdgeType,
         GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
         MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, PushStore, SearchHit,
@@ -45,9 +45,10 @@ use tracing::error;
 use uuid::Uuid;
 
 pub mod attachments;
-mod analysis;
+pub mod analysis;
 mod auth;
 mod chunking;
+pub mod code;
 mod multimodal;
 mod openai;
 mod ontology;
@@ -96,6 +97,14 @@ struct RequestAuthContext {
 #[derive(Clone)]
 pub struct AppState {
     pub embedder: Arc<EmbedderHandle>,
+    /// Second embedder dedicated to source-code chunks (BGE-Code-v1, 1536-d).
+    /// Loaded lazily; `None` when `RAG_CODE_EMBEDDER_PATH` is unset. Used by
+    /// the code-ingest pipeline and `code_*` MCP tools.
+    pub code_embedder: Option<Arc<EmbedderHandle>>,
+    /// Async data-access for `code_repos`/`code_files`/`code_chunks`. `None`
+    /// when running on pure-SQLite (no `RAG_DATABASE_URL`) — the code-ingest
+    /// subsystem stays disabled in that mode.
+    pub code_store: Option<Arc<crate::db::code_store::CodeStore>>,
     pub store: Arc<dyn VectorStore>,
     pub auth_store: Arc<dyn AuthStore>,
     pub user_memory: Arc<dyn UserMemoryStore>,
@@ -154,6 +163,7 @@ pub struct AppState {
     pub push: Option<Arc<dyn PushStore>>,
     pub web_push: Arc<WebPushConfig>,
     pub whisper: Arc<crate::config::WhisperConfig>,
+    pub projection_worker: Arc<crate::projection::ProjectionWorker>,
 }
 
 impl AppState {
@@ -173,7 +183,9 @@ impl AppState {
         let multimodal_timeout = multimodal.timeout_secs.max(1);
         Self {
             embedder,
-            store,
+            code_embedder: None,
+            code_store: None,
+            store: store.clone(),
             auth_store,
             user_memory,
             messages,
@@ -212,6 +224,7 @@ impl AppState {
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
+            projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
         }
     }
 
@@ -268,6 +281,20 @@ impl AppState {
         self
     }
 
+    /// Wire the code-embedder handle (BGE-Code-v1). Call once during startup.
+    /// Absent → `code_*` MCP tools refuse, code-ingest worker stays idle.
+    pub fn with_code_embedder(mut self, handle: Arc<EmbedderHandle>) -> Self {
+        self.code_embedder = Some(handle);
+        self
+    }
+
+    /// Wire the code-store (Postgres-backed). Only wired when running
+    /// against Postgres; pure-SQLite dev mode leaves it `None`.
+    pub fn with_code_store(mut self, store: Arc<crate::db::code_store::CodeStore>) -> Self {
+        self.code_store = Some(store);
+        self
+    }
+
     pub fn with_reranker(
         mut self,
         reranker: Arc<dyn crate::reranker::Reranker>,
@@ -302,7 +329,9 @@ impl AppState {
         };
         Self {
             embedder: Arc::new(EmbedderHandle::ready(embedder)),
-            store,
+            code_embedder: None,
+            code_store: None,
+            store: store.clone(),
             auth_store,
             user_memory: Arc::new(NoopUserMemory),
             messages: Arc::new(NoopMessages),
@@ -341,6 +370,7 @@ impl AppState {
             push: None,
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
+            projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
         }
     }
 }
@@ -374,6 +404,19 @@ impl EmbedderHandle {
 
     pub fn mark_failed(&self, error: String) {
         *self.inner.write().expect("embedder state lock poisoned") = EmbedderState::Failed(error);
+    }
+
+    /// Public, non-API variant of `get_ready` for use by background workers
+    /// (e.g. code-ingest). Returns `anyhow::Error` so it composes with
+    /// non-axum call sites.
+    pub fn try_ready(&self) -> anyhow::Result<Arc<dyn EmbeddingService>> {
+        match &*self.inner.read().expect("embedder state lock poisoned") {
+            EmbedderState::Loading => anyhow::bail!("embedder is still loading"),
+            EmbedderState::Ready(embedder) => Ok(embedder.clone()),
+            EmbedderState::Failed(error) => {
+                anyhow::bail!("embedder failed to initialize: {error}")
+            }
+        }
     }
 
     pub(crate) fn get_ready(&self) -> Result<Arc<dyn EmbeddingService>, ApiError> {
@@ -417,7 +460,7 @@ impl EmbedderHandle {
 
 pub fn metadata_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let serde_json::Value::Object(map) = serde_json::json!({
-        "type": "object",
+        "type": ["object", "null"],
         "additionalProperties": true,
         "description": "Free-form JSON object of string-keyed metadata.",
     }) else {
@@ -639,6 +682,10 @@ pub struct SearchResultPayload {
     /// has no path set. Distinct from chunk-level `section_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, etc.).
+    /// `None` when no analysis has been run yet.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub analysis: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -1031,6 +1078,207 @@ impl UserMemoryStore for NoopUserMemory {
     }
 }
 
+async fn rebuild_map(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .projection_worker
+        .run_rebuild(state.http_client.clone(), state.analysis.clone())
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({ "status": "started" })))
+}
+
+async fn get_map(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::projection::MapPoint>>, ApiError> {
+    Ok(Json(build_map_points(state).await?))
+}
+
+pub async fn build_map_points(
+    state: AppState,
+) -> Result<Vec<crate::projection::MapPoint>, ApiError> {
+    let (items, _) = tokio::task::spawn_blocking(move || {
+        state.store.list_items(ListItemsRequest {
+            limit: Some(10000), // High limit for the global map
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    // First pass: collect raw projection state per item. `cluster_raw` is the
+    // algorithm's assignment; `cluster` may already reflect a numeric override
+    // (legacy). We resolve anchor-based overrides in the second pass once every
+    // item's raw cluster is known.
+    struct Raw {
+        x: f32,
+        y: f32,
+        z: f32,
+        cluster_raw: usize,
+        /// Effective cluster as written to disk at last rebuild — may differ
+        /// from `cluster_raw` for items moved by propagation/override/anchor.
+        cluster_at_write: usize,
+        cluster_override: Option<usize>,
+        cluster_anchor_id: Option<String>,
+        cluster_name: Option<String>,
+        cluster_description: Option<String>,
+    }
+    let mut raw_by_id: std::collections::HashMap<String, Raw> =
+        std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    let mut item_lookup: std::collections::HashMap<String, ItemRecord> =
+        std::collections::HashMap::new();
+
+    for item in items {
+        let Some(proj) = item.metadata.get("projection") else {
+            continue;
+        };
+        let (Some(x), Some(y)) = (
+            proj.get("x").and_then(|v| v.as_f64()),
+            proj.get("y").and_then(|v| v.as_f64()),
+        ) else {
+            continue;
+        };
+        let z = proj.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let cluster_at_write = proj.get("cluster").and_then(|v| v.as_u64()).map(|v| v as usize);
+        // `cluster_raw` falls back to `cluster` for items written before the
+        // raw/effective split landed.
+        let cluster_raw = proj
+            .get("cluster_raw")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .or(cluster_at_write);
+        let Some(cluster_raw) = cluster_raw else {
+            continue;
+        };
+        let cluster_at_write = cluster_at_write.unwrap_or(cluster_raw);
+        let cluster_override = proj
+            .get("cluster_override")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+        let cluster_anchor_id = proj
+            .get("cluster_anchor_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let cluster_name = proj
+            .get("cluster_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let cluster_description = proj
+            .get("cluster_description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        order.push(item.id.clone());
+        raw_by_id.insert(
+            item.id.clone(),
+            Raw {
+                x: x as f32,
+                y: y as f32,
+                z: z as f32,
+                cluster_raw,
+                cluster_at_write,
+                cluster_override,
+                cluster_anchor_id,
+                cluster_name,
+                cluster_description,
+            },
+        );
+        item_lookup.insert(item.id.clone(), item);
+    }
+
+    // Build cluster_id → (name, description) from items that are organic
+    // members of their cluster (no override of any kind). Anchored / overridden
+    // items carry a stale label from a previous bucket, so excluding them
+    // prevents "Outliers" from leaking onto the override target.
+    let mut cluster_labels: std::collections::HashMap<usize, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    for (id, raw) in raw_by_id.iter() {
+        if raw.cluster_override.is_some() || raw.cluster_anchor_id.is_some() {
+            continue;
+        }
+        // Skip items moved by propagation — their stored cluster_name is the
+        // label of the cluster they were pulled INTO, not the cluster they
+        // came FROM. Letting these vote pollutes the noise-bucket label.
+        if raw.cluster_at_write != raw.cluster_raw {
+            continue;
+        }
+        let entry = cluster_labels.entry(raw.cluster_raw).or_insert((None, None));
+        if entry.0.is_none() {
+            entry.0 = raw.cluster_name.clone();
+        }
+        if entry.1.is_none() {
+            entry.1 = raw.cluster_description.clone();
+        }
+        let _ = id;
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for id in order {
+        let raw = &raw_by_id[&id];
+        let effective_cluster = if let Some(anchor_id) = &raw.cluster_anchor_id {
+            raw_by_id
+                .get(anchor_id)
+                .map(|a| a.cluster_raw)
+                .unwrap_or(raw.cluster_raw)
+        } else if let Some(c) = raw.cluster_override {
+            c
+        } else {
+            raw.cluster_raw
+        };
+        let (cluster_name, cluster_description) = cluster_labels
+            .get(&effective_cluster)
+            .cloned()
+            .unwrap_or_else(|| (raw.cluster_name.clone(), raw.cluster_description.clone()));
+
+        let item = &item_lookup[&id];
+        let (title, doc_type, tags) = match item.analysis.as_ref() {
+            Some(a) => (
+                a.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                a.get("doc_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                a.get("tags").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                }),
+            ),
+            None => (None, None, None),
+        };
+        let snippet = {
+            let t = item.text.trim();
+            if t.is_empty() {
+                None
+            } else {
+                let mut s: String = t.chars().take(160).collect();
+                if t.chars().count() > 160 {
+                    s.push('…');
+                }
+                Some(s)
+            }
+        };
+        out.push(crate::projection::MapPoint {
+            id: id.clone(),
+            x: raw.x,
+            y: raw.y,
+            z: raw.z,
+            cluster: effective_cluster,
+            title,
+            snippet,
+            source_id: Some(item.source_id.clone()),
+            path: item.path.clone(),
+            doc_type,
+            tags: tags.filter(|t| !t.is_empty()),
+            cluster_name,
+            cluster_description,
+            distance: None,
+        });
+    }
+
+    Ok(out)
+}
+
 pub fn router(state: AppState) -> Router {
     let protected_routes = Router::new()
         .route("/store", post(store))
@@ -1050,6 +1298,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/edges", get(list_graph_edges))
         .route("/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
+        .route("/api/map", get(get_map))
+        .route("/admin/map/rebuild", post(rebuild_map))
         .route("/admin/categories", get(list_categories))
         .route("/admin/items", get(list_items))
         .route("/admin/tokens/count", post(count_tokens))
@@ -1061,6 +1311,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/items/{id}/rechunk", post(rechunk_item))
         .route("/admin/items/{id}/llm-rechunk", post(llm_rechunk_item))
         .route("/admin/graph/rebuild", post(rebuild_graph))
+        .route("/admin/graph/duplicates", get(list_duplicate_edges))
         .route("/admin/graph/edges", post(create_manual_edge))
         .route("/admin/ontology/run", post(ontology::run_batch))
         .route("/admin/ontology/run/{id}", post(ontology::run_for_item))
@@ -1142,6 +1393,16 @@ pub fn router(state: AppState) -> Router {
             "/api/integrations/google/drive/fetch/{id}",
             get(integrations::google::drive_fetch),
         )
+        .route(
+            "/api/code/repos",
+            get(code::list_repos).post(code::upsert_repo),
+        )
+        .route("/api/code/repos/{name}", delete(code::delete_repo))
+        .route("/api/code/repos/{name}/plan", post(code::plan_ingest))
+        .route("/api/code/repos/{name}/files", post(code::ingest_batch).get(code::list_files))
+        .route("/api/code/repos/{name}/files/{*path}", get(code::get_file_detail))
+        .route("/api/code/repos/{name}/sweep", post(code::sweep))
+        .route("/api/code/search", post(code::search_code))
         .route("/api/push/vapid-public-key", get(push::vapid_public_key))
         .route("/api/push/subscribe", post(push::subscribe))
         .route(
@@ -2864,6 +3125,19 @@ async fn rebuild_graph(
     Ok(Json(GraphRebuildResponse { rebuilt_edges }))
 }
 
+#[tracing::instrument(name = "api.graph.list_duplicates", skip(state))]
+async fn list_duplicate_edges(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DuplicateEdgeGroup>>, ApiError> {
+    let store = state.store.clone();
+    let groups = tokio::task::spawn_blocking(move || store.list_duplicate_edges())
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(map_graph_error)?;
+
+    Ok(Json(groups))
+}
+
 async fn create_manual_edge(
     State(state): State<AppState>,
     Json(request): Json<CreateManualEdgeRequest>,
@@ -3841,6 +4115,7 @@ impl From<SearchHit> for SearchResultPayload {
             section_path: value.section_path,
             retrievers: value.retrievers,
             path: value.path,
+            analysis: value.analysis,
         }
     }
 }
@@ -4429,6 +4704,10 @@ mod tests {
                 .iter()
                 .filter(|edge| edge.edge_type == GraphEdgeType::Similarity)
                 .count())
+        }
+
+        fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>> {
+            Ok(Vec::new())
         }
 
         fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord> {

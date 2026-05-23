@@ -444,7 +444,7 @@ pub struct AcpCommandAck {
     pub sent: String,
     /// Optional context (e.g. echoed `request_id` for permission_response).
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "metadata_schema")]
+    #[schemars(schema_with = "metadata_schema", default)]
     pub context: Option<serde_json::Value>,
 }
 
@@ -1878,6 +1878,731 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map(Json)
             .map_err(|e| e.to_string())
     }
+
+    // ===== Code-repo ingestion ============================================
+
+    #[tool(
+        description = "Register a local source-repo for ingestion into the code-search store. \
+`root_path` must be an absolute path on the server. Include/exclude globs are \
+optional (defaults respect .gitignore + skip target/, node_modules/, etc.). \
+After registration this tool kicks off a full scan synchronously and returns \
+ingest stats."
+    )]
+    async fn code_add_repo(
+        &self,
+        Parameters(params): Parameters<CodeAddRepoParams>,
+    ) -> Result<Json<CodeIngestResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let repo = crate::db::code::CodeRepo {
+            id: format!("cr_{}", uuid::Uuid::now_v7().simple()),
+            name: params.name.clone(),
+            root_path: params.root_path.clone(),
+            include_globs: params.include_globs.clone().unwrap_or_default(),
+            exclude_globs: params.exclude_globs.clone().unwrap_or_default(),
+            enabled: true,
+            default_branch: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        // Preserve id when name already exists.
+        let stored = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?;
+        let repo = match stored {
+            Some(existing) => crate::db::code::CodeRepo {
+                id: existing.id,
+                created_at: existing.created_at,
+                ..repo
+            },
+            None => repo,
+        };
+        store.upsert_repo(&repo).await.map_err(|e| e.to_string())?;
+        let report = crate::code::ingest::ingest_repo(
+            &repo,
+            store.clone(),
+            embedder.clone(),
+            crate::code::ingest::IngestOptions::default(),
+        )
+        .await
+        .map_err(|e| format!("ingest failed: {e:#}"))?;
+        Ok(Json(CodeIngestResponse::from_report(&repo.name, report)))
+    }
+
+    #[tool(
+        description = "Re-walk an already-registered code repo. Skips files whose \
+content_hash matches the DB unless `force` is true. Returns ingest stats."
+    )]
+    async fn code_reindex(
+        &self,
+        Parameters(params): Parameters<CodeReindexParams>,
+    ) -> Result<Json<CodeIngestResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let repo = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {}", params.name))?;
+        let opts = crate::code::ingest::IngestOptions {
+            force: params.force.unwrap_or(false),
+            ..Default::default()
+        };
+        let report = crate::code::ingest::ingest_repo(
+            &repo,
+            store.clone(),
+            embedder.clone(),
+            opts,
+        )
+        .await
+        .map_err(|e| format!("ingest failed: {e:#}"))?;
+        Ok(Json(CodeIngestResponse::from_report(&repo.name, report)))
+    }
+
+    #[tool(description = "List all registered code repos with file/chunk counts.")]
+    async fn code_list_repos(&self) -> Result<Json<CodeRepoListResponse>, String> {
+        let store = self
+            .state
+            .code_store
+            .clone()
+            .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+        let repos = store.list_repos(false).await.map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(repos.len());
+        for r in repos {
+            let files = store.list_file_paths(&r.id).await.map_err(|e| e.to_string())?;
+            out.push(CodeRepoSummary {
+                name: r.name,
+                root_path: r.root_path,
+                enabled: r.enabled,
+                file_count: files.len(),
+            });
+        }
+        Ok(Json(CodeRepoListResponse { repos: out }))
+    }
+
+    #[tool(
+        description = "Remove a registered code repo and all its files+chunks. \
+Does not touch the filesystem."
+    )]
+    async fn code_remove_repo(
+        &self,
+        Parameters(params): Parameters<CodeRemoveRepoParams>,
+    ) -> Result<Json<CodeRemoveResponse>, String> {
+        let store = self
+            .state
+            .code_store
+            .clone()
+            .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+        let repo = store
+            .get_repo_by_name(&params.name)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("repo not found: {}", params.name))?;
+        store.delete_repo(&repo.id).await.map_err(|e| e.to_string())?;
+        Ok(Json(CodeRemoveResponse { deleted: params.name }))
+    }
+
+    #[tool(
+        description = "Semantic code search across registered repos. Embeds `query` with the \
+code embedder and returns top chunks. Optional filters: `repo` (name), `language` \
+(rust|ts|tsx|js|py|...), `path_prefix`. `limit` defaults to 10, max 50."
+    )]
+    async fn code_search(
+        &self,
+        Parameters(params): Parameters<CodeSearchParams>,
+    ) -> Result<Json<CodeSearchResponse>, String> {
+        let (store, embedder) = code_subsystem(&self.state)?;
+        let embedder = embedder.try_ready().map_err(|e| e.to_string())?;
+        let q = params.query.trim();
+        if q.is_empty() {
+            return Err("empty query".into());
+        }
+        let q_owned = q.to_string();
+        let svc = embedder.clone();
+        let embedding = tokio::task::spawn_blocking(move || svc.embed(&q_owned))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let hits = store
+            .search(&crate::db::code::CodeQuery {
+                embedding,
+                repo: params.repo,
+                language: params.language,
+                path_prefix: params.path_prefix,
+                limit: params.limit.unwrap_or(10).min(50),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(CodeSearchResponse {
+            hits: hits
+                .into_iter()
+                .map(|h| {
+                    let snippet = h
+                        .chunk
+                        .content
+                        .lines()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    CodeSearchHit {
+                        repo: h.chunk.repo_name,
+                        path: h.chunk.path,
+                        language: h.chunk.language,
+                        symbol_kind: h.chunk.symbol_kind,
+                        symbol_name: h.chunk.symbol_name,
+                        signature: h.chunk.signature,
+                        start_line: h.chunk.start_line,
+                        end_line: h.chunk.end_line,
+                        snippet,
+                        score: h.score,
+                    }
+                })
+                .collect(),
+        }))
+    }
+
+    // ===== Projection map =================================================
+
+    #[tool(
+        description = "Return the projection map (points + clusters). For large stores, \
+filter to keep the response small. Optional params: \
+`center_id` (sort by 3D distance from this point; populates `distance`), \
+`radius` (only points within this distance of `center_id`), \
+`cluster` (only this cluster id, post-override), \
+`ids` (explicit subset), \
+`limit` (cap result count after sort), \
+`compact` (drop snippet/tags/cluster_description — ~6× smaller), \
+`include_distance` (force distance field even without filtering). \
+Response also includes a `summary` block with per-cluster counts so callers \
+can browse without fetching every point."
+    )]
+    async fn map_get(
+        &self,
+        Parameters(params): Parameters<MapGetParams>,
+    ) -> Result<Json<MapGetResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let total = all.len();
+
+        // Summary built from full set (pre-filter) so callers always see the
+        // whole cluster landscape.
+        let summary = build_map_summary(&all);
+
+        let center = params.center_id.as_ref().and_then(|cid| {
+            all.iter().find(|p| &p.id == cid).map(|p| (p.x, p.y, p.z))
+        });
+        if params.center_id.is_some() && center.is_none() {
+            return Err(format!(
+                "center_id not found in map: {}",
+                params.center_id.unwrap_or_default()
+            ));
+        }
+
+        let ids_filter: Option<std::collections::HashSet<String>> =
+            params.ids.map(|v| v.into_iter().collect());
+
+        let want_distance = center.is_some()
+            && (params.include_distance.unwrap_or(false) || params.radius.is_some() || params.center_id.is_some());
+
+        let mut points: Vec<crate::projection::MapPoint> = all
+            .into_iter()
+            .filter(|p| match (&ids_filter, params.cluster) {
+                (Some(set), _) if !set.contains(&p.id) => false,
+                (_, Some(c)) if p.cluster != c => false,
+                _ => true,
+            })
+            .map(|mut p| {
+                if let Some((cx, cy, cz)) = center {
+                    let dx = p.x - cx;
+                    let dy = p.y - cy;
+                    let dz = p.z - cz;
+                    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if want_distance {
+                        p.distance = Some(d);
+                    }
+                }
+                p
+            })
+            .filter(|p| match (params.radius, p.distance) {
+                (Some(r), Some(d)) => d <= r,
+                (Some(_), None) => false,
+                _ => true,
+            })
+            .collect();
+
+        if center.is_some() {
+            points.sort_by(|a, b| {
+                a.distance
+                    .unwrap_or(f32::INFINITY)
+                    .partial_cmp(&b.distance.unwrap_or(f32::INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        if let Some(lim) = params.limit {
+            points.truncate(lim);
+        }
+
+        if params.compact.unwrap_or(false) {
+            for p in &mut points {
+                p.snippet = None;
+                p.tags = None;
+                p.cluster_description = None;
+            }
+        }
+
+        Ok(Json(MapGetResponse {
+            points,
+            summary: Some(MapSummary {
+                total_points: total,
+                clusters: summary,
+            }),
+        }))
+    }
+
+    #[tool(
+        description = "Lightweight cluster index: returns one row per cluster with \
+`cluster` id, `name`, `description`, and `count`. Use this before `map_get` to \
+pick a target cluster cheaply without loading every point."
+    )]
+    async fn map_clusters(&self) -> Result<Json<MapClustersResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(MapClustersResponse {
+            clusters: build_map_summary(&all),
+        }))
+    }
+
+    #[tool(
+        description = "Find the k nearest points (3D PCA distance) to `center_id`. \
+Optional `exclude_cluster` skips points already in that cluster (useful when \
+hunting misclassified neighbours). `k` defaults to 20. The center point itself \
+is always excluded."
+    )]
+    async fn map_nearest(
+        &self,
+        Parameters(params): Parameters<MapNearestParams>,
+    ) -> Result<Json<MapGetResponse>, String> {
+        let all = crate::api::build_map_points(self.state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let total = all.len();
+        let center = all
+            .iter()
+            .find(|p| p.id == params.center_id)
+            .map(|p| (p.x, p.y, p.z))
+            .ok_or_else(|| format!("center_id not found in map: {}", params.center_id))?;
+        let k = params.k.unwrap_or(20);
+
+        let mut points: Vec<crate::projection::MapPoint> = all
+            .into_iter()
+            .filter(|p| p.id != params.center_id)
+            .filter(|p| match params.exclude_cluster {
+                Some(c) => p.cluster != c,
+                None => true,
+            })
+            .map(|mut p| {
+                let dx = p.x - center.0;
+                let dy = p.y - center.1;
+                let dz = p.z - center.2;
+                p.distance = Some((dx * dx + dy * dy + dz * dz).sqrt());
+                p
+            })
+            .collect();
+        points.sort_by(|a, b| {
+            a.distance
+                .unwrap_or(f32::INFINITY)
+                .partial_cmp(&b.distance.unwrap_or(f32::INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        points.truncate(k);
+
+        if params.compact.unwrap_or(true) {
+            for p in &mut points {
+                p.snippet = None;
+                p.tags = None;
+                p.cluster_description = None;
+            }
+        }
+
+        Ok(Json(MapGetResponse {
+            points,
+            summary: Some(MapSummary {
+                total_points: total,
+                clusters: vec![],
+            }),
+        }))
+    }
+
+    #[tool(
+        description = "Move an item to a different cluster. Two ways: \
+(a) `anchor_id` — pin to the cluster of another item; survives rebuilds even \
+when numeric cluster ids shuffle (RECOMMENDED). \
+(b) `cluster` — numeric id; legacy, breaks if the algorithm renumbers \
+clusters. Pass `clear: true` to drop the override and revert to the \
+algorithm-assigned cluster on next rebuild. The change is reflected \
+immediately in `map_get`."
+    )]
+    async fn map_reassign(
+        &self,
+        Parameters(params): Parameters<MapReassignParams>,
+    ) -> Result<Json<MapReassignResponse>, String> {
+        let state = self.state.clone();
+        let id = params.id.clone();
+        let store = state.store.clone();
+        let id_for_fetch = id.clone();
+        let item = tokio::task::spawn_blocking(move || store.get_item(&id_for_fetch))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("item not found: {id}"))?;
+
+        let mut metadata = item.metadata.clone();
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        let obj = metadata.as_object_mut().expect("metadata is object");
+        let mut proj = obj
+            .get("projection")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let clear = params.clear.unwrap_or(false);
+
+        let mut resolved_cluster: Option<usize> = None;
+        let mut resolved_anchor: Option<String> = None;
+
+        if clear {
+            proj.remove("cluster_override");
+            proj.remove("cluster_anchor_id");
+        } else if let Some(anchor_id) = params.anchor_id.as_ref() {
+            // Resolve anchor's current raw cluster so `cluster` shows the
+            // right bucket immediately. The anchor itself is what survives
+            // rebuilds though.
+            let store = state.store.clone();
+            let anchor_lookup = anchor_id.clone();
+            let anchor_item = tokio::task::spawn_blocking(move || store.get_item(&anchor_lookup))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("anchor_id not found: {anchor_id}"))?;
+            let anchor_raw = anchor_item
+                .metadata
+                .get("projection")
+                .and_then(|p| {
+                    p.get("cluster_raw")
+                        .or_else(|| p.get("cluster"))
+                        .and_then(|v| v.as_u64())
+                })
+                .ok_or_else(|| format!("anchor_id has no projection cluster yet: {anchor_id}"))?
+                as usize;
+            proj.insert("cluster_anchor_id".into(), serde_json::json!(anchor_id));
+            proj.remove("cluster_override");
+            proj.insert("cluster".into(), serde_json::json!(anchor_raw));
+            resolved_anchor = Some(anchor_id.clone());
+            resolved_cluster = Some(anchor_raw);
+        } else if let Some(cluster) = params.cluster {
+            proj.insert("cluster_override".into(), serde_json::json!(cluster));
+            proj.remove("cluster_anchor_id");
+            proj.insert("cluster".into(), serde_json::json!(cluster));
+            resolved_cluster = Some(cluster);
+        } else {
+            return Err("provide anchor_id, cluster, or clear=true".into());
+        }
+
+        obj.insert("projection".into(), serde_json::Value::Object(proj));
+
+        let store = state.store.clone();
+        let id_for_write = id.clone();
+        let meta_for_write = metadata.clone();
+        tokio::task::spawn_blocking(move || {
+            store.update_item_metadata(&id_for_write, meta_for_write)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+        Ok(Json(MapReassignResponse {
+            id,
+            cluster: resolved_cluster,
+            anchor_id: resolved_anchor,
+            cleared: clear,
+        }))
+    }
+
+    #[tool(
+        description = "Kick off a background rebuild of the projection map (KMeans + PCA \
+on item embeddings, then LLM cluster labelling). Set `RAG_PROJECTION_ALGO=hdbscan` \
+on the server to use HDBSCAN instead. Returns immediately; a second call while a \
+rebuild is running is a no-op."
+    )]
+    async fn map_rebuild(&self) -> Result<Json<MapRebuildResponse>, String> {
+        if self.state.projection_worker.is_processing().await {
+            return Ok(Json(MapRebuildResponse {
+                status: "already_running".into(),
+            }));
+        }
+        self.state
+            .projection_worker
+            .run_rebuild(self.state.http_client.clone(), self.state.analysis.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(MapRebuildResponse {
+            status: "started".into(),
+        }))
+    }
+}
+
+fn code_subsystem(
+    state: &AppState,
+) -> Result<(Arc<crate::db::code_store::CodeStore>, Arc<crate::api::EmbedderHandle>), String> {
+    let store = state
+        .code_store
+        .clone()
+        .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
+    let embedder = state
+        .code_embedder
+        .clone()
+        .ok_or_else(|| {
+            "code embedder not configured (set RAG_CODE_EMBEDDER_PATH and RAG_CODE_TOKENIZER_PATH)"
+                .to_string()
+        })?;
+    Ok((store, embedder))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeAddRepoParams {
+    /// Short unique name (used as filter in `code_search`).
+    pub name: String,
+    /// Absolute filesystem path on the server.
+    pub root_path: String,
+    /// Optional include globs (relative to root). Matches against `globset` syntax.
+    #[serde(default)]
+    pub include_globs: Option<Vec<String>>,
+    /// Optional exclude globs (relative to root). Default excludes (target/,
+    /// node_modules/, lockfiles, .min.js, etc.) always apply on top.
+    #[serde(default)]
+    pub exclude_globs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeReindexParams {
+    pub name: String,
+    /// Re-embed even when content_hash matches.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeRemoveRepoParams {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeIngestResponse {
+    pub repo: String,
+    pub files_scanned: usize,
+    pub files_changed: usize,
+    pub files_deleted: usize,
+    pub chunks_inserted: usize,
+    pub skipped_binary: usize,
+    pub skipped_too_large: usize,
+    pub errors: Vec<String>,
+}
+
+impl CodeIngestResponse {
+    fn from_report(repo: &str, r: crate::code::ingest::IngestReport) -> Self {
+        Self {
+            repo: repo.to_string(),
+            files_scanned: r.files_scanned,
+            files_changed: r.files_changed,
+            files_deleted: r.files_deleted,
+            chunks_inserted: r.chunks_inserted,
+            skipped_binary: r.skipped_binary,
+            skipped_too_large: r.skipped_too_large,
+            errors: r.errors,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRepoSummary {
+    pub name: String,
+    pub root_path: String,
+    pub enabled: bool,
+    pub file_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRepoListResponse {
+    pub repos: Vec<CodeRepoSummary>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeRemoveResponse {
+    pub deleted: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CodeSearchParams {
+    /// Natural-language or code query.
+    pub query: String,
+    /// Restrict to a single repo (matches `code_list_repos` name).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Restrict to one language (e.g. `rust`, `ts`, `tsx`, `py`).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Restrict to paths starting with this prefix.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// 1-50, default 10.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeSearchHit {
+    pub repo: String,
+    pub path: String,
+    pub language: Option<String>,
+    pub symbol_kind: Option<String>,
+    pub symbol_name: Option<String>,
+    pub signature: Option<String>,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub snippet: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapRebuildResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CodeSearchResponse {
+    pub hits: Vec<CodeSearchHit>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapGetResponse {
+    pub points: Vec<crate::projection::MapPoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<MapSummary>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapSummary {
+    pub total_points: usize,
+    pub clusters: Vec<MapClusterRow>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapClusterRow {
+    pub cluster: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapClustersResponse {
+    pub clusters: Vec<MapClusterRow>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapGetParams {
+    /// Anchor point. Result is sorted by 3D distance from it.
+    #[serde(default)]
+    pub center_id: Option<String>,
+    /// Only return points within this 3D distance of `center_id`.
+    #[serde(default)]
+    pub radius: Option<f32>,
+    /// Only return points in this cluster (post-override).
+    #[serde(default)]
+    pub cluster: Option<usize>,
+    /// Explicit subset of item ids.
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    /// Cap result count after sorting.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Drop snippet/tags/cluster_description to shrink payload (~6× smaller).
+    #[serde(default)]
+    pub compact: Option<bool>,
+    /// Populate `distance` even when not filtering by radius (requires `center_id`).
+    #[serde(default)]
+    pub include_distance: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapNearestParams {
+    /// Anchor point.
+    pub center_id: String,
+    /// Number of neighbours to return. Default 20.
+    #[serde(default)]
+    pub k: Option<usize>,
+    /// Skip points already in this cluster. Handy for hunting misclassified
+    /// items near a cluster the anchor belongs to.
+    #[serde(default)]
+    pub exclude_cluster: Option<usize>,
+    /// Drop snippet/tags/cluster_description (default true for this tool).
+    #[serde(default)]
+    pub compact: Option<bool>,
+}
+
+fn build_map_summary(points: &[crate::projection::MapPoint]) -> Vec<MapClusterRow> {
+    use std::collections::BTreeMap;
+    let mut by: BTreeMap<usize, MapClusterRow> = BTreeMap::new();
+    for p in points {
+        let row = by.entry(p.cluster).or_insert_with(|| MapClusterRow {
+            cluster: p.cluster,
+            name: None,
+            description: None,
+            count: 0,
+        });
+        row.count += 1;
+        if row.name.is_none() {
+            row.name = p.cluster_name.clone();
+        }
+        if row.description.is_none() {
+            row.description = p.cluster_description.clone();
+        }
+    }
+    by.into_values().collect()
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MapReassignParams {
+    /// Item id to move.
+    pub id: String,
+    /// RECOMMENDED. Id of an item already in the target cluster. The reassignment
+    /// pins to that item so it survives even when numeric cluster ids shuffle
+    /// on the next rebuild.
+    #[serde(default)]
+    pub anchor_id: Option<String>,
+    /// Legacy numeric cluster id. Will break across rebuilds if HDBSCAN
+    /// renumbers — prefer `anchor_id`.
+    #[serde(default)]
+    pub cluster: Option<usize>,
+    /// Remove any override (numeric or anchor) and revert to the
+    /// algorithm-assigned cluster on next rebuild.
+    #[serde(default)]
+    pub clear: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MapReassignResponse {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_id: Option<String>,
+    pub cleared: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -2217,6 +2942,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 section_path: Vec::new(),
                 retrievers: Vec::new(),
                 path: None,
+                analysis: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -2394,4 +3120,25 @@ pub fn streamable_http_service(
         Arc::new(LocalSessionManager::default()),
         config,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AcpCommandAck;
+    use schemars::schema_for;
+
+    #[test]
+    fn acp_command_ack_context_is_not_required() {
+        let schema = serde_json::to_value(schema_for!(AcpCommandAck)).expect("serialize schema");
+        let required = schema
+            .pointer("/required")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            !required.iter().any(|value| value.as_str() == Some("context")),
+            "context should stay optional in the generated schema: {schema}"
+        );
+    }
 }

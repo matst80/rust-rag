@@ -131,7 +131,7 @@ K8S_CUDA_DEPLOYMENT ?= rust-rag-cuda
 K8S_FRONTEND_DEPLOYMENT ?= rust-rag-frontend
 
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files mcp-inspector-local mcp-inspector-hosted
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files mcp-inspector-local mcp-inspector-hosted android-deploy android-build
 
 help:
 	@printf '%s\n' \
@@ -196,7 +196,9 @@ help:
 		'  make smoke            Run sample store + search requests with curl' \
 		'  make http-files       List the .http request files' \
 		'  make mcp-inspector-local  Test local MCP server using npx @modelcontextprotocol/inspector' \
-		'  make mcp-inspector-hosted Test hosted MCP server using npx @modelcontextprotocol/inspector'
+		'  make mcp-inspector-hosted Test hosted MCP server using npx @modelcontextprotocol/inspector' \
+		'  make android-deploy       Compile and deploy the Android app to the connected device' \
+		'  make android-build        Compile and build the debug APK for the Android app'
 
 fetch-assets:
 	mkdir -p "$(MODEL_DIR)" "$(CURDIR)/data" "$(RAG_UPLOAD_PATH)"
@@ -598,11 +600,23 @@ docker-run-cuda:
 		-e ZITADEL_SCOPES="$(ZITADEL_SCOPES)" \
 		"$(CUDA_IMAGE_NAME)"
 
+## Frontend image: amd64-only (k8s Deployment pins amd64 nodes). On an
+## amd64 host: plain `docker build`/`push` — no buildx, no QEMU, fast
+## local layer cache. On non-amd64: buildx with QEMU for amd64 target.
 frontend-docker-build:
-	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+else
+	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+endif
 
 frontend-docker-push:
-	docker buildx build --platform linux/amd64,linux/arm64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
+ifeq ($(HOST_ARCH),x86_64)
+	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+	docker push "$(FRONTEND_IMAGE_NAME)"
+else
+	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
+endif
 
 frontend-docker-run:
 	docker run --rm \
@@ -805,3 +819,9 @@ mcp-inspector-local:
 
 mcp-inspector-hosted:
 	npx -y @modelcontextprotocol/inspector --transport http --server-url "https://rag.k6n.net/mcp" $(if $(RAG_MCP_AUTH_BEARER),--header "Authorization: Bearer $(RAG_MCP_AUTH_BEARER)",)
+
+android-deploy:
+	cd android && ./gradlew installDebug
+
+android-build:
+	cd android && ./gradlew assembleDebug

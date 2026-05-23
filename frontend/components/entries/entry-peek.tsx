@@ -52,18 +52,28 @@ export function EntryPeek({ entry, className }: EntryPeekProps) {
         </div>
       )}
 
-      {Object.keys(entry.metadata).length > 0 && (
-        <div className="p-4 border-t border-border bg-muted/20">
-           <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-3">
-             {Object.entries(entry.metadata).map(([key, value]) => (
-               <div key={key} className="flex flex-col gap-0.5 min-w-0">
-                 <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">{key}</span>
-                 <span className="font-mono text-[10px] text-foreground/70 truncate" title={String(value)}>{String(value)}</span>
-               </div>
-             ))}
-           </div>
-        </div>
-      )}
+      {(() => {
+        const visibleMetadata = Object.entries(entry.metadata).filter(
+          ([key, value]) =>
+            key !== "source_type" &&
+            key !== "source_file" &&
+            key !== "projection" &&
+            typeof value !== "object"
+        );
+        if (visibleMetadata.length === 0) return null;
+        return (
+          <div className="p-4 border-t border-border bg-muted/20">
+             <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-3">
+               {visibleMetadata.map(([key, value]) => (
+                 <div key={key} className="flex flex-col gap-0.5 min-w-0">
+                   <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">{key}</span>
+                   <span className="font-mono text-[10px] text-foreground/70 truncate" title={String(value)}>{String(value)}</span>
+                 </div>
+               ))}
+             </div>
+          </div>
+        );
+      })()}
     </div>
   )
 }

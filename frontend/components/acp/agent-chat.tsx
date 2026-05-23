@@ -1,11 +1,14 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import { Bot, Circle, Link2, Loader2, Plus, Send, Square, User2, X } from "lucide-react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import Link from "next/link"
+import { Bot, Circle, Hash, Link2, Loader2, Menu, Plus, Send, Square, User2, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { MessageMarkdown } from "@/components/messages/message-markdown"
+import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 const EMPTY_USERS: Set<string> = new Set()
+const EMPTY_ARRAY: any[] = []
 
 type AcpEnvelope = Record<string, unknown>
 
@@ -97,6 +100,26 @@ export function AgentChat() {
 	const [eventsBySession, setEventsBySession] = useState<Record<string, AcpEvent[]>>({})
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
+	const [sidebarOpen, setSidebarOpen] = useState<boolean>(true)
+	const [isDesktop, setIsDesktop] = useState<boolean>(false)
+
+	useEffect(() => {
+		if (typeof window === "undefined") return
+		const mql = window.matchMedia("(min-width: 768px)")
+		const sync = () => {
+			setIsDesktop(mql.matches)
+			setSidebarOpen(mql.matches)
+		}
+		sync()
+		mql.addEventListener("change", sync)
+		return () => mql.removeEventListener("change", sync)
+	}, [])
+
+	useEffect(() => {
+		if (!isDesktop && activeSessionId) {
+			setSidebarOpen(false)
+		}
+	}, [activeSessionId, isDesktop])
 	// Per-session draft buffer. Each session keeps its in-progress prompt in
 	// localStorage under `acp:draft:<session_id>` so switching tabs/sessions
 	// before pressing Send doesn't lose the text.
@@ -502,18 +525,24 @@ export function AgentChat() {
 	)
 
 	const sessionList = useMemo(() => Object.values(sessions), [sessions])
-	const activeEvents = useMemo(
-		() => (activeSessionId ? eventsBySession[activeSessionId] ?? [] : []),
-		[activeSessionId, eventsBySession],
-	)
-	const blocks = useMemo(() => buildBlocks(activeEvents), [activeEvents])
-	const pendingForActive = useMemo(
-		() =>
-			activeSessionId
-				? Object.values(pendingPermissions).filter((p) => sessionIdOf(p.payload) === activeSessionId)
-				: [],
-		[activeSessionId, pendingPermissions],
-	)
+	const activeEvents = useMemo(() => {
+		if (!activeSessionId) return EMPTY_ARRAY
+		return eventsBySession[activeSessionId] ?? EMPTY_ARRAY
+	}, [activeSessionId, eventsBySession[activeSessionId || ""]])
+
+	const prevBlocksRef = useRef<Block[]>([])
+	const blocks = useMemo(() => {
+		const next = buildBlocks(activeEvents, prevBlocksRef.current)
+		prevBlocksRef.current = next
+		return next
+	}, [activeEvents])
+	const pendingForActive = useMemo(() => {
+		if (!activeSessionId) return EMPTY_ARRAY
+		const filtered = Object.values(pendingPermissions).filter(
+			(p) => sessionIdOf(p.payload) === activeSessionId,
+		)
+		return filtered.length === 0 ? EMPTY_ARRAY : filtered
+	}, [activeSessionId, pendingPermissions])
 
 	const activeSession = useMemo(() => {
 		return sessions[activeSessionId ?? ""]
@@ -684,9 +713,23 @@ export function AgentChat() {
 					"text-muted-foreground"
 
 	return (
-		<div className="relative flex h-[calc(100dvh-49px)]">
+		<div className="relative flex h-[calc(100dvh-49px)] overflow-hidden">
+			{/* Mobile Overlay */}
+			{sidebarOpen && !isDesktop && (
+				<div
+					className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm md:hidden"
+					onClick={() => setSidebarOpen(false)}
+				/>
+			)}
+
 			{/* Sidebar */}
-			<aside className="z-40 flex w-72 flex-col border-r border-border bg-background md:bg-muted/20">
+			<aside
+				className={cn(
+					"z-40 flex w-72 flex-col border-r border-border bg-background transition-transform duration-300 ease-in-out md:bg-muted/20",
+					"absolute inset-y-0 left-0 md:relative md:translate-x-0",
+					sidebarOpen ? "translate-x-0" : "-translate-x-full md:hidden"
+				)}
+			>
 				<div className="flex items-center justify-between px-4 py-3 border-b border-border">
 					<span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground">
 						Sessions
@@ -702,6 +745,22 @@ export function AgentChat() {
 						>
 							<Plus className="size-4" />
 						</button>
+						<Link
+							href="/messages"
+							className="text-muted-foreground hover:text-foreground"
+							aria-label="Swarm messages"
+							title="Go to Swarm"
+						>
+							<Hash className="size-4" />
+						</Link>
+						<button
+							type="button"
+							onClick={() => setSidebarOpen(false)}
+							className="text-muted-foreground hover:text-foreground md:hidden"
+							aria-label="Close sidebar"
+						>
+							<X className="size-4" />
+						</button>
 					</div>
 				</div>
 				{instances.length > 1 && (
@@ -716,7 +775,7 @@ export function AgentChat() {
 										key={inst.name}
 										onClick={() => void selectInstance(inst.name)}
 										className={cn(
-											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-all",
+											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-colors",
 											isSelected
 												? "bg-primary text-primary-foreground shadow-sm"
 												: "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -795,12 +854,35 @@ export function AgentChat() {
 			{/* Thread */}
 			<section className="flex min-w-0 flex-1 flex-col">
 				{!activeSessionId ? (
-					<div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-						Select or spawn a session
+					<div className="flex-1 flex flex-col">
+						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
+							<button
+								type="button"
+								onClick={() => setSidebarOpen(!sidebarOpen)}
+								className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+								aria-label="Toggle sidebar"
+								title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+							>
+								<Menu className={cn("size-4 transition-transform", !sidebarOpen && "rotate-90")} />
+							</button>
+							<span className="text-sm font-medium text-muted-foreground">ACP Agent Sessions</span>
+						</header>
+						<div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+							Select or spawn a session
+						</div>
 					</div>
 				) : (
 					<>
 						<header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
+							<button
+								type="button"
+								onClick={() => setSidebarOpen(!sidebarOpen)}
+								className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+								aria-label="Toggle sidebar"
+								title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+							>
+								<Menu className={cn("size-4 transition-transform", !sidebarOpen && "rotate-90")} />
+							</button>
 							<Bot className="size-4 shrink-0 text-muted-foreground" />
 							<div className="flex min-w-0 flex-1 flex-col cursor-pointer group/title" onClick={renameSession} title="Click to rename session">
 								<div className="flex items-center gap-1.5 min-w-0">
@@ -899,7 +981,7 @@ export function AgentChat() {
 										key={cmd.name}
 										type="button"
 										onClick={() => executeCommand(cmd.name)}
-										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-all hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
+										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
 										title={cmd.description}
 									>
 										<Plus className="size-3 opacity-50" />
@@ -910,7 +992,7 @@ export function AgentChat() {
 						)}
 
 						<form
-							className="border-t border-border p-4"
+							className="border-t border-border p-2 md:p-4"
 							onSubmit={(e) => {
 								e.preventDefault()
 								sendPrompt()
@@ -931,23 +1013,30 @@ export function AgentChat() {
 									rows={1}
 									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
 								/>
-								<button
-									type="submit"
-									disabled={!draft.trim() || conn.status !== "open"}
-									className={cn(
-										"flex size-9 items-center justify-center rounded-md transition-colors",
-										draft.trim() && conn.status === "open"
-											? "bg-primary text-primary-foreground hover:bg-primary/90"
-											: "bg-muted text-muted-foreground",
-									)}
-									aria-label="Send"
-								>
-									{conn.status !== "open" ? (
-										<Loader2 className="size-4 animate-spin" />
-									) : (
-										<Send className="size-4" />
-									)}
-								</button>
+								<div className="flex items-center gap-1.5 mb-0.5">
+									<WhisperTranscribe
+										onTranscription={(transcription) => {
+											setDraft(draft ? `${draft} ${transcription}` : transcription)
+										}}
+									/>
+									<button
+										type="submit"
+										disabled={!draft.trim() || conn.status !== "open"}
+										className={cn(
+											"flex size-9 items-center justify-center rounded-md transition-colors",
+											draft.trim() && conn.status === "open"
+												? "bg-primary text-primary-foreground hover:bg-primary/90"
+												: "bg-muted text-muted-foreground",
+										)}
+										aria-label="Send"
+									>
+										{conn.status !== "open" ? (
+											<Loader2 className="size-4 animate-spin" />
+										) : (
+											<Send className="size-4" />
+										)}
+									</button>
+								</div>
 							</div>
 						</form>
 					</>
@@ -1173,7 +1262,7 @@ function extractText(content: unknown): string {
 	return ""
 }
 
-function buildBlocks(events: AcpEvent[]): Block[] {
+function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 	const blocks: Block[] = []
 	const toolIndex: Record<string, number> = {}
 	let assistantBuf: { idx: number } | null = null
@@ -1344,6 +1433,32 @@ function buildBlocks(events: AcpEvent[]): Block[] {
 		thoughtBuf = null
 	}
 
+	// Reference stability for previous blocks that haven't changed.
+	for (let i = 0; i < Math.min(blocks.length, prevBlocks.length); i++) {
+		const nb = blocks[i]
+		const ob = prevBlocks[i]
+		if (nb.key === ob.key && nb.kind === ob.kind) {
+			let identical = false
+			if (nb.kind === "user" && ob.kind === "user") identical = nb.text === ob.text
+			else if (nb.kind === "assistant" && ob.kind === "assistant") identical = nb.text === ob.text
+			else if (nb.kind === "thought" && ob.kind === "thought") identical = nb.text === ob.text
+			else if (nb.kind === "status" && ob.kind === "status") identical = nb.status === ob.status
+			else if (nb.kind === "tool" && ob.kind === "tool") {
+				identical = nb.status === ob.status && nb.content === ob.content && nb.title === ob.title
+			} else if (nb.kind === "plan" && ob.kind === "plan") {
+				// simple deep check for plan entries
+				identical = JSON.stringify(nb.entries) === JSON.stringify(ob.entries)
+			} else if (nb.kind === "error" && ob.kind === "error") identical = nb.text === ob.text
+			else if (nb.kind === "raw" && ob.kind === "raw") {
+				identical = nb.eventKind === ob.eventKind && JSON.stringify(nb.payload) === JSON.stringify(ob.payload)
+			}
+
+			if (identical) {
+				blocks[i] = ob
+			}
+		}
+	}
+
 	return blocks
 }
 
@@ -1351,7 +1466,7 @@ function timeOf(ts: number): string {
 	return new Date(ts).toLocaleTimeString()
 }
 
-function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
+const BlockView = memo(function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
 	if (block.kind === "user") {
 		return (
 			<div className="mb-3 flex gap-3">
@@ -1503,4 +1618,4 @@ function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: strin
 			<pre className="whitespace-pre-wrap break-words mt-1 text-[10px]">{JSON.stringify(block.payload, null, 2)}</pre>
 		</details>
 	)
-}
+})

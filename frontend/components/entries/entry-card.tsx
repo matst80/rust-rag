@@ -1,16 +1,10 @@
 "use client"
 
 import Link from "next/link"
-import { MoreVertical, Share2, ChevronRight, Database, Clock, History, Layers, ChevronsRight, Maximize2, Sparkles, ChevronDown, ChevronUp, Eye } from "lucide-react"
-import { useState } from "react"
+import { ChevronRight, Database, Clock, History, Layers, ChevronsRight, Maximize2, Sparkles, ChevronDown, ChevronUp, Eye } from "lucide-react"
+import { memo, useState } from "react"
 import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils"
 import { ComboButton } from "@/components/ui/combo-button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import type { Entry, SearchResult } from "@/lib/api"
 import { MarkdownView } from "./markdown-view"
 import { Badge } from "@/components/ui/badge"
@@ -43,7 +37,21 @@ function retrieverLabel(retrievers: string[]): { label: string; tone: string } {
   return { label: "—", tone: "oklch(0.42 0 0)" }
 }
 
-export function EntryCard({ entry, index = 0, onDelete, showScore = false }: EntryCardProps) {
+function stripMarkdown(text: string): string {
+  if (!text) return ""
+  const snippet = text.slice(0, 300)
+  return snippet
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/#+\s+/g, "")
+    .replace(/[*_`~]/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^[*-]\s+/gm, "")
+    .replace(/^\d+\.\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function EntryCardInner({ entry, index = 0, onDelete, showScore = false }: EntryCardProps) {
   const isSearchResult = "score" in entry
   const search = isSearchResult ? (entry as SearchResult) : null
   const score = search?.score ?? null
@@ -62,7 +70,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
   return (
     <div
       className={cn(
-        "group/card relative flex flex-col transition-all duration-300",
+        "group/card relative flex flex-col transition-colors duration-300",
         "animate-in fade-in slide-in-from-bottom-2",
         isExpanded && "bg-card shadow-[0_8px_40px_rgb(0,0,0,0.15)] ring-1 ring-primary/20 z-10 my-4"
       )}
@@ -70,8 +78,10 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
     >
       <div
         className={cn(
-          "relative flex items-start gap-4 md:gap-6 p-4 md:p-5 overflow-hidden transition-all duration-300",
-          "bg-card hover:bg-card/60 border-b border-border last:border-b-0",
+          "relative flex items-start gap-4 md:gap-6 overflow-hidden transition-all duration-300",
+          isExpanded
+            ? "p-4 md:p-5 bg-transparent"
+            : "py-3.5 px-0 bg-transparent border-b border-border/50",
           !isExpanded && "group-hover/card:translate-x-0.5"
         )}
       >
@@ -79,7 +89,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
         {showScore && scorePercent !== null && (
           <div
             className={cn(
-              "absolute left-0 top-0 w-0.5 transition-all duration-500",
+              "absolute left-0 top-0 w-0.5 transition-[width] duration-500",
               !isExpanded && "group-hover/card:w-1"
             )}
             style={{
@@ -175,7 +185,7 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
                   variant="ghost"
                   size="icon"
                   className={cn(
-                    "size-7 rounded-full transition-all",
+                    "size-7 rounded-full transition-colors",
                     isExpanded ? "bg-primary/10 text-primary" : "text-muted-foreground/30 hover:text-primary hover:bg-primary/5"
                   )}
                   onClick={() => setIsExpanded(!isExpanded)}
@@ -185,26 +195,12 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
                 </Button>
 
                 {!showScore && onDelete && (
-                  <div className="flex items-center">
-                    <ComboButton onConfirm={() => onDelete(entry.id)} className="size-7" />
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button className="size-7 flex items-center justify-center text-muted-foreground/40 hover:text-foreground transition-colors">
-                          <MoreVertical className="size-3.5" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="min-w-36 font-mono">
-                        <DropdownMenuItem className="text-xs cursor-pointer">
-                          <Share2 className="mr-2 size-3.5" /> Share
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
+                  <ComboButton onConfirm={() => onDelete(entry.id)} className="size-7" />
                 )}
                 
-                <Link href={`/entries/${encodeURIComponent(entry.id)}`}>
+                <Link href={`/entries/${encodeURIComponent(entry.id)}`} className="hidden sm:block">
                   <div className="p-1.5 rounded-full bg-primary/0 hover:bg-primary/5 transition-colors">
-                    <ChevronRight className="size-3.5 text-muted-foreground/30 hover:text-primary transition-all hover:translate-x-0.5" />
+                    <ChevronRight className="size-3.5 text-muted-foreground/30 hover:text-primary transition-colors hover:translate-x-0.5" />
                   </div>
                 </Link>
               </div>
@@ -225,22 +221,30 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
 
           {/* Text preview - only show when not expanded */}
           {!isExpanded && (
-            <Link href={`/entries/${encodeURIComponent(entry.id)}`} className="block relative group/text">
+            <Link
+              href={`/entries/${encodeURIComponent(entry.id)}`}
+              className="block relative group/text"
+            >
               <p className="text-sm text-foreground/80 group-hover/card:text-foreground transition-colors leading-relaxed line-clamp-2">
-                {entry.text}
+                {analysis?.summary || stripMarkdown(entry.text)}
               </p>
               <div className="absolute inset-0 bg-gradient-to-t from-card/40 to-transparent opacity-0 group-hover/text:opacity-100 transition-opacity" />
             </Link>
           )}
 
           {/* Metadata tags - also hide when expanded since EntryPeek shows them better */}
-          {Object.keys(entry.metadata).length > 0 && !isExpanded && (
-            <div className="flex gap-2 flex-wrap opacity-60 group-hover/card:opacity-100 transition-opacity duration-300">
-              {Object.entries(entry.metadata)
-                .slice(0, 5)
-                .map(([key, value]) => {
-                   if (key === "source_type" || key === "source_file") return null;
-                   
+          {!isExpanded && (() => {
+            const visibleMetadata = Object.entries(entry.metadata).filter(
+              ([key, value]) =>
+                key !== "source_type" &&
+                key !== "source_file" &&
+                key !== "projection" &&
+                typeof value !== "object"
+            );
+            if (visibleMetadata.length === 0) return null;
+            return (
+              <div className="flex gap-2 flex-wrap opacity-60 group-hover/card:opacity-100 transition-opacity duration-300">
+                {visibleMetadata.slice(0, 5).map(([key, value]) => {
                    // Special handling for tags field
                    if (key === "tags" && typeof value === "string") {
                      const tagList = value.split(",").map(t => t.trim()).filter(Boolean);
@@ -259,8 +263,9 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
                     </div>
                   );
                 })}
-            </div>
-          )}
+              </div>
+            );
+          })()}
         </div>
 
       </div>
@@ -281,3 +286,5 @@ export function EntryCard({ entry, index = 0, onDelete, showScore = false }: Ent
     </div>
   )
 }
+
+export const EntryCard = memo(EntryCardInner)

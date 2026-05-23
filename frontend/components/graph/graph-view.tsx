@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils"
 import { computeCommunities, getNodeTitle } from "./clusters"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { EdgeReviewList } from "./edge-review-list"
+import { DuplicateEdgeList } from "./duplicate-edge-list"
 import { RelationItem } from "./relation-item"
 
 function ExpandableMarkdown({ content }: { content: string }) {
@@ -486,7 +487,7 @@ function GraphViewContent() {
           onCanvasClick={onCanvasClick}
         />
 
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center pt-8">
+        <div className="pointer-events-none absolute left-72 right-0 top-0 flex justify-center pt-8">
           <div className="pointer-events-auto w-full max-w-2xl">
             <div className="rounded-full bg-background/60 backdrop-blur-3xl border border-primary/5 shadow-2xl p-1.5 flex items-center gap-2 animate-in fade-in slide-in-from-top-4 duration-1000">
               <Popover open={open} onOpenChange={setOpen}>
@@ -636,12 +637,15 @@ function GraphViewContent() {
       <aside className="w-120 border-l bg-card/10 backdrop-blur-md p-0 overflow-hidden flex flex-col">
         <Tabs defaultValue="insights" className="flex-1 flex flex-col h-full">
           <div className="px-6 pt-6 pb-2 border-b border-primary/5">
-            <TabsList className="grid w-full grid-cols-2 bg-muted/20 p-1 rounded-xl">
+            <TabsList className="grid w-full grid-cols-3 bg-muted/20 p-1 rounded-xl">
               <TabsTrigger value="insights" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2">
                 Insights
               </TabsTrigger>
               <TabsTrigger value="review" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2 relative">
                 Review
+              </TabsTrigger>
+              <TabsTrigger value="duplicates" className="rounded-lg text-[10px] font-bold uppercase tracking-widest py-2 relative">
+                Duplicates
               </TabsTrigger>
             </TabsList>
           </div>
@@ -947,11 +951,11 @@ function GraphViewContent() {
                           key={label}
                           className="group flex items-center justify-between p-3 rounded-xl bg-muted/5 border border-transparent hover:border-primary/10 hover:bg-muted/10 transition-all cursor-default"
                         >
-                          <div className="flex items-center gap-3">
-                            <div className="size-2 rounded-full shadow-[0_0_8px_currentcolor]" style={{ backgroundColor: color, color }} />
-                            <span className="text-[11px] font-bold text-foreground/70">{label}</span>
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="size-2 rounded-full shrink-0 shadow-[0_0_8px_currentcolor]" style={{ backgroundColor: color, color }} />
+                            <span className="text-[11px] font-bold text-foreground/70 truncate">{label}</span>
                           </div>
-                          <Badge variant="outline" className="text-[9px] opacity-30 group-hover:opacity-100 transition-opacity">
+                          <Badge variant="outline" className="text-[9px] opacity-30 group-hover:opacity-100 transition-opacity shrink-0">
                             {graphEntries.filter(e => clusters.byNode.get(e.id) === label).length}
                           </Badge>
                         </div>
@@ -981,6 +985,18 @@ function GraphViewContent() {
                 onReviewComplete={mutateNeighborhood}
                 onFocusNode={handleCenterNodeChange}
                 onFocusEdge={handleFocusEdge}
+              />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="duplicates" className="flex-1 overflow-hidden p-6 m-0 flex flex-col">
+            <div className="flex flex-col gap-6 h-full">
+              <div className="flex items-center gap-2">
+                <div className="size-1.5 rounded-full bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]" />
+                <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-foreground/80">Duplicate Resolution</h4>
+              </div>
+              <DuplicateEdgeList
+                onFocusNode={handleCenterNodeChange}
               />
             </div>
           </TabsContent>

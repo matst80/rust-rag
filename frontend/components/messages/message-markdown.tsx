@@ -1,6 +1,6 @@
 "use client"
 
-import { Children, type ReactNode } from "react"
+import { Children, memo, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { cn } from "@/lib/utils"
@@ -68,7 +68,7 @@ function withMentions(knownUsers: Set<string>, selfUser?: string) {
   }
 }
 
-export function MessageMarkdown({
+function MessageMarkdownInner({
   text,
   knownUsers,
   selfUser,
@@ -125,4 +125,6 @@ export function MessageMarkdown({
     </div>
   )
 }
+
+export const MessageMarkdown = memo(MessageMarkdownInner)
 

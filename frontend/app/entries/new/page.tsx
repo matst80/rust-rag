@@ -1,17 +1,24 @@
 import { AppHeader } from "@/components/app-header"
-import { EntryForm } from "@/components/entries/entry-form"
+import { NewEntryClient } from "@/components/entries/new-entry-client"
 
 export const metadata = {
   title: "New Entry | RAG Memory & Knowledge",
   description: "Create a new knowledge base entry",
 }
 
-export default function NewEntryPage() {
+interface PageProps {
+  searchParams: Promise<{ tab?: string }>
+}
+
+export default async function NewEntryPage({ searchParams }: PageProps) {
+  const resolvedSearchParams = await searchParams
+  const defaultTab = resolvedSearchParams.tab || "manual"
+
   return (
     <>
       <AppHeader />
       <main>
-        <EntryForm mode="create" />
+        <NewEntryClient defaultTab={defaultTab} />
       </main>
     </>
   )

@@ -110,6 +110,7 @@ pub struct InstanceStatus {
     pub session_count: usize,
     pub pending_permissions: usize,
     pub buffered_events: usize,
+    pub live_sessions: Vec<Value>,
 }
 
 /// Per-instance ACP WS worker. Cloning is cheap; clones share inner state.
@@ -168,6 +169,7 @@ impl AcpWsHandle {
     pub async fn status(&self) -> InstanceStatus {
         let g = self.inner.lock().await;
         let buffered_events: usize = g.buffers.values().map(|b| b.events.len()).sum();
+        let live_sessions = g.live_sessions.values().cloned().collect();
         InstanceStatus {
             instance_id: self.instance_id.clone(),
             url: self.url.clone(),
@@ -176,6 +178,7 @@ impl AcpWsHandle {
             session_count: g.live_sessions.len(),
             pending_permissions: g.pending_permissions.len(),
             buffered_events,
+            live_sessions,
         }
     }
 

@@ -238,6 +238,12 @@ async fn run_iteration(
         "content": cfg.system_prompt,
     })];
 
+    let instances = if let Some(reg) = state.acp_ws.as_ref() {
+        reg.statuses().await
+    } else {
+        Vec::new()
+    };
+
     let trigger_payload = json!({
         "trigger": trigger.as_str(),
         "channel": target_channel,
@@ -247,6 +253,7 @@ async fn run_iteration(
         "memory_recall": memory.iter().map(item_to_memory_json).collect::<Vec<_>>(),
         "manager_channel": cfg.channel,
         "mention": cfg.mention,
+        "acp_instances": instances,
     });
 
     chat_messages.push(json!({
@@ -902,22 +909,37 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
-                "name": "acp_list_sessions",
-                "description": "Ask telegram-acp to send a fresh ListSessions response over WS. Inspect the result via acp_recent_events with kind=ListSessions.",
+                "name": "acp_list_instances",
+                "description": "List all discovered ACP daemon instances (mDNS + HTTP-registered) and active WebSocket workers. Use this to find the `instance` ID for other acp_* tools.",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
             }
         }),
         json!({
             "type": "function",
             "function": {
+                "name": "acp_list_sessions",
+                "description": "Ask the target ACP daemon to send a fresh ListSessions response over WS. Inspect the result via acp_recent_events with kind=ListSessions. Pass `instance` to disambiguate when multiple are registered.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "acp_spawn",
-                "description": "Spawn a new headless ACP session via WS. Returns immediately; new session id arrives as a SessionStarted event.",
+                "description": "Spawn a new headless ACP session via WS on the target daemon. Returns immediately; new session id arrives as a SessionStarted event.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "project_path": {"type": "string"},
                         "agent_command": {"type": "string"},
-                        "metadata": {"type": "object"}
+                        "metadata": {"type": "object"},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["project_path"],
                     "additionalProperties": false
@@ -928,13 +950,14 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_send_prompt",
-                "description": "Send a prompt to an existing ACP session over WS.",
+                "description": "Send a prompt to an existing ACP session over WS on the target daemon.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
                         "text": {"type": "string"},
-                        "attachments": {"type": "array", "items": {"type": "string"}}
+                        "attachments": {"type": "array", "items": {"type": "string"}},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["session_id", "text"],
                     "additionalProperties": false
@@ -945,10 +968,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_cancel",
-                "description": "Cancel the currently running prompt on an ACP session.",
+                "description": "Cancel the currently running prompt on an ACP session on the target daemon.",
                 "parameters": {
                     "type": "object",
-                    "properties": {"session_id": {"type": "string"}},
+                    "properties": {
+                        "session_id": {"type": "string"},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
+                    },
                     "required": ["session_id"],
                     "additionalProperties": false
                 }
@@ -958,12 +984,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_end_session",
-                "description": "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback.",
+                "description": "Gracefully terminate an ACP session on the target daemon. Provide session_id (preferred) or thread_id fallback.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
-                        "thread_id": {"type": "integer"}
+                        "thread_id": {"type": "integer"},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "additionalProperties": false
                 }
@@ -973,12 +1000,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_set_permission_mode",
-                "description": "Switch a session between auto and manual tool-call approval.",
+                "description": "Switch a session between auto and manual tool-call approval on the target daemon.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["auto", "manual"]}
+                        "mode": {"type": "string", "enum": ["auto", "manual"]},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["session_id", "mode"],
                     "additionalProperties": false
@@ -989,13 +1017,14 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_set_config",
-                "description": "Set a per-session config option on an ACP agent.",
+                "description": "Set a per-session config option on an ACP agent on the target daemon.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
                         "key": {"type": "string"},
-                        "value": {"type": "string", "description": "JSON-encoded value. Server parses."}
+                        "value": {"type": "string", "description": "JSON-encoded value. Server parses."},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["session_id", "key", "value"],
                     "additionalProperties": false
@@ -1006,12 +1035,13 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_permission_respond",
-                "description": "Reply to an outstanding PermissionRequest. decision ∈ allow_once|allow_always|deny|deny_always.",
+                "description": "Reply to an outstanding PermissionRequest on the target daemon. decision ∈ allow_once|allow_always|deny|deny_always.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "request_id": {"type": "string"},
-                        "decision": {"type": "string", "enum": ["allow_once", "allow_always", "deny", "deny_always"]}
+                        "decision": {"type": "string", "enum": ["allow_once", "allow_always", "deny", "deny_always"]},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["request_id", "decision"],
                     "additionalProperties": false
@@ -1022,14 +1052,15 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_recent_events",
-                "description": "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Manager process buffers up to ~200 events per session.",
+                "description": "Read recent ACP WS events from the in-process ring buffer for the target daemon. Filter by session_id, since_local_seq, or kinds. Manager process buffers up to ~200 events per session.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
                         "since_local_seq": {"type": "integer"},
                         "kinds": {"type": "array", "items": {"type": "string"}},
-                        "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500}
+                        "limit": {"type": "integer", "default": 50, "minimum": 1, "maximum": 500},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "additionalProperties": false
                 }
@@ -1039,21 +1070,28 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_pending_permissions",
-                "description": "List outstanding PermissionRequest events awaiting a decision.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+                "description": "List outstanding PermissionRequest events awaiting a decision on the target daemon.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
+                    },
+                    "additionalProperties": false
+                }
             }
         }),
         json!({
             "type": "function",
             "function": {
                 "name": "acp_bind_telegram_thread",
-                "description": "Bind an ACP session to a Telegram forum topic. Pass thread_id as a positive integer to bind to an existing topic (name ignored), or thread_id=null to let the daemon create a new topic — in that case `name` is REQUIRED (1-128 chars, no control chars) and used verbatim as the topic label. Daemon emits a `telegram_thread_bound` ack with the resolved thread_id; observe via `acp_recent_events { kinds: [\"telegram_thread_bound\"] }`.",
+                "description": "Bind an ACP session to a Telegram forum topic on the target daemon. Pass thread_id as a positive integer to bind to an existing topic (name ignored), or thread_id=null to let the daemon create a new topic — in that case `name` is REQUIRED (1-128 chars, no control chars) and used verbatim as the topic label. Daemon emits a `telegram_thread_bound` ack with the resolved thread_id; observe via `acp_recent_events { kinds: [\"telegram_thread_bound\"] }`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string"},
                         "thread_id": {"type": ["integer", "null"]},
-                        "name": {"type": "string", "description": "Forum topic label. Required when thread_id is null."}
+                        "name": {"type": "string", "description": "Forum topic label. Required when thread_id is null."},
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
                     },
                     "required": ["session_id"],
                     "additionalProperties": false
@@ -1064,8 +1102,14 @@ fn tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "acp_get_snapshot",
-                "description": "Return the most recent Snapshot event the WS client has seen (or null if none yet).",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+                "description": "Return the most recent Snapshot event the WS client has seen (or null if none yet) from the target daemon.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "instance": {"type": "string", "description": "Target instance ID. Omit when only one is registered."}
+                    },
+                    "additionalProperties": false
+                }
             }
         }),
     ]
@@ -1091,6 +1135,7 @@ async fn execute_tool(
         "list_tasks" => tool_list_tasks(state, cfg, &function.arguments).await,
         "update_task" => tool_update_task(state, &function.arguments).await,
         "promote_memory" => tool_promote_memory(state, &function.arguments).await,
+        "acp_list_instances" => tool_acp_list_instances(state).await,
         "acp_list_sessions" => tool_acp_simple(state, "list_sessions", json!({})).await,
         "acp_spawn" => tool_acp_passthrough(state, "spawn_session", &function.arguments).await,
         "acp_send_prompt" => tool_acp_passthrough(state, "send_prompt", &function.arguments).await,
@@ -1147,6 +1192,23 @@ fn parse_instance(args: &str) -> Option<String> {
     v.get("instance")
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+async fn tool_acp_list_instances(state: &AppState) -> Result<String> {
+    let instances = if let Some(disc) = state.acp_discovery.as_ref() {
+        disc.list().await
+    } else {
+        Vec::new()
+    };
+    let workers = if let Some(reg) = state.acp_ws.as_ref() {
+        reg.statuses().await
+    } else {
+        Vec::new()
+    };
+    Ok(serde_json::to_string(&json!({
+        "instances": instances,
+        "workers": workers,
+    }))?)
 }
 
 async fn tool_acp_simple(state: &AppState, variant: &str, payload: Value) -> Result<String> {

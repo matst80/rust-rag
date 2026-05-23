@@ -23,6 +23,7 @@ import { useLocalChat } from "@/hooks/use-local-chat"
 import { useHostedChat, type ExtendedMessage } from "@/hooks/use-hosted-chat"
 
 import { ToolResultView } from "@/components/chat/tool-result-view"
+import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 function detectWebGpu(): boolean {
   if (typeof navigator === "undefined") return false
@@ -294,18 +295,25 @@ export function ChatInterface() {
               disabled={isStreaming}
               className="flex-1 bg-transparent border-none outline-none py-3.5 font-mono text-sm text-foreground placeholder:text-muted-foreground/60"
             />
-            <button
-              type="submit"
-              disabled={!input.trim() || isStreaming}
-              className={cn(
-                "mx-3 flex items-center gap-1.5 px-3 py-1.5 font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all shrink-0",
-                input.trim() && !isStreaming
-                  ? "bg-primary text-primary-foreground shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.3)] hover:shadow-[0_0_20px_oklch(0.9_0.148_196.3/0.4)]"
-                  : "border border-border text-muted-foreground/40 cursor-not-allowed"
-              )}
-            >
-              {isStreaming ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
-            </button>
+            <div className="flex items-center gap-1.5 px-3">
+              <WhisperTranscribe
+                onTranscription={(transcription) => {
+                  setInput((prev) => (prev ? `${prev} ${transcription}` : transcription))
+                }}
+              />
+              <button
+                type="submit"
+                disabled={!input.trim() || isStreaming}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 font-mono text-[10px] font-black uppercase tracking-[1.5px] transition-all shrink-0",
+                  input.trim() && !isStreaming
+                    ? "bg-primary text-primary-foreground shadow-[0_0_14px_oklch(0.9_0.148_196.3/0.3)] hover:shadow-[0_0_20px_oklch(0.9_0.148_196.3/0.4)]"
+                    : "border border-border text-muted-foreground/40 cursor-not-allowed"
+                )}
+              >
+                {isStreaming ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center justify-between mt-2">

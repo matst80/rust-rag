@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">rust-rag</string>
+    <string name="share_to_rag">Share to RAG</string>
+    <string name="app_function_description">Exposes Rust RAG memory storage and search capabilities to query and save knowledge.</string>
+    <string name="app_function_display_description">Rust RAG Memory</string>
+</resources>

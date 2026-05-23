@@ -1,4 +1,6 @@
 mod auth;
+pub mod code;
+pub mod code_store;
 mod graph;
 mod oauth_creds;
 pub mod postgres;
@@ -254,7 +256,7 @@ impl GraphEdgeType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphEdgeRecord {
     pub id: String,
     pub from_item_id: String,
@@ -856,6 +858,13 @@ pub struct DocChunk {
     pub sparse: Option<Vec<(u32, f32)>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DuplicateEdgeGroup {
+    pub from_item_id: String,
+    pub to_item_id: String,
+    pub edges: Vec<GraphEdgeRecord>,
+}
+
 pub trait VectorStore: Send + Sync {
     fn upsert_item(&self, item: ItemRecord, embedding: &[f32]) -> Result<()>;
 
@@ -899,6 +908,12 @@ pub trait VectorStore: Send + Sync {
     fn list_categories(&self) -> Result<Vec<CategorySummary>>;
     fn list_items(&self, request: ListItemsRequest) -> Result<(Vec<ItemRecord>, i64)>;
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>>;
+    fn get_item_chunks(&self, _id: &str) -> Result<Vec<DocChunk>> {
+        Ok(Vec::new())
+    }
+    fn update_item_metadata(&self, _id: &str, _metadata: Value) -> Result<()> {
+        anyhow::bail!("update_item_metadata not supported by this store")
+    }
     fn delete_item(&self, id: &str) -> Result<bool>;
 
     /// Insert an attachment row. Caller persists the file to disk first.
@@ -957,6 +972,7 @@ pub trait VectorStore: Send + Sync {
         status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>>;
     fn rebuild_similarity_graph(&self) -> Result<usize>;
+    fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
     fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
@@ -1897,6 +1913,17 @@ impl VectorStore for SqliteVectorStore {
         let rebuilt = rebuild_similarity_graph_locked(connection, self.graph_config)?;
         self.graph_dirty.store(false, Ordering::Release);
         Ok(rebuilt)
+    }
+
+    fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>> {
+        self.ensure_graph_enabled()?;
+        self.ensure_graph_fresh()?;
+
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        graph::list_duplicate_edges_internal(connection)
     }
 
     fn add_manual_edge(&self, mut input: ManualEdgeInput) -> Result<GraphEdgeRecord> {

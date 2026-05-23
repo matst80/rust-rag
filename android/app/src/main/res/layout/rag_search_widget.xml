@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_container"
+    android:layout_width="match_parent"
+    android:layout_height="56dp"
+    android:orientation="horizontal"
+    android:background="@drawable/widget_background"
+    android:gravity="center_vertical"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingLeft="16dp"
+    android:paddingRight="16dp">
+
+    <ImageView
+        android:id="@+id/widget_brain_icon"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:src="@drawable/ic_widget_brain"
+        android:contentDescription="Brain Icon"
+        android:layout_marginRight="12dp"
+        android:layout_marginEnd="12dp" />
+
+    <TextView
+        android:id="@+id/widget_search_text"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:text="Search Second Brain..."
+        android:textColor="#A6A6A6"
+        android:textSize="15sp"
+        android:gravity="start|center_vertical" />
+
+    <FrameLayout
+        android:layout_width="1dp"
+        android:layout_height="24dp"
+        android:background="#333333"
+        android:layout_marginLeft="8dp"
+        android:layout_marginRight="12dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="12dp" />
+
+    <ImageView
+        android:id="@+id/btn_widget_add"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:padding="6dp"
+        android:src="@drawable/ic_widget_add"
+        android:contentDescription="Quick Capture"
+        android:clickable="true"
+        android:focusable="true" />
+
+</LinearLayout>

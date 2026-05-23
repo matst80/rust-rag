@@ -20,10 +20,13 @@ import type {
   Entry,
   StoreAnalysis,
   StoreAnalysisSuggestedEdge,
+  Edge,
+  StoreAnalysisVerdict,
 } from "@/lib/api/types"
 
 interface AnalysisPanelProps {
   entry: Entry
+  edges?: Edge[]
 }
 
 const RELATION_CONFIG: Record<string, { color: string, icon: any, label: string }> = {
@@ -35,7 +38,7 @@ const RELATION_CONFIG: Record<string, { color: string, icon: any, label: string 
   unrelated: { color: "text-muted-foreground border-border bg-muted/5", icon: Ghost, label: "Unrelated" },
 }
 
-export function AnalysisPanel({ entry }: AnalysisPanelProps) {
+export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
   const { mutate } = useSWRConfig()
   const { trigger: reanalyze, isMutating: reanalyzing } = useReanalyzeItem(entry.id)
   const { trigger: updateItem } = useUpdateItem(entry.id)
@@ -108,7 +111,7 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
         weight: edge.weight,
         directed: true,
       })
-      mutate(["edges-for-item", entry.id])
+      mutate(["edges", entry.id])
       setDismissedEdges((s) => new Set(s).add(edge.target_id))
       toast.success(`Edge to ${edge.target_id.slice(0, 16)}… created`)
     } catch (e) {
@@ -147,11 +150,118 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
   const a = analysis ?? ({} as StoreAnalysis)
   const at = entry.analysis_at ? new Date(entry.analysis_at).toLocaleString() : "—"
 
-  const sortedVerdicts = [...(a.verdicts || [])].sort((a, b) => {
-    if (a.relation === "unrelated" && b.relation !== "unrelated") return 1
-    if (a.relation !== "unrelated" && b.relation === "unrelated") return -1
-    return 0
-  })
+  const mergedRelated = (() => {
+    const map = new Map<string, {
+      id: string
+      title?: string | null
+      thumbnail?: string | null
+      sourceType?: string | null
+      neighborRelation?: string | null
+      isNeighbor: boolean
+      verdict?: StoreAnalysisVerdict
+      suggestedEdge?: StoreAnalysisSuggestedEdge
+    }>()
+
+    // 1. Populate from neighbors
+    if (entry.neighbors) {
+      for (const n of entry.neighbors) {
+        map.set(n.id, {
+          id: n.id,
+          title: n.title,
+          thumbnail: n.thumbnail,
+          sourceType: n.source_type,
+          neighborRelation: n.relationship,
+          isNeighbor: true,
+        })
+      }
+    }
+
+    // 2. Populate from verdicts
+    if (a.verdicts) {
+      for (const v of a.verdicts) {
+        const existing = map.get(v.target_id)
+        if (existing) {
+          existing.verdict = v
+        } else {
+          map.set(v.target_id, {
+            id: v.target_id,
+            isNeighbor: false,
+            verdict: v,
+          })
+        }
+      }
+    }
+
+    // 3. Populate from suggested edges
+    if (a.suggested_edges) {
+      for (const se of a.suggested_edges) {
+        const existing = map.get(se.target_id)
+        if (existing) {
+          existing.suggestedEdge = se
+        } else {
+          map.set(se.target_id, {
+            id: se.target_id,
+            isNeighbor: false,
+            suggestedEdge: se,
+          })
+        }
+      }
+    }
+
+    // Convert to array
+    const items = Array.from(map.values())
+
+    // Filter out dismissed suggested edges ONLY if they don't have any other relationship/verdict
+    const activeItems = items.map(item => {
+      if (dismissedEdges.has(item.id)) {
+        return {
+          ...item,
+          suggestedEdge: undefined,
+        }
+      }
+      return item
+    }).filter(item => {
+      const hasInfo = item.isNeighbor || item.verdict || item.suggestedEdge
+      return hasInfo
+    })
+
+    // Sort:
+    // - Unrelated items last (verdict.relation === "unrelated")
+    // - Non-unrelated items first
+    // - Within each group, sort by max score (verdict confidence, suggested edge weight, or neighbor similarity 0.5)
+    return activeItems.sort((x, y) => {
+      const isXUnrelated = x.verdict?.relation === "unrelated"
+      const isYUnrelated = y.verdict?.relation === "unrelated"
+
+      if (isXUnrelated && !isYUnrelated) return 1
+      if (!isXUnrelated && isYUnrelated) return -1
+
+      const valX = Math.max(
+        x.verdict?.confidence ?? 0,
+        x.suggestedEdge?.weight ?? 0,
+        x.isNeighbor ? 0.5 : 0
+      )
+      const valY = Math.max(
+        y.verdict?.confidence ?? 0,
+        y.suggestedEdge?.weight ?? 0,
+        y.isNeighbor ? 0.5 : 0
+      )
+      if (valX !== valY) return valY - valX
+
+      return x.id.localeCompare(y.id)
+    })
+  })()
+
+  const getRelationConfig = (item: typeof mergedRelated[0]) => {
+    const rel = item.verdict?.relation || item.suggestedEdge?.rel || item.neighborRelation
+    if (!rel) return RELATION_CONFIG.unrelated
+    const r = rel.toLowerCase()
+    return RELATION_CONFIG[r] || {
+      color: "text-primary border-primary/20 bg-primary/5",
+      icon: GitBranch,
+      label: rel,
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -318,124 +428,130 @@ export function AnalysisPanel({ entry }: AnalysisPanelProps) {
         </div>
       </div>
 
-      {/* Verdicts */}
-      {sortedVerdicts.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Activity className="size-3.5 text-primary" />
-            <FieldLabel>Contextual Verdicts</FieldLabel>
-          </div>
-          <div className="grid grid-cols-1 gap-3">
-            {sortedVerdicts.map((v, idx) => {
-              const config = RELATION_CONFIG[v.relation] || RELATION_CONFIG.unrelated
-              const Icon = config.icon
-              const isUnrelated = v.relation === "unrelated"
-
-              return (
-                <div
-                  key={`${v.target_id}-${idx}`}
-                  className={cn(
-                    "relative group flex flex-col gap-3 border p-4 transition-all hover:shadow-lg dark:hover:shadow-primary/5",
-                    config.color,
-                    isUnrelated && "opacity-60 hover:opacity-100 grayscale-[0.5] hover:grayscale-0"
-                  )}
-                >
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-2">
-                      <div className="p-1.5 rounded-lg bg-background/50 border border-current/20">
-                        <Icon className="size-3.5" />
-                      </div>
-                      <span className="font-mono text-[10px] font-black uppercase tracking-[2px]">
-                        {config.label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="w-20 h-1 bg-current/10 rounded-full overflow-hidden hidden sm:block">
-                        <div
-                          className="h-full bg-current transition-all duration-1000"
-                          style={{ width: `${v.confidence * 100}%` }}
-                        />
-                      </div>
-                      <span className="font-mono text-[9px] tabular-nums opacity-60">
-                        {(v.confidence * 100).toFixed(0)}% CONF
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 pl-9">
-                    <Link
-                      href={`/entries/${encodeURIComponent(v.target_id)}`}
-                      className="font-mono text-xs font-bold text-foreground/90 hover:text-primary transition-colors block truncate"
-                    >
-                      {v.target_id}
-                    </Link>
-                    <p className="text-xs leading-relaxed text-muted-foreground/80 italic">
-                      {v.reason}
-                    </p>
-                  </div>
-
-                  {/* Hover glow decoration */}
-                  {!isUnrelated && (
-                    <div className="absolute inset-0 bg-current/0 group-hover:bg-current/[0.02] rounded-xl pointer-events-none transition-colors" />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Suggested edges */}
-      {a.suggested_edges && a.suggested_edges.length > 0 && (
+      {/* Related & Similar Entries */}
+      {mergedRelated.length > 0 && (
         <div className="space-y-4">
           <div className="flex items-center gap-2">
             <GitBranch className="size-3.5 text-primary" />
-            <FieldLabel>Suggested Edges</FieldLabel>
+            <FieldLabel>Related & Similar Entries</FieldLabel>
           </div>
-          <div className="grid grid-cols-1 gap-2">
-            {a.suggested_edges
-              .filter((e) => !dismissedEdges.has(e.target_id))
-              .map((edge, idx) => (
+          <div className="grid grid-cols-1 gap-3">
+            {mergedRelated.map((item) => {
+              const isUnrelated = item.verdict?.relation === "unrelated"
+              const config = getRelationConfig(item)
+              const Icon = config.icon
+
+              const existingEdge = edges?.find(
+                (edge) =>
+                  (edge.source_id === entry.id && edge.target_id === item.id) ||
+                  (edge.target_id === entry.id && edge.source_id === item.id)
+              )
+              const isConnected = !!existingEdge
+
+              return (
                 <div
-                  key={`${edge.target_id}-${idx}`}
-                  className="flex items-center gap-4 rounded-lg border border-border bg-card/50 dark:bg-black/20 p-3 hover:border-primary/30 transition-all group"
+                  key={item.id}
+                  className={cn(
+                    "relative group flex flex-col md:flex-row gap-4 justify-between items-start md:items-center border p-4 transition-all duration-300 rounded-xl bg-card/40 hover:bg-card/75 dark:hover:bg-black/60 shadow-sm",
+                    config.color,
+                    isUnrelated && "opacity-60 hover:opacity-100 grayscale-[0.5] hover:grayscale-0 bg-muted/5 border-border text-muted-foreground"
+                  )}
                 >
-                  <div className="flex flex-col gap-1 min-w-[80px]">
-                    <span className="font-mono text-[9px] font-black uppercase tracking-widest text-primary/70">
-                      {edge.rel}
-                    </span>
-                    <span className="font-mono text-[9px] text-muted-foreground/60">
-                      w={edge.weight.toFixed(2)}
-                    </span>
+                  <div className="flex gap-3 flex-1 min-w-0">
+                    {item.thumbnail && (
+                      <div className="size-12 border border-border/40 overflow-hidden bg-muted/50 rounded-lg shrink-0">
+                        <img
+                          src={item.thumbnail}
+                          alt=""
+                          className="size-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500"
+                        />
+                      </div>
+                    )}
+                    <div className="space-y-1 min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Link
+                          href={`/entries/${encodeURIComponent(item.id)}`}
+                          className="font-mono text-xs font-bold text-foreground hover:text-primary transition-colors truncate block max-w-[200px] sm:max-w-[300px]"
+                          title={item.id}
+                        >
+                          {item.title || item.id}
+                        </Link>
+                        {item.title && (
+                          <span className="font-mono text-[9px] text-muted-foreground/60 truncate max-w-[120px]">
+                            ({item.id.slice(0, 12)}...)
+                          </span>
+                        )}
+                        {item.isNeighbor && !item.neighborRelation && (
+                          <Badge variant="outline" className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-muted-foreground/20 text-muted-foreground/80 leading-none">
+                            Similar
+                          </Badge>
+                        )}
+                        {isConnected && (
+                          <Badge variant="outline" className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-emerald-500/30 text-emerald-500 bg-emerald-500/5 leading-none">
+                            Connected: {existingEdge.relationship}
+                          </Badge>
+                        )}
+                      </div>
+                      {item.verdict?.reason && (
+                        <p className="text-xs leading-relaxed text-muted-foreground/80 italic pr-4">
+                          {item.verdict.reason}
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <Link
-                    href={`/entries/${encodeURIComponent(edge.target_id)}`}
-                    className="font-mono text-xs hover:text-primary truncate flex-1 min-w-0"
-                  >
-                    {edge.target_id}
-                  </Link>
-                  <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => handleApplyEdge(edge)}
-                      className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest border-primary/20 text-primary hover:bg-primary/10"
-                    >
-                      Apply
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        setDismissedEdges((s) => new Set(s).add(edge.target_id))
-                      }
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500"
-                    >
-                      <X className="size-3.5" />
-                    </Button>
+
+                  <div className="flex items-center gap-4 shrink-0 w-full md:w-auto justify-between md:justify-end border-t md:border-t-0 pt-3 md:pt-0 border-border/10">
+                    <div className="flex flex-col gap-1 items-start md:items-end">
+                      <div className="flex items-center gap-1.5">
+                        <Icon className="size-3.5" />
+                        <span className="font-mono text-[9px] font-black uppercase tracking-wider">
+                          {config.label}
+                        </span>
+                      </div>
+                      {item.verdict && (
+                        <div className="flex items-center gap-2">
+                          <div className="w-16 h-1 bg-current/10 rounded-full overflow-hidden hidden sm:block">
+                            <div
+                              className="h-full bg-current transition-all duration-1000"
+                              style={{ width: `${item.verdict.confidence * 100}%` }}
+                            />
+                          </div>
+                          <span className="font-mono text-[9px] tabular-nums opacity-60">
+                            {(item.verdict.confidence * 100).toFixed(0)}% conf
+                          </span>
+                        </div>
+                      )}
+                      {item.suggestedEdge && !item.verdict && (
+                        <span className="font-mono text-[9px] text-muted-foreground/60">
+                          w={item.suggestedEdge.weight.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+
+                    {item.suggestedEdge && !isConnected && (
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleApplyEdge(item.suggestedEdge!)}
+                          className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest border-current/20 text-foreground hover:bg-current/10 hover:text-foreground transition-all duration-200"
+                        >
+                          Apply
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDismissedEdges((s) => new Set(s).add(item.id))}
+                          className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500 transition-all duration-200"
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </div>
-              ))}
+              )
+            })}
           </div>
         </div>
       )}

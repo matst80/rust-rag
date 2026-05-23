@@ -2,6 +2,7 @@ pub mod acp_discovery;
 pub mod acp_ws;
 pub mod api;
 pub mod chunking_md;
+pub mod code;
 pub mod config;
 pub mod crypto;
 pub mod db;
@@ -11,6 +12,7 @@ pub mod manager;
 pub mod mcp;
 pub mod notify;
 pub mod ontology;
+pub mod projection;
 pub mod reranker;
 pub mod validation;
 

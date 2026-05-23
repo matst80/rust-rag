@@ -11,6 +11,7 @@ import type {
   CreateEdgeRequest,
   GraphNeighborhood,
   GraphStatus,
+  DuplicateEdgeGroup,
   ListItemsRequest,
   RechunkRequest,
   LlmRechunkRequest,
@@ -170,6 +171,17 @@ export function useGraphStatus() {
   })
 }
 
+export function useMap() {
+  return useSWR<MapPoint[]>("api-map", api.map.get, {
+    revalidateOnFocus: false,
+    revalidateIfStale: false,
+  })
+}
+
+export function useRebuildMap() {
+  return useSWRMutation("/admin/map/rebuild", api.map.rebuild)
+}
+
 export function useEdges() {
   return useSWR<Edge[]>("edges", api.edges.list)
 }
@@ -179,6 +191,10 @@ export function useEdgesForItem(itemId: string | null) {
     itemId ? ["edges", itemId] : null,
     ([, edgeItemId]) => api.edges.listForItem(edgeItemId as string)
   )
+}
+
+export function useDuplicateEdges() {
+  return useSWR<DuplicateEdgeGroup[]>("duplicate-edges", api.edges.listDuplicates)
 }
 
 export function useGraphNeighborhood(
@@ -204,6 +220,13 @@ export function useCreateEdge() {
   return useSWRMutation<Edge, Error, string, CreateEdgeRequest>(
     "edges",
     (_, { arg }) => api.edges.create(arg)
+  )
+}
+
+export function useUpdateEdge(id: string) {
+  return useSWRMutation<Edge, Error, string, UpdateEdgeRequest>(
+    ["edge", id],
+    (_, { arg }) => api.edges.update(id, arg)
   )
 }
 

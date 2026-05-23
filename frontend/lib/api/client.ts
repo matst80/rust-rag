@@ -45,6 +45,11 @@ import type {
   DeleteSchemaResponse,
   IngestUrlRequest,
   UpdateEdgeRequest,
+  CodeRepoSummary,
+  CodeFileMeta,
+  CodeFileDetail,
+  CodeSearchHit,
+  CodeSearchRequest,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -658,6 +663,15 @@ export async function getEdgesForItem(itemId: string): Promise<Edge[]> {
   return ensureArray(response.edges, "graph edges").map(toEdge)
 }
 
+export async function getDuplicateEdges(): Promise<DuplicateEdgeGroup[]> {
+  const response = await request<any[]>("/admin/graph/duplicates")
+  return ensureArray(response, "duplicate edges").map(group => ({
+    from_item_id: group.from_item_id,
+    to_item_id: group.to_item_id,
+    edges: ensureArray(group.edges, "duplicate edges list").map(toEdge),
+  }))
+}
+
 export async function getGraphNeighborhood(
   itemId: string,
   depth: number,
@@ -837,10 +851,24 @@ export async function clearManagerMemory(
   return { deleted_count }
 }
 
+export async function getMap(): Promise<MapPoint[]> {
+  return await request<MapPoint[]>("/api/map")
+}
+
+export async function rebuildMap(): Promise<{ status: string }> {
+  return await request<{ status: string }>("/admin/map/rebuild", {
+    method: "POST",
+  })
+}
+
 // Export API client as object
 export const api = {
   categories: {
     list: getCategories,
+  },
+  map: {
+    get: getMap,
+    rebuild: rebuildMap,
   },
   chat: {
     stream: streamChatCompletions,
@@ -889,6 +917,7 @@ export const api = {
   edges: {
     list: getEdges,
     listForItem: getEdgesForItem,
+    listDuplicates: getDuplicateEdges,
     neighborhood: getGraphNeighborhood,
     create: createEdge,
     update: updateEdge,
@@ -951,4 +980,43 @@ export async function deleteSchema(
     `/api/schemas/${encodeURIComponent(typeName)}${qs}`,
     { method: "DELETE" }
   )
+}
+
+// Code-repo ingestion
+export async function listCodeRepos(): Promise<CodeRepoSummary[]> {
+  return request<CodeRepoSummary[]>("/api/code/repos")
+}
+
+export async function deleteCodeRepo(name: string): Promise<void> {
+  await request<{ deleted: string }>(
+    `/api/code/repos/${encodeURIComponent(name)}`,
+    { method: "DELETE" }
+  )
+}
+
+export async function listCodeFiles(name: string): Promise<CodeFileMeta[]> {
+  return request<CodeFileMeta[]>(
+    `/api/code/repos/${encodeURIComponent(name)}/files`
+  )
+}
+
+export async function getCodeFileDetail(
+  name: string,
+  path: string
+): Promise<CodeFileDetail> {
+  return request<CodeFileDetail>(
+    `/api/code/repos/${encodeURIComponent(name)}/files/${path
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`
+  )
+}
+
+export async function searchCode(
+  req: CodeSearchRequest
+): Promise<CodeSearchHit[]> {
+  return request<CodeSearchHit[]>("/api/code/search", {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
 }

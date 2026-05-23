@@ -180,6 +180,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0014_push_subscriptions",
         include_str!("../../migrations/0014_push_subscriptions.sql"),
     ),
+    (
+        "0015_code_ingestion",
+        include_str!("../../migrations/0015_code_ingestion.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -240,6 +244,13 @@ impl PostgresVectorStore {
             runtime,
             graph_config,
         }
+    }
+
+    /// Borrow the connection pool. Used by `CodeStore` so that the
+    /// code-ingestion subsystem can share the same pgvector-enabled pool
+    /// without standing up a second one.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Bridge sync trait method → async tokio-postgres call. Safe to invoke
@@ -1153,6 +1164,48 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn get_item_chunks(&self, id: &str) -> Result<Vec<DocChunk>> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            let rows = client
+                .query(
+                    "SELECT position, content, dense_embedding, section_path \
+                     FROM chunks WHERE document_id = $1 ORDER BY position",
+                    &[&id],
+                )
+                .await?;
+            rows.into_iter()
+                .map(|row| {
+                    let embedding: pgvector::Vector = row.try_get(2)?;
+                    Ok(DocChunk {
+                        position: row.try_get(0)?,
+                        content: row.try_get(1)?,
+                        embedding: embedding.to_vec(),
+                        section_path: row.try_get::<_, Option<Vec<String>>>(3)?.unwrap_or_default(),
+                        sparse: None,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn update_item_metadata(&self, id: &str, metadata: serde_json::Value) -> Result<()> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            client
+                .execute(
+                    "UPDATE documents SET metadata = $1, updated_at = now() WHERE id = $2",
+                    &[&metadata, &id],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
     // ── Graph methods. Edges live at the document level; per-document
     // similarity uses MIN(chunk-pair cosine distance) which matches the
     // search aggregation. Cosine via pgvector's `<=>` operator (range 0..2;
@@ -1458,6 +1511,56 @@ impl VectorStore for PostgresVectorStore {
             }
             tx.commit().await?;
             Ok(inserted)
+        })
+    }
+
+    fn list_duplicate_edges(&self) -> Result<Vec<super::DuplicateEdgeGroup>> {
+        if !self.graph_config.enabled {
+            anyhow::bail!("graph features are disabled");
+        }
+        let pool = self.pool.clone();
+        self.block(async move {
+            let client = pool.get().await.context("acquiring postgres connection")?;
+            
+            // Find pairs with > 1 edge
+            let rows = client
+                .query(
+                    "SELECT from_item_id, to_item_id \
+                     FROM graph_edges \
+                     GROUP BY from_item_id, to_item_id \
+                     HAVING COUNT(*) > 1",
+                    &[],
+                )
+                .await?;
+
+            let mut groups = Vec::with_capacity(rows.len());
+            for row in rows {
+                let from: String = row.get(0);
+                let to: String = row.get(1);
+                
+                let edge_rows = client
+                    .query(
+                        "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                                directed, metadata, created_at, updated_at \
+                         FROM graph_edges \
+                         WHERE from_item_id = $1 AND to_item_id = $2 \
+                         ORDER BY updated_at DESC",
+                        &[&from, &to],
+                    )
+                    .await?;
+                
+                let mut edges = Vec::with_capacity(edge_rows.len());
+                for er in edge_rows {
+                    edges.push(row_to_graph_edge(&er)?);
+                }
+                
+                groups.push(super::DuplicateEdgeGroup {
+                    from_item_id: from,
+                    to_item_id: to,
+                    edges,
+                });
+            }
+            Ok(groups)
         })
     }
 

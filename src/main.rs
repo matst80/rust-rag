@@ -268,6 +268,18 @@ async fn main() -> Result<()> {
     };
 
     let embedder_handle = Arc::new(EmbedderHandle::loading());
+
+    // Optional second embedder for source-code ingestion (BGE-Code-v1, 1536-d).
+    // Enabled when RAG_CODE_EMBEDDER_PATH + RAG_CODE_TOKENIZER_PATH are set.
+    // Loaded in a background task after the main embedder is requested.
+    let code_embedder_handle: Option<Arc<EmbedderHandle>> = match (
+        std::env::var_os("RAG_CODE_EMBEDDER_PATH"),
+        std::env::var_os("RAG_CODE_TOKENIZER_PATH"),
+    ) {
+        (Some(_), Some(_)) => Some(Arc::new(EmbedderHandle::loading())),
+        _ => None,
+    };
+
     let state = AppState::new(
         embedder_handle.clone(),
         store_service.clone(),
@@ -297,6 +309,19 @@ async fn main() -> Result<()> {
         },
     )
     .with_whisper(config.whisper.clone());
+
+    let state = if let Some(handle) = code_embedder_handle.clone() {
+        state.with_code_embedder(handle)
+    } else {
+        state
+    };
+
+    let state = if let Some(pg) = &pg_store {
+        let cs = Arc::new(rust_rag::db::code_store::CodeStore::new(pg.pool().clone()));
+        state.with_code_store(cs)
+    } else {
+        state
+    };
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
@@ -466,6 +491,27 @@ async fn main() -> Result<()> {
     let ort_dylib_path = config.ort_dylib_path.clone();
     let intra_threads = config.intra_threads;
     let pooling = config.embedding_pooling;
+    let code_load = code_embedder_handle.map(|h| {
+        (
+            h,
+            std::env::var_os("RAG_CODE_EMBEDDER_PATH")
+                .map(std::path::PathBuf::from)
+                .expect("RAG_CODE_EMBEDDER_PATH checked above"),
+            std::env::var_os("RAG_CODE_TOKENIZER_PATH")
+                .map(std::path::PathBuf::from)
+                .expect("RAG_CODE_TOKENIZER_PATH checked above"),
+            config.ort_dylib_path.clone(),
+            config.intra_threads,
+            std::env::var("RAG_CODE_EMBEDDING_POOLING")
+                .ok()
+                .and_then(|v| v.parse::<rust_rag::embedding::Pooling>().ok())
+                .unwrap_or(rust_rag::embedding::Pooling::Mean),
+        )
+    });
+    // Both ORT CUDA sessions race during init: simultaneous EP creation on
+    // the same device blows past the per-process VRAM budget and both
+    // sessions fail. Serialise inside a single blocking task so the second
+    // session starts only after the first has committed.
     tokio::task::spawn_blocking(move || {
         println!("loading embedding model from {}", model_path.display());
         match Embedder::from_paths(
@@ -483,6 +529,34 @@ async fn main() -> Result<()> {
             Err(error) => {
                 eprintln!("failed to load embedding model: {error}");
                 embedder_handle.mark_failed(error.to_string());
+            }
+        }
+        if let Some((code_handle, cm, ct, co, ci, cp)) = code_load {
+            let force_cpu = std::env::var("RAG_CODE_FORCE_CPU")
+                .ok()
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            println!(
+                "loading code embedding model from {} (force_cpu={force_cpu})",
+                cm.display()
+            );
+            let load = || Embedder::from_paths(&cm, &ct, ci, co.as_deref());
+            let result = if force_cpu {
+                rust_rag::embedding::with_cpu_only(load)
+            } else {
+                load()
+            };
+            match result {
+                Ok(embedder) => {
+                    println!("code embedding model loaded (pooling={cp:?}, dim=1536)");
+                    let svc: Arc<dyn EmbeddingService> =
+                        Arc::new(embedder.with_pooling(cp));
+                    code_handle.mark_ready(svc);
+                }
+                Err(error) => {
+                    eprintln!("failed to load code embedding model: {error}");
+                    code_handle.mark_failed(error.to_string());
+                }
             }
         }
     });
