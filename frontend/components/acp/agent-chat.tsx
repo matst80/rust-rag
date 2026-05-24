@@ -601,13 +601,13 @@ export function AgentChat() {
 
               {/* PROMPT */}
               <form
-                className="p-2 md:p-4 border-t border-border"
+                className="border-t border-border"
                 onSubmit={(e) => {
                   e.preventDefault();
                   sendPrompt();
                 }}
               >
-                <div className="flex items-end gap-3 rounded-lg border border-input bg-background p-2 focus-within:border-primary/50 transition-colors shadow-sm">
+                <div className="flex items-center gap-3 border border-input bg-background p-1 focus-within:border-primary/50 transition-colors shadow-sm">
                   <textarea
                     id="agent-message-input"
                     name="message"
@@ -625,7 +625,7 @@ export function AgentChat() {
                         : `Message ${active?.name || activeSessionId.slice(0, 8)}…`
                     }
                     rows={1}
-                    className="flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none"
+                    className="flex-1 resize-none px-2 bg-transparent text-sm outline-none"
                   />
                   <div className="flex items-center gap-2 mb-1 shrink-0">
                     <div className="flex items-center justify-center">
