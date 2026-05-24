@@ -161,7 +161,7 @@ export interface SearchResult {
   metadata: EntryMetadata;
   source_id: string;
   created_at: number;
-  //updated_at: number;
+  updated_at?: number;
   score: number;
   /** Header breadcrumb of the chunk that matched best (e.g. ["Architecture", "Embedding execution"]). */
   section_path?: string[];
@@ -210,11 +210,11 @@ export interface GraphNeighborhood {
 }
 
 export interface GraphStatus {
-  enabled: bool;
-  build_on_startup: bool;
+  enabled: boolean;
+  build_on_startup: boolean;
   similarity_top_k: number;
   similarity_max_distance: number;
-  cross_source: bool;
+  cross_source: boolean;
   item_count: number;
   edge_count: number;
   similarity_edge_count: number;
