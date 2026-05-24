@@ -56,7 +56,6 @@ export const TerminalView = memo(function TerminalView({
       term = new Terminal({
         cursorBlink: true,
         fontSize: 13,
-        fontFamily: "JetBrains Mono",
         lineHeight: 1.1,
         letterSpacing: 0,
         scrollback: 10000,
@@ -185,7 +184,7 @@ export const TerminalView = memo(function TerminalView({
 
   return (
     <div
-      className="w-full h-full bg-zinc-950 p-2 overflow-hidden rounded-md border border-border/50 shadow-inner"
+      className="w-full h-full bg-[#030306] p-2 overflow-hidden rounded-md border border-border/50 shadow-inner"
       onKeyDown={(e) => e.stopPropagation()}
       onKeyUp={(e) => e.stopPropagation()}
       onKeyPress={(e) => e.stopPropagation()}
