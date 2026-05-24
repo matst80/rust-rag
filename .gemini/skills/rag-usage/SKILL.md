@@ -6,7 +6,7 @@ description: Guidelines for code agents on how to use the rust-rag retrieval sto
 # RAG Usage Guidelines
 
 ## Overview
-The `rust-rag` system serves as a long-term memory and knowledge base for code agents. Efficient usage involves proactive retrieval to avoid redundant work and strategic storage to preserve high-value insights. 
+The `rag` system serves as a long-term memory and knowledge base for code agents. Efficient usage involves proactive retrieval to avoid redundant work and strategic storage to preserve high-value insights. 
 
 **Mandatory Tooling**: Always use the connected MCP tools (`store_entry`, `search_entries`, `get_entry`, etc.) to interact with the RAG. Do not attempt to make direct HTTP calls or store project knowledge in local files unless explicitly requested.
 
