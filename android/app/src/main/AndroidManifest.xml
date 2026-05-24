@@ -32,6 +32,7 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <!-- Support deep linking from schema "rustrag" -->
                 <data android:scheme="rustrag" android:host="search" />
+                <data android:scheme="rustrag" android:host="detail" />
             </intent-filter>
 
             <meta-data

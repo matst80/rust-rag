@@ -1,10 +1,16 @@
 package com.rustrag.app
 
+import android.content.Context
 import androidx.appfunctions.service.AppFunction
 import androidx.appfunctions.AppFunctionContext
 import com.rustrag.app.data.RagApiService
+import com.rustrag.app.data.TokenManager
 
-class RagAppFunctions(private val apiService: RagApiService) {
+class RagAppFunctions(
+    private val apiService: RagApiService,
+    private val tokenManager: TokenManager,
+    private val appContext: Context
+) {
 
     /**
      * Stores a text entry in the RAG memory database.
@@ -23,6 +29,9 @@ class RagAppFunctions(private val apiService: RagApiService) {
         path: String? = null
     ): String {
         val result = apiService.storeEntry(text = text, sourceId = sourceId, path = path)
+        tokenManager.widgetLatestText = text
+        tokenManager.widgetLatestId = result.id
+        RagSearchWidgetProvider.triggerUpdate(appContext)
         return result.id
     }
 

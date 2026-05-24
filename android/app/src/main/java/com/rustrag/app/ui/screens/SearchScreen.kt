@@ -26,6 +26,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
@@ -40,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.rustrag.app.data.RagApiService
 import com.rustrag.app.data.SearchResultPayload
+import com.rustrag.app.data.TokenManager
 import com.rustrag.app.ui.components.SearchResultRow
 import com.rustrag.app.ui.components.ModernTextField
 import com.rustrag.app.ui.components.SearchModeButton
@@ -54,6 +60,21 @@ import androidx.compose.ui.unit.lerp as lerpDp
 import androidx.compose.ui.tooling.preview.Preview
 import com.rustrag.app.ui.theme.RustRagTheme
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Add
+import com.rustrag.app.ui.components.TodoResultRow
+import com.rustrag.app.ui.components.CreateMemoryDialog
+import com.rustrag.app.ui.components.CreateTodoDialog
+import com.rustrag.app.data.AdminCategoryPayload
+
+enum class SearchTab {
+    MEMORIES,
+    TODOS
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +98,8 @@ fun SearchScreen(
     onFocusConsumed: () -> Unit,
     onNavigateToDetail: (String) -> Unit,
     onLogout: () -> Unit,
+    activeTab: SearchTab,
+    onTabChange: (SearchTab) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -91,14 +114,19 @@ fun SearchScreen(
                         queryText = queryText,
                         sourceId = sourceIdFilter.takeIf { it.isNotBlank() },
                         hybrid = searchModeHybrid,
-                        rerank = if (searchModeRerank) true else null
+                        rerank = if (searchModeRerank) true else null,
+                        typeName = if (activeTab == SearchTab.TODOS) "todo" else null
                     )
                     onResultsChange(resp.results)
                     if (resp.results.isEmpty()) {
                         Toast.makeText(context, "No results found", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    val recent = apiService.getRecentEntries(limit = 15, sourceId = sourceIdFilter.takeIf { it.isNotBlank() })
+                    val recent = apiService.getRecentEntries(
+                        limit = if (activeTab == SearchTab.TODOS) 50 else 15,
+                        sourceId = sourceIdFilter.takeIf { it.isNotBlank() },
+                        typeName = if (activeTab == SearchTab.TODOS) "todo" else null
+                    )
                     onResultsChange(recent)
                 }
             } catch (e: Exception) {
@@ -127,11 +155,14 @@ fun SearchScreen(
         onNavigateToDetail = onNavigateToDetail,
         onLogout = onLogout,
         onSearch = { searchAction() },
+        activeTab = activeTab,
+        onTabChange = onTabChange,
+        apiService = apiService,
         modifier = modifier
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreenContent(
     queryText: String,
@@ -151,12 +182,28 @@ fun SearchScreenContent(
     onNavigateToDetail: (String) -> Unit,
     onLogout: () -> Unit,
     onSearch: () -> Unit,
+    activeTab: SearchTab,
+    onTabChange: (SearchTab) -> Unit,
+    apiService: RagApiService,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val isImeVisible = WindowInsets.isImeVisible
+    var keyboardAppeared by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible) {
+            keyboardAppeared = true
+        } else if (keyboardAppeared) {
+            focusManager.clearFocus()
+            keyboardAppeared = false
+        }
+    }
 
     val primaryColor = MaterialTheme.colorScheme.primary
     val surfaceColor = MaterialTheme.colorScheme.surface
@@ -164,6 +211,8 @@ fun SearchScreenContent(
     val transitionProgress = remember { Animatable(if (shouldFocusSearch) 0f else 1f) }
     var isMorphing by remember { mutableStateOf(shouldFocusSearch) }
     var isSearchFocused by remember { mutableStateOf(false) }
+    var showCreateMemoryDialog by remember { mutableStateOf(false) }
+    var showCreateTodoDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(shouldFocusSearch) {
         if (shouldFocusSearch) {
@@ -193,59 +242,21 @@ fun SearchScreenContent(
         label = "content_alpha"
     )
 
-    var showCustomSourceDialog by remember { mutableStateOf(false) }
-    var customSourceInput by remember { mutableStateOf("") }
-    var customSources by remember { mutableStateOf(setOf<String>()) }
     var isNamespacesExpanded by remember { mutableStateOf(false) }
+    var categoriesList by remember { mutableStateOf(emptyList<AdminCategoryPayload>()) }
 
-    val allSources = remember(customSources) {
-        listOf(
-            "All" to "",
-            "Inbox" to "inbox",
-            "Wiki" to "wiki",
-            "Knowledge" to "knowledge",
-            "Todos" to "todos"
-        ) + customSources.map { it.replaceFirstChar { c -> c.uppercase() } to it }
+    LaunchedEffect(results) {
+        try {
+            categoriesList = apiService.getCategories()
+        } catch (e: Exception) {
+            // Ignore
+        }
     }
 
-    if (showCustomSourceDialog) {
-        AlertDialog(
-            onDismissRequest = { showCustomSourceDialog = false },
-            title = { Text("Add Custom Namespace") },
-            text = {
-                ModernTextField(
-                    value = customSourceInput,
-                    onValueChange = { customSourceInput = it },
-                    label = { Text("Namespace (source_id)") },
-                    placeholder = { Text("e.g. journal, books") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-                            // Confirm Button
-                            confirmButton = {
-                                Button(
-                                    onClick = {
-                                        val cleaned = customSourceInput.trim().lowercase()
-                                        if (cleaned.isNotEmpty()) {
-                                            customSources = customSources + cleaned
-                                            onSourceIdFilterChange(cleaned)
-                                            customSourceInput = ""
-                                            showCustomSourceDialog = false
-                                            onSearch()
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(24.dp)
-                                ) {
-                                    Text("Add")
-                                }
-                            },
-            dismissButton = {
-                TextButton(onClick = { showCustomSourceDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
+    val allSources = remember(categoriesList) {
+        listOf("All" to "") + categoriesList.map { cat ->
+            cat.sourceId.replaceFirstChar { c -> c.uppercase() } to cat.sourceId
+        }
     }
 
     Scaffold(
@@ -286,13 +297,57 @@ fun SearchScreenContent(
 //                ),
 //                modifier = Modifier.alpha(contentAlpha)
 //            )
-//        },
+        bottomBar = {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+                tonalElevation = 8.dp
+            ) {
+                NavigationBarItem(
+                    selected = activeTab == SearchTab.MEMORIES,
+                    onClick = { onTabChange(SearchTab.MEMORIES) },
+                    icon = { Icon(Icons.Default.Search, contentDescription = "Search Memories") },
+                    label = { Text("Memories") }
+                )
+                NavigationBarItem(
+                    selected = activeTab == SearchTab.TODOS,
+                    onClick = { onTabChange(SearchTab.TODOS) },
+                    icon = { Icon(Icons.Default.List, contentDescription = "Todos") },
+                    label = { Text("Todos") }
+                )
+            }
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    if (activeTab == SearchTab.TODOS) {
+                        showCreateTodoDialog = true
+                    } else {
+                        showCreateMemoryDialog = true
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = CircleShape
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = if (activeTab == SearchTab.TODOS) "Create Task" else "Create Memory"
+                )
+            }
+        },
         modifier = modifier
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    focusManager.clearFocus()
+                }
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
@@ -497,24 +552,6 @@ fun SearchScreenContent(
                                         }
                                     )
                                 }
-
-                                item {
-                                    InputChip(
-                                        selected = false,
-                                        onClick = { showCustomSourceDialog = true },
-                                        label = {
-                                            Text(
-                                                text = "+ CUSTOM",
-                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        },
-                                        colors = InputChipDefaults.inputChipColors(
-                                            labelColor = MaterialTheme.colorScheme.primary
-                                        )
-                                    )
-                                }
                             }
                         }
                     }
@@ -586,7 +623,7 @@ fun SearchScreenContent(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = "No memories loaded.",
+                                        text = if (activeTab == SearchTab.TODOS) "No tasks loaded." else "No memories loaded.",
                                         style = MaterialTheme.typography.bodyMedium.copy(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                                             fontFamily = FontFamily.Monospace
@@ -594,16 +631,78 @@ fun SearchScreenContent(
                                     )
                                 }
                             } else {
-                                Column(modifier = Modifier.fillMaxWidth()) {
-                                    items.forEachIndexed { index, item ->
-                                        SearchResultRow(
-                                            item = item,
-                                            onClick = { onNavigateToDetail(item.id) }
-                                        )
-                                        if (index < items.lastIndex) {
-                                            HorizontalDivider(
-                                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                val filteredItems = remember(items, activeTab) {
+                                    if (activeTab == SearchTab.TODOS) {
+                                        items.filter { it.typeName == "todo" }
+                                    } else {
+                                        items.filter { it.typeName != "todo" }
+                                    }
+                                }
+                                if (filteredItems.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(200.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (activeTab == SearchTab.TODOS) "No tasks found." else "No memories found.",
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                                fontFamily = FontFamily.Monospace
                                             )
+                                        )
+                                    }
+                                } else {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        filteredItems.forEachIndexed { index, item ->
+                                            if (item.typeName == "todo") {
+                                                TodoResultRow(
+                                                    item = item,
+                                                    onStatusToggle = {
+                                                        scope.launch {
+                                                            try {
+                                                                val todoData = item.data?.jsonObject
+                                                                val currentStatus = todoData?.get("status")?.jsonPrimitive?.contentOrNull ?: "open"
+                                                                val newStatus = if (currentStatus == "done") "open" else "done"
+                                                                val updatedData = buildJsonObject {
+                                                                    todoData?.forEach { (key, value) ->
+                                                                        if (key == "status") {
+                                                                            put("status", newStatus)
+                                                                        } else {
+                                                                            put(key, value)
+                                                                        }
+                                                                    }
+                                                                }
+                                                                apiService.updateEntry(
+                                                                    id = item.id,
+                                                                    text = item.text,
+                                                                    sourceId = item.sourceId,
+                                                                    path = item.path,
+                                                                    metadata = item.metadata,
+                                                                    typeName = item.typeName,
+                                                                    data = updatedData
+                                                                )
+                                                                onSearch() // Trigger list reload
+                                                                Toast.makeText(context, "Task updated!", Toast.LENGTH_SHORT).show()
+                                                            } catch (e: Exception) {
+                                                                Toast.makeText(context, "Failed to update: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        }
+                                                    },
+                                                    onClick = { onNavigateToDetail(item.id) }
+                                                )
+                                            } else {
+                                                SearchResultRow(
+                                                    item = item,
+                                                    onClick = { onNavigateToDetail(item.id) }
+                                                )
+                                            }
+                                            if (index < filteredItems.lastIndex) {
+                                                HorizontalDivider(
+                                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -613,6 +712,27 @@ fun SearchScreenContent(
                 }
             }
         }
+    }
+
+    if (showCreateMemoryDialog) {
+        CreateMemoryDialog(
+            apiService = apiService,
+            onDismiss = { showCreateMemoryDialog = false },
+            onSuccess = {
+                showCreateMemoryDialog = false
+                onSearch()
+            }
+        )
+    }
+    if (showCreateTodoDialog) {
+        CreateTodoDialog(
+            apiService = apiService,
+            onDismiss = { showCreateTodoDialog = false },
+            onSuccess = {
+                showCreateTodoDialog = false
+                onSearch()
+            }
+        )
     }
 }
 
@@ -670,7 +790,10 @@ fun SearchScreenPreview() {
             onFocusConsumed = {},
             onNavigateToDetail = {},
             onLogout = {},
-            onSearch = {}
+            onSearch = {},
+            activeTab = SearchTab.MEMORIES,
+            onTabChange = {},
+            apiService = RagApiService(TokenManager(LocalContext.current))
         )
     }
 }
