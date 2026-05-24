@@ -3,7 +3,6 @@
 import { useEffect, useRef, memo } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import * as XtermWebfont from "xterm-webfont";
 import "@xterm/xterm/css/xterm.css";
 
 interface TerminalViewProps {
@@ -57,8 +56,7 @@ export const TerminalView = memo(function TerminalView({
       term = new Terminal({
         cursorBlink: true,
         fontSize: 13,
-        fontFamily:
-          '"JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        fontFamily: "JetBrains Mono",
         lineHeight: 1.1,
         letterSpacing: 0,
         scrollback: 10000,
@@ -73,9 +71,8 @@ export const TerminalView = memo(function TerminalView({
 
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
-      term.loadAddon(new XtermWebfont());
 
-      term.loadWebfontAndOpen(containerRef.current);
+      term.open(containerRef.current);
       fitAddon.fit();
 
       term.onData((data) => {
