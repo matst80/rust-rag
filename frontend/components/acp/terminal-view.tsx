@@ -56,6 +56,7 @@ export const TerminalView = memo(function TerminalView({
       term = new Terminal({
         cursorBlink: true,
         fontSize: 13,
+        fontFamily: "JetBrains Mono",
         lineHeight: 1.1,
         letterSpacing: 0,
         scrollback: 10000,
