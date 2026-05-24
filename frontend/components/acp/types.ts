@@ -26,11 +26,6 @@ export interface TerminalInfo {
 	running: boolean
 }
 
-export interface TerminalEventState {
-	output?: { data: string; ts: number }
-	snapshot?: { data: string; cols: number; rows: number; ts: number }
-}
-
 export interface ProjectInfo {
 	name: string
 	path: string

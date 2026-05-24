@@ -23,6 +23,8 @@ import type {
   SchemaDefinition,
   UpsertSchemaRequest,
   DeleteSchemaResponse,
+  UpdateEdgeRequest,
+  MapPoint,
   DriveSearchResult,
 } from "./types"
 
@@ -224,9 +226,9 @@ export function useCreateEdge() {
 }
 
 export function useUpdateEdge(id: string) {
-  return useSWRMutation<Edge, Error, string, UpdateEdgeRequest>(
+  return useSWRMutation<Edge, Error, any, UpdateEdgeRequest>(
     ["edge", id],
-    (_, { arg }) => api.edges.update(id, arg)
+    (_key: any, { arg }: { arg: UpdateEdgeRequest }) => api.edges.update(id, arg)
   )
 }
 

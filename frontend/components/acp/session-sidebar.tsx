@@ -43,8 +43,8 @@ export const SessionSidebar = memo(function SessionSidebar({
 
 	return (
 		<aside className={cn(
-			"z-40 flex w-72 flex-col border-r border-border bg-background md:bg-muted/20 transition-transform duration-300 ease-in-out",
-			"absolute inset-y-0 left-0 md:relative md:translate-x-0",
+			"z-50 flex w-72 flex-col border-r border-border bg-background md:bg-muted/20 transition-transform duration-300 ease-in-out",
+			"fixed inset-y-0 left-0 h-screen md:relative md:h-auto md:translate-x-0",
 			sidebarOpen ? "translate-x-0" : "-translate-x-full md:hidden",
 		)}>
 			<div className="flex items-center justify-between px-4 py-3 border-b border-border">

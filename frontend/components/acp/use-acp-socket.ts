@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState, useMemo } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { 
     ConnectionState, 
     AcpEvent, 
     SessionInfo, 
     TerminalInfo, 
-    TerminalEventState, 
     AcpInstance, 
     WorkerStatus,
     ProjectInfo,
@@ -22,7 +21,6 @@ export function useAcpSocket() {
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 	const [terminals, setTerminals] = useState<Record<string, TerminalInfo>>({})
 	const [sessionTerminals, setSessionTerminals] = useState<Record<string, string[]>>({})
-	const [terminalEvents, setTerminalEvents] = useState<Record<string, TerminalEventState>>({})
 	const [activeTerminalId, setActiveTerminalId] = useState<Record<string, string | null>>({})
 	const [viewMode, setViewMode] = useState<Record<string, "chat" | "terminal">>({})
 	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
@@ -130,10 +128,7 @@ export function useAcpSocket() {
 				const tid = payload["terminal_id"] as string
 				const data = payload["data"] as string
 				if (tid && data) {
-					setTerminalEvents((prev) => ({
-						...prev,
-						[tid]: { ...prev[tid], output: { data, ts: Date.now() } }
-					}))
+					window.dispatchEvent(new CustomEvent(`acp:term:output:${tid}`, { detail: data }))
 				}
 			}
 
@@ -143,9 +138,19 @@ export function useAcpSocket() {
 				const cols = payload["cols"] as number
 				const rows = payload["rows"] as number
 				if (tid && data) {
-					setTerminalEvents((prev) => ({
-						...prev,
-						[tid]: { ...prev[tid], snapshot: { data, cols, rows, ts: Date.now() } }
+					window.dispatchEvent(new CustomEvent(`acp:term:snapshot:${tid}`, { 
+						detail: { data, cols, rows } 
+					}))
+				}
+			}
+
+			if (k === "terminal_resized" || k === "terminalresized") {
+				const tid = payload["terminal_id"] as string
+				const cols = payload["cols"] as number
+				const rows = payload["rows"] as number
+				if (tid && cols && rows) {
+					window.dispatchEvent(new CustomEvent(`acp:term:resized:${tid}`, { 
+						detail: { cols, rows } 
 					}))
 				}
 			}
@@ -161,13 +166,8 @@ export function useAcpSocket() {
 					setSessionTerminals((prev) => {
 						const next = { ...prev }
 						for (const sid in next) {
-							next[sid] = next[sid].filter(id => id !== tid)
+							next[sid] = (next[sid] || []).filter(id => id !== tid)
 						}
-						return next
-					})
-					setTerminalEvents((prev) => {
-						const next = { ...prev }
-						delete next[tid]
 						return next
 					})
 				}
@@ -312,7 +312,10 @@ export function useAcpSocket() {
 			const data = await res.json()
 			setInstances(data.instances || [])
 			setWorkers(data.workers || [])
-			if (data.active) setActiveInstance(data.active)
+			// Optimistically set active if not set
+			if (data.active && activeInstanceRef.current === null) {
+				setActiveInstance(data.active)
+			}
 		} catch (err) {
 			console.warn("ACP: failed to refresh instances", err)
 		}
@@ -320,13 +323,13 @@ export function useAcpSocket() {
 
 	const selectInstance = async (name: string) => {
 		try {
+			setActiveInstance(name)
 			const res = await fetch("/bff/acp/select", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ name }),
 			})
 			if (res.ok) {
-				setActiveInstance(name)
 				if (wsRef.current) detachAndClose(wsRef.current)
 				connect()
 			}
@@ -370,7 +373,7 @@ export function useAcpSocket() {
 
 	useEffect(() => {
 		if (conn.status === "open" || conn.status === "connecting") return
-		const resolvable = workers.length === 1 || !!activeInstance
+		const resolvable = (workers.length === 1 && !activeInstance) || !!activeInstance
 		if (!resolvable) return
 		connect()
 	}, [workers, activeInstance, connect, conn.status])
@@ -395,7 +398,6 @@ export function useAcpSocket() {
 		setActiveSessionId,
 		terminals,
 		sessionTerminals,
-		terminalEvents,
 		activeTerminalId,
 		setActiveTerminalId,
 		viewMode,

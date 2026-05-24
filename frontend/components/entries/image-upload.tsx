@@ -351,7 +351,7 @@ export function ImageUpload({ minimal = false }: ImageUploadProps = {}) {
             </p>
             {useLocal && visionStatus.kind === "loading" && (
               <p className="font-mono text-[9px] text-muted-foreground/70 tabular-nums">
-                {formatLoadProgress(visionStatus)}
+                {formatLoadProgress(visionStatus as any)}
               </p>
             )}
             {useLocal && visionStatus.kind === "error" && (
