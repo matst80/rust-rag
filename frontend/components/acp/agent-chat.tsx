@@ -516,7 +516,7 @@ export function AgentChat() {
                         )}
 
                       {/* TERMINAL WINDOW */}
-                      <div className="flex-1 p-2 bg-zinc-950 overflow-hidden relative">
+                      <div className="flex-1 overflow-hidden relative">
                         <TerminalView
                           key={activeTerminalId[activeSessionId]!}
                           terminalId={activeTerminalId[activeSessionId]!}
