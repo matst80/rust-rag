@@ -1,679 +1,74 @@
 "use client"
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
-import Link from "next/link"
-import { Bot, Circle, Hash, Link2, Loader2, Menu, Plus, Send, Square, User2, X } from "lucide-react"
+import { useMemo, useRef, useLayoutEffect } from "react"
+import { 
+    Bot, 
+    Hash, 
+    Loader2, 
+    Menu, 
+    MessageSquare, 
+    Send, 
+    Terminal as TerminalIcon, 
+} from "lucide-react"
 import { cn } from "@/lib/utils"
-import { MessageMarkdown } from "@/components/messages/message-markdown"
 import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
+import { TerminalView } from "./terminal-view"
+import { BlockView } from "./block-view"
+import { SessionSidebar } from "./session-sidebar"
+import { SpawnDialog } from "./spawn-dialog"
+import { useAcpSocket } from "./use-acp-socket"
+import { buildBlocks } from "./utils"
+import { Block, EMPTY_ARRAY } from "./types"
 
-const EMPTY_USERS: Set<string> = new Set()
-const EMPTY_ARRAY: any[] = []
-
-type AcpEnvelope = Record<string, unknown>
-
-interface AcpEvent {
-	kind: string
-	payload: Record<string, unknown>
-	receivedAt: number
-	localSeq: number
-}
-
-interface SessionInfo {
-	acp_session_id: string
-	project_path: string
-	thread_id: number
-	status: string
-	name?: string | null
-	agent_command: string
-	agent_name?: string | null
-	available_commands?: { name: string; description?: string; schema?: Record<string, unknown> }[]
-	history?: unknown[]
-}
-
-interface ProjectInfo {
-	name: string
-	path: string
-}
-
-interface AcpInstance {
-	name: string
-	host: string
-	port: number
-	url: string
-	txt: Record<string, string>
-}
-
-interface WorkerStatus {
-	instance_id: string
-	url: string
-	connected: boolean
-	last_error: string | null
-	session_count: number
-	pending_permissions: number
-	buffered_events: number
-}
-
-interface ConnectionState {
-	status: "connecting" | "open" | "closed" | "error" | "disabled"
-	error?: string
-}
-
-const RECONNECT_INITIAL_MS = 1000
-const RECONNECT_MAX_MS = 30000
 const NEAR_BOTTOM_PX = 80
 
-function envelopeKind(envelope: AcpEnvelope): { kind: string; payload: Record<string, unknown> } | null {
-	if (!envelope || typeof envelope !== "object") return null
-	const keys = Object.keys(envelope)
-	if (keys.length === 1 && envelope[keys[0]] && typeof envelope[keys[0]] === "object") {
-		return { kind: keys[0], payload: envelope[keys[0]] as Record<string, unknown> }
-	}
-	const k = (envelope as { kind?: unknown; type?: unknown }).kind ?? (envelope as { type?: unknown }).type
-	if (typeof k === "string") return { kind: k, payload: envelope as Record<string, unknown> }
-	return null
-}
-
-function detachAndClose(ws: WebSocket) {
-	ws.onopen = null
-	ws.onmessage = null
-	ws.onerror = null
-	ws.onclose = null
-	try {
-		ws.close()
-	} catch {
-		// ignore — closing a connecting socket can throw on some browsers
-	}
-}
-
-function sessionIdOf(payload: Record<string, unknown>): string | undefined {
-	const a = payload["acp_session_id"]
-	if (typeof a === "string") return a
-	const b = payload["session_id"]
-	if (typeof b === "string") return b
-	return undefined
-}
-
 export function AgentChat() {
-	const [conn, setConn] = useState<ConnectionState>({ status: "connecting" })
-	const [sessions, setSessions] = useState<Record<string, SessionInfo>>({})
-	const [eventsBySession, setEventsBySession] = useState<Record<string, AcpEvent[]>>({})
-	const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-	const [pendingPermissions, setPendingPermissions] = useState<Record<string, AcpEvent>>({})
-	const [sidebarOpen, setSidebarOpen] = useState<boolean>(true)
-	const [isDesktop, setIsDesktop] = useState<boolean>(false)
+	const {
+		conn,
+		sessions,
+		eventsBySession,
+		activeSessionId,
+		setActiveSessionId,
+		sessionTerminals,
+		terminalEvents,
+		activeTerminalId,
+		setActiveTerminalId,
+		viewMode,
+		setViewMode,
+		pendingPermissions,
+		instances,
+		activeInstance,
+		selectInstance,
+		workers,
+		projects,
+		send,
+		drafts,
+		setDraft,
+		sidebarOpen,
+		setSidebarOpen,
+	} = useAcpSocket()
 
-	useEffect(() => {
-		if (typeof window === "undefined") return
-		const mql = window.matchMedia("(min-width: 768px)")
-		const sync = () => {
-			setIsDesktop(mql.matches)
-			setSidebarOpen(mql.matches)
-		}
-		sync()
-		mql.addEventListener("change", sync)
-		return () => mql.removeEventListener("change", sync)
-	}, [])
+	const active = activeSessionId ? sessions[activeSessionId] : null
+	const draft = activeSessionId ? drafts[activeSessionId] ?? "" : ""
 
-	useEffect(() => {
-		if (!isDesktop && activeSessionId) {
-			setSidebarOpen(false)
-		}
-	}, [activeSessionId, isDesktop])
-	// Per-session draft buffer. Each session keeps its in-progress prompt in
-	// localStorage under `acp:draft:<session_id>` so switching tabs/sessions
-	// before pressing Send doesn't lose the text.
-	const [drafts, setDrafts] = useState<Record<string, string>>({})
-	const [instances, setInstances] = useState<AcpInstance[]>([])
-	const [activeInstance, setActiveInstance] = useState<string | null>(null)
-	const [workers, setWorkers] = useState<WorkerStatus[]>([])
-	const [projects, setProjects] = useState<ProjectInfo[]>([])
-	const [spawnDialog, setSpawnDialog] = useState<null | { projectPath: string; agentCommand: string }>(null)
-	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
-	const [projectPickerHighlight, setProjectPickerHighlight] = useState(0)
-	const wsRef = useRef<WebSocket | null>(null)
-	const reconnectAttemptRef = useRef(0)
-	const seqRef = useRef(0)
-	// Read the current desired instance synchronously from connect()/reconnect
-	// without re-creating the callback on every change.
-	const activeInstanceRef = useRef<string | null>(null)
-	useEffect(() => {
-		activeInstanceRef.current = activeInstance
-	}, [activeInstance])
-
-	const refreshInstances = useCallback(async () => {
-		try {
-			const res = await fetch("/bff/acp/instances", { credentials: "include" })
-			if (!res.ok) return
-			const data = (await res.json()) as {
-				instances: AcpInstance[]
-				active: string | null
-				workers?: WorkerStatus[]
-			}
-			setInstances(data.instances)
-			setWorkers(data.workers ?? [])
-			setActiveInstance((prev) => {
-				// Preserve a user-chosen instance even if backend "active" hint
-				// changes; only auto-pick when nothing selected yet.
-				if (prev && (data.workers ?? []).some((w) => w.instance_id === prev)) {
-					return prev
-				}
-				if (data.active) return data.active
-				if ((data.workers ?? []).length === 1) return data.workers![0].instance_id
-				return null
-			})
-		} catch (err) {
-			console.warn("acp instances fetch failed", err)
-		}
-	}, [])
-
-	const send = useCallback((envelope: AcpEnvelope) => {
-		const ws = wsRef.current
-		if (!ws || ws.readyState !== WebSocket.OPEN) {
-			console.warn("acp_ws not open; dropping", envelope)
-			return false
-		}
-		ws.send(JSON.stringify(envelope))
-		return true
-	}, [])
-
-	const workersRef = useRef<WorkerStatus[]>([])
-	useEffect(() => {
-		workersRef.current = workers
-	}, [workers])
-
-	const connect = useCallback(async () => {
-		// Backend rejects WS upgrades when no workers are registered or when
-		// multiple are registered and ?instance= is missing. Avoid the
-		// failed-handshake noise by reading worker state first.
-		const target = activeInstanceRef.current
-		const ws_count = workersRef.current.length
-		if (ws_count === 0) {
-			setConn({ status: "disabled", error: "no ACP instances registered" })
-			return
-		}
-		if (!target && ws_count > 1) {
-			setConn({ status: "disabled", error: "pick an instance" })
-			return
-		}
-		setConn({ status: "connecting" })
-		let url: string
-		try {
-			const res = await fetch("/bff/acp/config", { credentials: "include" })
-			if (res.status === 503) {
-				setConn({ status: "disabled", error: "ACP WS endpoint not configured" })
-				return
-			}
-			if (!res.ok) {
-				setConn({ status: "error", error: `config fetch ${res.status}` })
-				return
-			}
-			const data = (await res.json()) as { url?: string }
-			if (!data.url) {
-				setConn({ status: "disabled", error: "missing url" })
-				return
-			}
-			url = data.url
-		} catch (err) {
-			setConn({ status: "error", error: String(err) })
-			return
-		}
-
-		// Same-origin relative paths get promoted to ws(s):// against the current
-		// host. Absolute URLs (legacy LAN daemon endpoints) pass through unchanged.
-		let wsUrl: string
-		if (url.startsWith("/")) {
-			const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-			wsUrl = `${proto}//${window.location.host}${url}`
-		} else {
-			wsUrl = url
-		}
-		// Backend resolves per-instance worker from ?instance=. Skip the param
-		// when no selection yet — backend auto-picks the sole worker if exactly
-		// one is registered.
-		if (target) {
-			const sep = wsUrl.includes("?") ? "&" : "?"
-			wsUrl = `${wsUrl}${sep}instance=${encodeURIComponent(target)}`
-		}
-		const ws = new WebSocket(wsUrl)
-		wsRef.current = ws
-
-		ws.onopen = () => {
-			setConn({ status: "open" })
-			reconnectAttemptRef.current = 0
-		}
-
-		ws.onmessage = (msg) => {
-			let envelope: AcpEnvelope
-			try {
-				envelope = JSON.parse(typeof msg.data === "string" ? msg.data : "{}")
-			} catch {
-				return
-			}
-			const parsed = envelopeKind(envelope)
-			if (!parsed) return
-			const { kind, payload } = parsed
-			seqRef.current += 1
-			const ev: AcpEvent = {
-				kind,
-				payload,
-				receivedAt: Date.now(),
-				localSeq: seqRef.current,
-			}
-
-			const k = kind.toLowerCase()
-
-			if (k === "state_snapshot" || (k === "snapshot" && Array.isArray((payload as { sessions?: unknown }).sessions))) {
-				const list = Array.isArray((payload as { sessions?: unknown }).sessions)
-					? (payload as { sessions: SessionInfo[] }).sessions
-					: []
-				const projectList = Array.isArray((payload as { projects?: unknown }).projects)
-					? ((payload as { projects: unknown[] }).projects.filter(
-						(p): p is ProjectInfo =>
-							typeof p === "object" &&
-							p !== null &&
-							typeof (p as ProjectInfo).name === "string" &&
-							typeof (p as ProjectInfo).path === "string",
-					))
-					: []
-				setProjects(projectList)
-				const map: Record<string, SessionInfo> = {}
-				const snapshotHistory: Record<string, AcpEvent[]> = {}
-				const now = Date.now()
-				for (const s of list) {
-					if (!s?.acp_session_id) continue
-					map[s.acp_session_id] = s
-					const hist = Array.isArray(s.history) ? s.history : []
-					const arr: AcpEvent[] = []
-					// History items are in chronological order. We assign decreasing 
-					// receivedAt relative to 'now' so they stay in order but 
-					// precede any future live events.
-					for (let i = 0; i < hist.length; i++) {
-						const h = hist[i]
-						if (!h || typeof h !== "object") continue
-						const hp = h as Record<string, unknown>
-						const hkind = typeof hp.type === "string" ? hp.type : "unknown"
-						seqRef.current += 1
-						arr.push({
-							kind: hkind,
-							payload: hp,
-							receivedAt: now - (hist.length - i) * 10,
-							localSeq: seqRef.current,
-						})
-					}
-					if (arr.length > 0) snapshotHistory[s.acp_session_id] = arr
-				}
-				setSessions(map)
-				if (Object.keys(snapshotHistory).length > 0) {
-					setEventsBySession((prev) => {
-						const next = { ...prev }
-						for (const [sid, histArr] of Object.entries(snapshotHistory)) {
-							const existing = next[sid] ?? []
-							// Filter out existing events that have the same event_id as something in histArr
-							const seenIds = new Set(histArr.map(h => h.payload.event_id).filter(id => id != null))
-							const live = existing.filter(e => e.payload.event_id == null || !seenIds.has(e.payload.event_id))
-							
-							// To be safe, if history is large, we just take it as the source of truth
-							// and append any live events that happened after the last history event.
-							const merged = [...histArr, ...live]
-							if (merged.length > 500) merged.splice(0, merged.length - 500)
-							next[sid] = merged
-						}
-						return next
-					})
-				}
-				if (!activeSessionId) {
-					const prompting = list.find((s) => s.status === "Prompting")
-					const pick = prompting ?? list[0]
-					if (pick?.acp_session_id) setActiveSessionId(pick.acp_session_id)
-				}
-			}
-
-			if (k === "sessionstarted" || k === "session_started" || k === "sessionswitched" || k === "session_switched") {
-				const sid = sessionIdOf(payload)
-				if (sid) {
-					setSessions((prev) => ({ ...prev, [sid]: { acp_session_id: sid, ...payload } } as Record<string, SessionInfo>))
-					setActiveSessionId((cur) => cur ?? sid)
-				}
-			}
-			
-			if (k === "session_renamed" || k === "sessionrenamed") {
-				const sid = sessionIdOf(payload)
-				const name = payload["name"] as string | undefined
-				if (sid && name) {
-					setSessions((prev) => {
-						const s = prev[sid]
-						if (!s) return prev
-						return { ...prev, [sid]: { ...s, name } }
-					})
-				}
-			}
-
-			if (k === "session_removed" || k === "sessionremoved" || k === "topic_removed" || k === "topicremoved") {
-				const sid = sessionIdOf(payload)
-				if (sid) {
-					setSessions((prev) => {
-						const next = { ...prev }
-						delete next[sid]
-						return next
-					})
-					setEventsBySession((prev) => {
-						const next = { ...prev }
-						delete next[sid]
-						return next
-					})
-					setActiveSessionId((prev) => (prev === sid ? null : prev))
-				}
-			}
-
-			if (k === "sessionended" || k === "session_ended") {
-				const sid = sessionIdOf(payload)
-				if (sid) {
-					setSessions((prev) => {
-						const next = { ...prev }
-						delete next[sid]
-						return next
-					})
-					setPendingPermissions((prev) => {
-						const next: Record<string, AcpEvent> = {}
-						for (const [kk, v] of Object.entries(prev)) {
-							if (sessionIdOf(v.payload) !== sid) next[kk] = v
-						}
-						return next
-					})
-					setDrafts((prev) => {
-						if (prev[sid] === undefined) return prev
-						const next = { ...prev }
-						delete next[sid]
-						return next
-					})
-					try {
-						window.localStorage.removeItem(`acp:draft:${sid}`)
-					} catch {
-						// ignore
-					}
-				}
-			}
-
-			if (k === "agent_update" || k === "agentupdate") {
-				const sid = sessionIdOf(payload)
-				if (sid) {
-					const inner = (payload.event as Record<string, unknown>) ?? payload
-					const suRaw = inner.sessionUpdate
-					const variant = typeof suRaw === "string" ? suRaw : ((suRaw as Record<string, unknown>)?.type as string) ?? ""
-					
-					if (variant === "working" || variant === "agent_message_chunk" || variant === "agent_thought_chunk" || variant === "tool_call") {
-						setSessions((prev) => {
-							const s = prev[sid]
-							if (!s || s.status === "Working") return prev
-							return { ...prev, [sid]: { ...s, status: "Working" } }
-						})
-					} else if (variant === "finished" || variant === "ready" || variant === "idle" || variant === "error") {
-						setSessions((prev) => {
-							const s = prev[sid]
-							if (!s || s.status === "Idle") return prev
-							return { ...prev, [sid]: { ...s, status: "Idle" } }
-						})
-					}
-				}
-			}
-
-			if (k === "user_prompt" || k === "userprompt") {
-				const sid = sessionIdOf(payload)
-				if (sid) {
-					setSessions((prev) => {
-						const s = prev[sid]
-						if (!s || s.status === "Prompting") return prev
-						return { ...prev, [sid]: { ...s, status: "Prompting" } }
-					})
-				}
-			}
-
-			if (k === "permissionrequest" || k === "permission_request") {
-				const reqId = payload["request_id"]
-				if (typeof reqId === "string") {
-					setPendingPermissions((prev) => ({ ...prev, [reqId]: ev }))
-				}
-			}
-
-			const sid = sessionIdOf(payload) ?? "_global"
-			setEventsBySession((prev) => {
-				const list = prev[sid] ? [...prev[sid]] : []
-				list.push(ev)
-				if (list.length > 500) list.splice(0, list.length - 500)
-				return { ...prev, [sid]: list }
-			})
-		}
-
-		ws.onerror = () => {
-			setConn({ status: "error", error: "websocket error" })
-		}
-
-		ws.onclose = () => {
-			wsRef.current = null
-			setConn({ status: "closed" })
-			const attempt = reconnectAttemptRef.current + 1
-			reconnectAttemptRef.current = attempt
-			const delay = Math.min(RECONNECT_INITIAL_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS)
-			window.setTimeout(() => {
-				if (!wsRef.current) connect()
-			}, delay)
-		}
-	}, [activeSessionId])
-
-	// Auto-(re)connect when a viable target appears. Covers the "first
-	// daemon registers mid-session" case without forcing the user to
-	// refresh the page.
-	useEffect(() => {
-		if (wsRef.current) return
-		if (conn.status === "open" || conn.status === "connecting") return
-		const resolvable = workers.length === 1 || !!activeInstance
-		if (!resolvable) return
-		connect()
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [workers, activeInstance])
-
-	useEffect(() => {
-		// Fetch instances first so the initial WS connect can carry
-		// ?instance=. With one worker the backend auto-resolves, so this
-		// only matters once multiple are registered.
-		; (async () => {
-			await refreshInstances()
-			connect()
-		})()
-		const t = window.setInterval(() => void refreshInstances(), 10_000)
-		return () => {
-			window.clearInterval(t)
-			const ws = wsRef.current
-			wsRef.current = null
-			if (ws) detachAndClose(ws)
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [])
-
-	const selectInstance = useCallback(
-		async (name: string) => {
-			if (name === activeInstance) return
-			activeInstanceRef.current = name
-			setActiveInstance(name)
-			// Best-effort: tell the backend our default-instance preference.
-			// Failure is non-fatal — the WS reconnect below uses ?instance=
-			// directly so the UI works even if the select endpoint is gone.
-			try {
-				await fetch("/bff/acp/select", {
-					method: "POST",
-					credentials: "include",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({ name }),
-				})
-			} catch (err) {
-				console.warn("acp select hint failed", err)
-			}
-			// Each instance has its own worker + sessions; reset view, then
-			// reconnect against the new instance via ?instance=.
-			const ws = wsRef.current
-			wsRef.current = null
-			reconnectAttemptRef.current = 0
-			if (ws) detachAndClose(ws)
-			setSessions({})
-			setEventsBySession({})
-			setActiveSessionId(null)
-			setPendingPermissions({})
-			connect()
-		},
-		[activeInstance, connect],
-	)
-
-	const sessionList = useMemo(() => Object.values(sessions), [sessions])
 	const activeEvents = useMemo(() => {
 		if (!activeSessionId) return EMPTY_ARRAY
 		return eventsBySession[activeSessionId] ?? EMPTY_ARRAY
 	}, [activeSessionId, eventsBySession[activeSessionId || ""]])
 
-	const prevBlocksRef = useRef<Block[]>([])
+	const prevBlocksRef = useRef<any[]>([])
 	const blocks = useMemo(() => {
 		const next = buildBlocks(activeEvents, prevBlocksRef.current)
 		prevBlocksRef.current = next
 		return next
 	}, [activeEvents])
+
 	const pendingForActive = useMemo(() => {
 		if (!activeSessionId) return EMPTY_ARRAY
-		const filtered = Object.values(pendingPermissions).filter(
-			(p) => sessionIdOf(p.payload) === activeSessionId,
+		return Object.values(pendingPermissions).filter(
+			(p) => (p.payload["acp_session_id"] || p.payload["session_id"]) === activeSessionId,
 		)
-		return filtered.length === 0 ? EMPTY_ARRAY : filtered
 	}, [activeSessionId, pendingPermissions])
-
-	const activeSession = useMemo(() => {
-		return sessions[activeSessionId ?? ""]
-	}, [activeSessionId, sessions])
-
-	const draftKey = (sid: string) => `acp:draft:${sid}`
-	const draft = activeSessionId ? drafts[activeSessionId] ?? "" : ""
-
-	// Hydrate the active session's draft from localStorage on first switch.
-	useEffect(() => {
-		if (!activeSessionId) return
-		if (drafts[activeSessionId] !== undefined) return
-		try {
-			const stored = window.localStorage.getItem(draftKey(activeSessionId))
-			if (stored) {
-				setDrafts((prev) => ({ ...prev, [activeSessionId]: stored }))
-			}
-		} catch {
-			// Ignore quota / privacy-mode errors.
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [activeSessionId])
-
-	const setDraft = (value: string) => {
-		if (!activeSessionId) return
-		setDrafts((prev) => ({ ...prev, [activeSessionId]: value }))
-		try {
-			if (value) {
-				window.localStorage.setItem(draftKey(activeSessionId), value)
-			} else {
-				window.localStorage.removeItem(draftKey(activeSessionId))
-			}
-		} catch {
-			// Ignore.
-		}
-	}
-
-	const sendPrompt = () => {
-		if (!activeSessionId || !draft.trim()) return
-		send({ type: "send_prompt", session_id: activeSessionId, text: draft })
-		setSessions(prev => {
-			const s = prev[activeSessionId]
-			if (!s) return prev
-			return { ...prev, [activeSessionId]: { ...s, status: "Prompting" } }
-		})
-		setDraft("")
-	}
-
-	const executeCommand = (command: string) => {
-		if (!activeSessionId) return
-		send({ type: "execute_command", session_id: activeSessionId, command })
-		setSessions(prev => {
-			const s = prev[activeSessionId]
-			if (!s) return prev
-			return { ...prev, [activeSessionId]: { ...s, status: "Prompting" } }
-		})
-	}
-
-	const renameSession = () => {
-		if (!activeSessionId) return
-		const current = sessions[activeSessionId]?.name ?? sessions[activeSessionId]?.project_path?.split("/").pop() ?? ""
-		const name = window.prompt("New session name:", current)
-		if (name === null) return
-		send({ type: "rename_session", session_id: activeSessionId, name: name.trim() })
-	}
-
-	const cancelActive = () => {
-		if (!activeSessionId) return
-		send({ type: "cancel", session_id: activeSessionId })
-	}
-
-	const endActive = () => {
-		if (!activeSessionId) return
-		send({ type: "end_session", session_id: activeSessionId })
-	}
-
-	const respondPermission = (requestId: string, decision: string) => {
-		send({ type: "permission_response", request_id: requestId, decision })
-		setPendingPermissions((prev) => {
-			const next = { ...prev }
-			delete next[requestId]
-			return next
-		})
-	}
-
-	const spawn = () => {
-		const initial = projects.length === 1 ? projects[0].path : ""
-		setSpawnDialog({ projectPath: initial, agentCommand: "" })
-		setProjectPickerOpen(projects.length > 1)
-		setProjectPickerHighlight(0)
-	}
-
-	const submitSpawn = () => {
-		if (!spawnDialog) return
-		const path = spawnDialog.projectPath.trim()
-		if (!path) return
-		const envelope: AcpEnvelope = {
-			type: "spawn_session",
-			project_path: path,
-			instance: activeInstance,
-		}
-		const cmd = spawnDialog.agentCommand.trim()
-		if (cmd) envelope.agent_command = cmd
-		send(envelope)
-		setSpawnDialog(null)
-	}
-
-	const bindTelegramThread = () => {
-		if (!activeSessionId) return
-		const raw = window.prompt(
-			"Telegram thread_id (leave blank to auto-create a new forum topic):",
-			"",
-		)
-		if (raw === null) return
-		const trimmed = raw.trim()
-		const payload: Record<string, unknown> = {
-			type: "bind_telegram_thread",
-			session_id: activeSessionId,
-		}
-		if (trimmed === "") {
-			payload.thread_id = null
-		} else {
-			const n = Number(trimmed)
-			if (!Number.isInteger(n) || n <= 0) {
-				window.alert("thread_id must be a positive integer or blank")
-				return
-			}
-			payload.thread_id = n
-		}
-		send(payload)
-	}
 
 	const scrollContainerRef = useRef<HTMLDivElement>(null)
 	const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -681,175 +76,97 @@ export function AgentChat() {
 
 	useLayoutEffect(() => {
 		const el = scrollContainerRef.current
-		if (!el) return
-		const distance = el.scrollHeight - el.scrollTop - el.clientHeight
-		wasNearBottomRef.current = distance <= NEAR_BOTTOM_PX
-	})
+		if (!el || !wasNearBottomRef.current) return
+		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+	}, [blocks])
 
-	useLayoutEffect(() => {
+	const onScroll = () => {
 		const el = scrollContainerRef.current
 		if (!el) return
-		if (wasNearBottomRef.current) {
-			messagesEndRef.current?.scrollIntoView({ block: "end" })
+		const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+		wasNearBottomRef.current = dist < NEAR_BOTTOM_PX
+	}
+
+	const sendPrompt = () => {
+		if (!activeSessionId || !draft.trim() || conn.status !== "open") return
+		const ok = send({
+			type: "send_prompt",
+			session_id: activeSessionId,
+			text: draft.trim(),
+		})
+		if (ok) {
+			setDraft(activeSessionId, "")
 		}
-	}, [blocks, pendingForActive])
+	}
 
-	useLayoutEffect(() => {
-		const el = scrollContainerRef.current
-		if (!el) return
-		el.scrollTop = el.scrollHeight
-		wasNearBottomRef.current = true
-	}, [activeSessionId])
+	const executeCommand = (name: string) => {
+		if (!activeSessionId) return
+		send({
+			type: "send_prompt",
+			session_id: activeSessionId,
+			text: `/${name}`,
+		})
+	}
 
-	const active = activeSessionId ? sessions[activeSessionId] : undefined
-	const statusDot =
-		conn.status === "open" ? "fill-emerald-500 text-emerald-500" :
-			conn.status === "connecting" ? "fill-amber-500 text-amber-500 animate-pulse" :
-				"fill-red-500 text-red-500"
-	const sessionStatusColor = (s?: string) =>
-		s === "Prompting" ? "text-amber-500" :
-			s === "Idle" ? "text-emerald-500" :
-				s === "Error" ? "text-red-500" :
-					"text-muted-foreground"
+	const createTerminal = (sid: string) => {
+		const s = sessions[sid]
+		if (!s) return
+		send({
+			type: "create_terminal",
+			session_id: sid,
+			cwd: s.project_path || "/",
+			cols: 120,
+			rows: 40,
+		})
+	}
+
+	const closeTerminal = (tid: string) => {
+		send({
+			type: "close_terminal",
+			terminal_id: tid,
+		})
+	}
+
+	const onTerminalInput = (tid: string, data: string) => {
+		send({
+			type: "terminal_input",
+			terminal_id: tid,
+			data,
+		})
+	}
+
+	const onTerminalResize = (tid: string, cols: number, rows: number) => {
+		send({
+			type: "terminal_resize",
+			terminal_id: tid,
+			cols,
+			rows,
+		})
+	}
 
 	return (
-		<div className="relative flex h-[calc(100dvh-49px)] overflow-hidden">
+		<div className="relative flex h-[calc(100dvh - 49px)] overflow-hidden">
 			{/* Mobile Overlay */}
-			{sidebarOpen && !isDesktop && (
+			{sidebarOpen && (
 				<div
 					className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm md:hidden"
 					onClick={() => setSidebarOpen(false)}
 				/>
 			)}
 
-			{/* Sidebar */}
-			<aside
-				className={cn(
-					"z-40 flex w-72 flex-col border-r border-border bg-background transition-transform duration-300 ease-in-out md:bg-muted/20",
-					"absolute inset-y-0 left-0 md:relative md:translate-x-0",
-					sidebarOpen ? "translate-x-0" : "-translate-x-full md:hidden"
-				)}
-			>
-				<div className="flex items-center justify-between px-4 py-3 border-b border-border">
-					<span className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground">
-						Sessions
-					</span>
-					<div className="flex items-center gap-2">
-						<Circle className={cn("size-2", statusDot)} aria-label={conn.status} />
-						<button
-							type="button"
-							onClick={spawn}
-							className="text-muted-foreground hover:text-foreground"
-							aria-label="Spawn session"
-							title="Spawn headless session"
-						>
-							<Plus className="size-4" />
-						</button>
-						<Link
-							href="/messages"
-							className="text-muted-foreground hover:text-foreground"
-							aria-label="Swarm messages"
-							title="Go to Swarm"
-						>
-							<Hash className="size-4" />
-						</Link>
-						<button
-							type="button"
-							onClick={() => setSidebarOpen(false)}
-							className="text-muted-foreground hover:text-foreground md:hidden"
-							aria-label="Close sidebar"
-						>
-							<X className="size-4" />
-						</button>
-					</div>
-				</div>
-				{instances.length > 1 && (
-					<div className="border-b border-border bg-muted/30 px-3 py-2">
-						<div className="flex flex-col gap-1">
-							{instances.map((inst) => {
-								const w = workers.find((w) => w.instance_id === inst.name)
-								const isSelected = activeInstance === inst.name
-								const isConnected = w?.connected ?? false
-								return (
-									<button
-										key={inst.name}
-										onClick={() => void selectInstance(inst.name)}
-										className={cn(
-											"flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] transition-colors",
-											isSelected
-												? "bg-primary text-primary-foreground shadow-sm"
-												: "text-muted-foreground hover:bg-muted hover:text-foreground",
-										)}
-									>
-										<div className="flex items-center gap-2 truncate">
-											<div
-												className={cn(
-													"size-1.5 rounded-full",
-													isConnected
-														? isSelected
-															? "bg-primary-foreground"
-															: "bg-emerald-500"
-														: "bg-muted-foreground/30",
-												)}
-											/>
-											<span className="truncate font-bold uppercase tracking-wider">
-												{inst.name}
-											</span>
-										</div>
-										{w && w.session_count > 0 && (
-											<span className={cn("text-[10px] opacity-70", isSelected ? "text-primary-foreground" : "text-muted-foreground")}>
-												{w.session_count}s
-											</span>
-										)}
-									</button>
-								)
-							})}
-						</div>
-					</div>
-				)}
-				{conn.error && (
-					<div className="border-b border-border px-4 py-2 text-[11px] text-red-500">
-						{conn.error}
-					</div>
-				)}
-				<ul className="flex-1 overflow-y-auto py-2">
-					{sessionList.length === 0 && (
-						<li className="px-4 py-3 text-xs text-muted-foreground italic">
-							No active sessions
-						</li>
-					)}
-					{sessionList.map((s) => {
-						const isActive = activeSessionId === s.acp_session_id
-						const projectName = (s.project_path || "").split("/").pop() ?? "(no path)"
-						const displayName = s.name || projectName
-						return (
-							<li key={s.acp_session_id} className="group/row relative">
-								<button
-									type="button"
-									onClick={() => setActiveSessionId(s.acp_session_id)}
-									className={cn(
-										"flex w-full items-start gap-2 px-4 py-2 text-left text-sm transition-colors",
-										isActive
-											? "bg-primary/10 text-primary"
-											: "text-foreground hover:bg-muted/40",
-									)}
-								>
-									<Bot className="size-3.5 shrink-0 mt-0.5" />
-									<div className="flex flex-col min-w-0 flex-1">
-										<span className="truncate text-sm font-medium">{displayName}</span>
-										<span className="truncate text-[10px] font-mono text-muted-foreground">
-											{s.acp_session_id.slice(0, 8)} · {s.agent_command ?? ""}
-										</span>
-										<span className={cn("text-[10px]", sessionStatusColor(s.status))}>
-											{s.status ?? "—"}
-										</span>
-									</div>
-								</button>
-							</li>
-						)
-					})}
-				</ul>
-			</aside>
+			<SessionSidebar
+				sessions={sessions}
+				activeSessionId={activeSessionId}
+				onSelectSession={setActiveSessionId}
+				onSpawn={() => setDraft("spawn", "open")} // Temp hack to show spawn dialog
+				onClose={() => setSidebarOpen(false)}
+				conn={conn}
+				workers={workers}
+				instances={instances}
+				activeInstance={activeInstance}
+				onSelectInstance={selectInstance}
+				sidebarOpen={sidebarOpen}
+			/>
 
 			{/* Thread */}
 			<section className="flex min-w-0 flex-1 flex-col">
@@ -884,738 +201,218 @@ export function AgentChat() {
 								<Menu className={cn("size-4 transition-transform", !sidebarOpen && "rotate-90")} />
 							</button>
 							<Bot className="size-4 shrink-0 text-muted-foreground" />
-							<div className="flex min-w-0 flex-1 flex-col cursor-pointer group/title" onClick={renameSession} title="Click to rename session">
+							<div className="flex flex-1 flex-col min-w-0">
 								<div className="flex items-center gap-1.5 min-w-0">
 									<span className="truncate text-sm font-medium">
 										{active?.name || active?.project_path || activeSessionId}
 									</span>
-									<Plus className="size-3 text-muted-foreground/0 group-hover/title:text-muted-foreground transition-colors rotate-45" />
 								</div>
-								<span className="truncate text-[10px] font-mono text-muted-foreground">
-									{activeSessionId.slice(0, 8)} · {active?.agent_command ?? ""}
-									<span className={cn("ml-2", sessionStatusColor(active?.status))}>
-										{active?.status ?? ""}
-									</span>
+								<span className="truncate font-mono text-[10px] text-muted-foreground/60">
+									{active?.agent_command} · {active?.project_path}
 								</span>
 							</div>
-							<button
-								type="button"
-								onClick={bindTelegramThread}
-								className={cn(
-									"flex size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
-									active?.thread_id != null && active.thread_id > 0
-										? "text-emerald-500"
-										: "text-muted-foreground",
-								)}
-								title={
-									active?.thread_id != null && active.thread_id > 0
-										? `Bound to Telegram thread ${active.thread_id} (click to rebind)`
-										: "Bind to Telegram thread"
-								}
-								aria-label="Bind Telegram thread"
-							>
-								<Link2 className="size-4" />
-							</button>
 
-							{(active?.status === "Prompting" || active?.status === "Working") && (
+							<div className="flex items-center gap-1">
 								<button
 									type="button"
-									onClick={cancelActive}
-									className="flex size-8 items-center justify-center rounded-md text-red-500 hover:bg-red-500/10"
-									title="Stop Agent"
-									aria-label="Stop Agent"
+									onClick={() => {
+										const current = viewMode[activeSessionId] ?? "chat"
+										setViewMode({ ...viewMode, [activeSessionId]: current === "chat" ? "terminal" : "chat" })
+									}}
+									className={cn(
+										"flex size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
+										viewMode[activeSessionId] === "terminal" ? "text-primary" : "text-muted-foreground"
+									)}
+									title="Switch View"
 								>
-									<Square className="size-3.5 fill-current" />
+									{viewMode[activeSessionId] === "terminal" ? (
+										<MessageSquare className="size-4" />
+									) : (
+										<TerminalIcon className="size-4" />
+									)}
 								</button>
-							)}
 
-							<button
-								type="button"
-								onClick={endActive}
-								className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
-								title="End Session"
-								aria-label="End Session"
-							>
-								<X className="size-4" />
-							</button>
+								<button
+									type="button"
+									onClick={() => createTerminal(activeSessionId)}
+									className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+									title="New Terminal"
+								>
+									<Plus className="size-4" />
+								</button>
+							</div>
 						</header>
 
-						{pendingForActive.length > 0 && (
-							<div className="border-b border-border bg-amber-500/10 px-4 py-3 flex flex-col gap-2">
-								{pendingForActive.map((p) => {
-									const reqId = String(p.payload["request_id"] ?? "")
-									const tool = String(p.payload["tool"] ?? "?")
-									return (
-										<div key={reqId} className="text-xs flex items-center gap-2 flex-wrap">
-											<span>Permission requested for <code className="rounded bg-background/60 px-1 py-0.5 font-mono">{tool}</code></span>
-											<button onClick={() => respondPermission(reqId, "allow_once")} className="rounded-md border border-border px-2 py-0.5 text-[11px] hover:bg-emerald-500/10 hover:border-emerald-500/40">allow once</button>
-											<button onClick={() => respondPermission(reqId, "allow_always")} className="rounded-md border border-border px-2 py-0.5 text-[11px] hover:bg-emerald-500/10 hover:border-emerald-500/40">allow always</button>
-											<button onClick={() => respondPermission(reqId, "deny")} className="rounded-md border border-border px-2 py-0.5 text-[11px] hover:bg-red-500/10 hover:border-red-500/40">deny</button>
-											<button onClick={() => respondPermission(reqId, "deny_always")} className="rounded-md border border-border px-2 py-0.5 text-[11px] hover:bg-red-500/10 hover:border-red-500/40">deny always</button>
-										</div>
-									)
-								})}
-							</div>
-						)}
-
-						<div
-							ref={scrollContainerRef}
-							className="flex-1 overflow-y-auto px-3 py-3 md:px-6 md:py-4"
-						>
-							{blocks.length === 0 && (
-								<div className="text-xs text-muted-foreground italic">No events yet</div>
-							)}
-							{blocks.map((b) => (
-								<BlockView key={b.key} block={b} sessionAgent={active?.agent_command} />
-							))}
-							<div ref={messagesEndRef} />
-						</div>
-
-						{active?.available_commands && active.available_commands.length > 0 && (
-							<div className="flex items-center gap-2 px-4 py-2.5 border-t border-border/40 bg-muted/5 overflow-x-auto no-scrollbar scroll-smooth">
-								<span className="text-[9px] font-bold uppercase tracking-[0.15em] text-muted-foreground/60 whitespace-nowrap mr-2">
-									Commands
-								</span>
-								{active.available_commands.map((cmd) => (
-									<button
-										key={cmd.name}
-										type="button"
-										onClick={() => executeCommand(cmd.name)}
-										className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
-										title={cmd.description}
-									>
-										<Plus className="size-3 opacity-50" />
-										{cmd.name}
-									</button>
+						{activeSessionId && sessionTerminals[activeSessionId] && sessionTerminals[activeSessionId].length > 0 && (
+							<div className="flex items-center gap-1 border-b border-border bg-muted/20 px-4 py-1.5 overflow-x-auto no-scrollbar">
+								<button
+									onClick={() => setViewMode({ ...viewMode, [activeSessionId]: "chat" })}
+									className={cn(
+										"flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors",
+										(viewMode[activeSessionId] ?? "chat") === "chat"
+											? "bg-background text-primary shadow-sm"
+											: "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+									)}
+								>
+									<MessageSquare className="size-3" />
+									Chat
+								</button>
+								{sessionTerminals[activeSessionId].map((tid, idx) => (
+									<div key={tid} className="flex items-center gap-0.5">
+										<button
+											onClick={() => {
+												setActiveTerminalId({ ...activeTerminalId, [activeSessionId]: tid })
+												setViewMode({ ...viewMode, [activeSessionId]: "terminal" })
+											}}
+											className={cn(
+												"flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors",
+												viewMode[activeSessionId] === "terminal" && activeTerminalId[activeSessionId] === tid
+													? "bg-background text-primary shadow-sm"
+													: "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+											)}
+										>
+											<TerminalIcon className="size-3" />
+											Term {idx + 1}
+										</button>
+										<button
+											onClick={() => closeTerminal(tid)}
+											className="flex size-5 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-500/10 hover:text-red-500"
+										>
+											<X className="size-2.5" />
+										</button>
+									</div>
 								))}
 							</div>
 						)}
 
-						<form
-							className="border-t border-border p-2 md:p-4"
-							onSubmit={(e) => {
-								e.preventDefault()
-								sendPrompt()
-							}}
-						>
-							<div className="flex items-end gap-2 rounded-lg border border-input bg-background p-2">
-								<textarea
-									value={draft}
-									onChange={(e) => setDraft(e.target.value)}
-									onKeyDown={(e) => {
-										if (e.key === "Enter" && !e.shiftKey) {
-											e.preventDefault()
-											sendPrompt()
-										}
-									}}
-									onClick={() => { console.log(activeSession) }}
-									placeholder={`Message ${active?.name || activeSessionId.slice(0, 8)}…`}
-									rows={1}
-									className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
+						{(viewMode[activeSessionId] === "terminal" && activeTerminalId[activeSessionId]) ? (
+							<div className="flex-1 p-4 bg-zinc-950 overflow-hidden">
+								<TerminalView
+									terminalId={activeTerminalId[activeSessionId]!}
+									onInput={(data) => onTerminalInput(activeTerminalId[activeSessionId]!, data)}
+									onResize={(cols, rows) => onTerminalResize(activeTerminalId[activeSessionId]!, cols, rows)}
+									output={terminalEvents[activeTerminalId[activeSessionId]!]?.output}
+									snapshot={terminalEvents[activeTerminalId[activeSessionId]!]?.snapshot}
 								/>
-								<div className="flex items-center gap-1.5 mb-0.5">
-									<WhisperTranscribe
-										onTranscription={(transcription) => {
-											setDraft(draft ? `${draft} ${transcription}` : transcription)
-										}}
-									/>
-									<button
-										type="submit"
-										disabled={!draft.trim() || conn.status !== "open"}
-										className={cn(
-											"flex size-9 items-center justify-center rounded-md transition-colors",
-											draft.trim() && conn.status === "open"
-												? "bg-primary text-primary-foreground hover:bg-primary/90"
-												: "bg-muted text-muted-foreground",
-										)}
-										aria-label="Send"
-									>
-										{conn.status !== "open" ? (
-											<Loader2 className="size-4 animate-spin" />
-										) : (
-											<Send className="size-4" />
-										)}
-									</button>
-								</div>
 							</div>
-						</form>
+						) : (
+							<>
+								<div
+									ref={scrollContainerRef}
+									onScroll={onScroll}
+									className="flex-1 overflow-y-auto px-3 py-3 md:px-6 md:py-4 no-scrollbar"
+								>
+									{blocks.length === 0 && (
+										<div className="text-xs text-muted-foreground italic">No events yet</div>
+									)}
+									{blocks.map((b) => (
+										<BlockView key={b.key} block={b} sessionAgent={active?.agent_command} />
+									))}
+									<div ref={messagesEndRef} />
+								</div>
+
+								{pendingForActive.length > 0 && (
+									<div className="border-t border-border bg-amber-500/5 p-4">
+										{/* Permission requests UI - kept minimal for now */}
+										<div className="text-xs font-bold text-amber-600 uppercase tracking-wider mb-2 flex items-center gap-2">
+											<Circle className="size-2 fill-amber-500 animate-pulse" />
+											Pending Permissions
+										</div>
+										<div className="space-y-2">
+											{pendingForActive.map((p) => (
+												<div key={p.localSeq} className="text-sm p-3 bg-card border border-border rounded-md shadow-sm">
+													{JSON.stringify(p.payload)}
+												</div>
+											))}
+										</div>
+									</div>
+								)}
+
+								{active?.available_commands && active.available_commands.length > 0 && (
+									<div className="flex items-center gap-2 px-4 py-2.5 border-t border-border/40 bg-muted/5 overflow-x-auto no-scrollbar scroll-smooth">
+										<span className="text-[9px] font-bold uppercase tracking-[0.15em] text-muted-foreground/60 whitespace-nowrap mr-2">
+											Commands
+										</span>
+										{active.available_commands.map((cmd) => (
+											<button
+												key={cmd.name}
+												type="button"
+												onClick={() => executeCommand(cmd.name)}
+												className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-background px-3 py-1 text-[11px] font-medium transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary text-muted-foreground whitespace-nowrap shadow-sm active:scale-95"
+												title={cmd.description}
+											>
+												<Plus className="size-3 opacity-50" />
+												{cmd.name}
+											</button>
+										))}
+									</div>
+								)}
+
+								<form
+									className="border-t border-border p-2 md:p-4"
+									onSubmit={(e) => {
+										e.preventDefault()
+										sendPrompt()
+									}}
+								>
+									<div className="flex items-end gap-2 rounded-lg border border-input bg-background p-2 focus-within:border-primary/50 transition-colors">
+										<textarea
+											id="agent-message-input"
+											name="message"
+											value={draft}
+											onChange={(e) => setDraft(activeSessionId, e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key === "Enter" && !e.shiftKey) {
+													e.preventDefault()
+													sendPrompt()
+												}
+											}}
+											placeholder={`Message ${active?.name || activeSessionId.slice(0, 8)}…`}
+											rows={1}
+											className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
+										/>
+										<div className="flex items-center gap-1.5 mb-0.5">
+											<WhisperTranscribe
+												onTranscription={(transcription) => {
+													setDraft(activeSessionId, draft ? `${draft} ${transcription}` : transcription)
+												}}
+											/>
+											<button
+												type="submit"
+												disabled={!draft.trim() || conn.status !== "open"}
+												className={cn(
+													"flex size-9 items-center justify-center rounded-md transition-colors",
+													draft.trim() && conn.status === "open"
+														? "bg-primary text-primary-foreground hover:bg-primary/90"
+														: "bg-muted text-muted-foreground",
+												)}
+												aria-label="Send"
+											>
+												{conn.status !== "open" ? (
+													<Loader2 className="size-4 animate-spin" />
+												) : (
+													<Send className="size-4" />
+												)}
+											</button>
+										</div>
+									</div>
+								</form>
+							</>
+						)}
 					</>
 				)}
 			</section>
 
-			{spawnDialog && (
-				<div
-					className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm"
-					onClick={(e) => {
-						if (e.target === e.currentTarget) setSpawnDialog(null)
+			{drafts["spawn"] === "open" && (
+				<SpawnDialog
+					projects={projects}
+					onSpawn={(path, cmd) => {
+						send({ type: "spawn", project_path: path, agent_command: cmd || undefined })
+						setDraft("spawn", "")
 					}}
-				>
-					<div className="w-full max-w-md border border-border bg-background p-5">
-						<div className="flex items-center justify-between mb-4">
-							<h3 className="font-mono text-xs font-bold uppercase tracking-[2px]">
-								Spawn session
-							</h3>
-							<button
-								type="button"
-								className="text-muted-foreground hover:text-foreground"
-								onClick={() => setSpawnDialog(null)}
-								aria-label="Close"
-							>
-								<X className="size-4" />
-							</button>
-						</div>
-
-						<div className="mb-5 flex items-center justify-between rounded border border-border/50 bg-muted/40 px-2 py-1.5 text-[10px]">
-							<span className="font-bold uppercase tracking-wider text-muted-foreground">
-								Target Instance
-							</span>
-							<span className="font-mono font-bold text-primary">
-								{activeInstance || "—"}
-							</span>
-						</div>
-
-						<div className="mb-3 relative">
-							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
-								project_path
-							</label>
-							{(() => {
-								const q = spawnDialog.projectPath.trim().toLowerCase()
-								const filtered = q
-									? projects.filter(
-										(p) =>
-											p.name.toLowerCase().includes(q) ||
-											p.path.toLowerCase().includes(q),
-									)
-									: projects
-								const max = filtered.length
-								return (
-									<>
-										<input
-											type="text"
-											value={spawnDialog.projectPath}
-											onChange={(e) => {
-												setSpawnDialog((d) =>
-													d ? { ...d, projectPath: e.target.value } : d,
-												)
-												setProjectPickerOpen(true)
-												setProjectPickerHighlight(0)
-											}}
-											onFocus={() => {
-												if (projects.length > 0) setProjectPickerOpen(true)
-											}}
-											onBlur={() => {
-												// Delay so click on dropdown registers first.
-												window.setTimeout(() => setProjectPickerOpen(false), 120)
-											}}
-											onKeyDown={(e) => {
-												if (!projectPickerOpen || max === 0) return
-												if (e.key === "ArrowDown") {
-													e.preventDefault()
-													setProjectPickerHighlight((i) => (i + 1) % max)
-												} else if (e.key === "ArrowUp") {
-													e.preventDefault()
-													setProjectPickerHighlight((i) => (i - 1 + max) % max)
-												} else if (e.key === "Enter") {
-													const pick = filtered[projectPickerHighlight]
-													if (pick) {
-														e.preventDefault()
-														setSpawnDialog((d) =>
-															d ? { ...d, projectPath: pick.path } : d,
-														)
-														setProjectPickerOpen(false)
-													}
-												} else if (e.key === "Escape") {
-													setProjectPickerOpen(false)
-												}
-											}}
-											placeholder="/abs/path or filter projects…"
-											className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
-											autoComplete="off"
-										/>
-										{projectPickerOpen && filtered.length > 0 && (
-											<ul
-												className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto border border-border bg-background shadow-lg"
-												role="listbox"
-											>
-												{filtered.map((p, i) => (
-													<li
-														key={p.path}
-														role="option"
-														aria-selected={i === projectPickerHighlight}
-														onMouseDown={(e) => {
-															e.preventDefault()
-															setSpawnDialog((d) =>
-																d ? { ...d, projectPath: p.path } : d,
-															)
-															setProjectPickerOpen(false)
-														}}
-														onMouseEnter={() => setProjectPickerHighlight(i)}
-														className={cn(
-															"cursor-pointer px-2 py-1.5 font-mono text-xs",
-															i === projectPickerHighlight
-																? "bg-primary/10 text-primary"
-																: "hover:bg-muted/40",
-														)}
-													>
-														<div className="truncate font-medium">{p.name}</div>
-														<div className="truncate text-[10px] text-muted-foreground">
-															{p.path}
-														</div>
-													</li>
-												))}
-											</ul>
-										)}
-										{projects.length === 0 && (
-											<p className="mt-1 font-mono text-[10px] text-muted-foreground">
-												No project templates from the daemon. Enter a path manually.
-											</p>
-										)}
-									</>
-								)
-							})()}
-						</div>
-
-						<div className="mb-4">
-							<label className="block font-mono text-[10px] font-bold uppercase tracking-[1.5px] text-muted-foreground mb-1">
-								agent_command (optional)
-							</label>
-							<input
-								type="text"
-								value={spawnDialog.agentCommand}
-								onChange={(e) =>
-									setSpawnDialog((d) =>
-										d ? { ...d, agentCommand: e.target.value } : d,
-									)
-								}
-								placeholder="claude / gemini / amp / …"
-								className="w-full font-mono text-xs bg-background border border-border px-2 py-2"
-							/>
-						</div>
-
-						<div className="flex justify-end gap-2">
-							<button
-								type="button"
-								onClick={() => setSpawnDialog(null)}
-								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-border hover:bg-card"
-							>
-								Cancel
-							</button>
-							<button
-								type="button"
-								onClick={submitSpawn}
-								disabled={!spawnDialog.projectPath.trim()}
-								className="font-mono text-[10px] uppercase tracking-[1.5px] px-3 py-2 border border-primary bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-40"
-							>
-								Spawn
-							</button>
-						</div>
-					</div>
-				</div>
+					onCancel={() => setDraft("spawn", "")}
+				/>
 			)}
 		</div>
 	)
 }
-
-// --------------------------------------------------------------------------
-// Event → Block transform + rendering
-// --------------------------------------------------------------------------
-
-type Block =
-	| { key: string; kind: "user"; text: string; ts: number }
-	| { key: string; kind: "assistant"; text: string; ts: number }
-	| { key: string; kind: "thought"; text: string; ts: number }
-	| {
-		key: string
-		kind: "tool"
-		toolId: string
-		title: string
-		toolKind?: string
-		status: string
-		content: string
-		locations?: string[]
-		ts: number
-	}
-	| { key: string; kind: "plan"; entries: { title: string; status?: string; depth: number }[]; ts: number }
-	| { key: string; kind: "status"; status: string; ts: number }
-	| { key: string; kind: "error"; text: string; ts: number }
-	| { key: string; kind: "raw"; eventKind: string; payload: unknown; ts: number }
-
-function extractText(content: unknown): string {
-	if (!content) return ""
-	if (typeof content === "string") return content
-	if (Array.isArray(content)) {
-		return content
-			.map((c) => {
-				if (!c || typeof c !== "object") return ""
-				const o = c as { type?: string; text?: string; content?: unknown }
-				if (o.type === "text" && typeof o.text === "string") return o.text
-				if (o.type === "content" && o.content) return extractText(o.content)
-				return ""
-			})
-			.join("")
-	}
-	if (typeof content === "object") {
-		const o = content as { type?: string; text?: string; content?: unknown }
-		if (o.type === "text" && typeof o.text === "string") return o.text
-		if (o.content) return extractText(o.content)
-	}
-	return ""
-}
-
-function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
-	const blocks: Block[] = []
-	const toolIndex: Record<string, number> = {}
-	let assistantBuf: { idx: number } | null = null
-	let thoughtBuf: { idx: number } | null = null
-
-	for (const ev of events) {
-		const k = ev.kind.toLowerCase()
-		const ts = ev.receivedAt
-		const payload = ev.payload as Record<string, unknown>
-
-		if (k === "user_prompt" || k === "userprompt") {
-			assistantBuf = null
-			thoughtBuf = null
-			const text = (typeof payload.text === "string" && payload.text) || extractText(payload.content)
-			blocks.push({ key: `u-${ev.localSeq}`, kind: "user", text, ts })
-			continue
-		}
-
-		if (k === "agent_update" || k === "agentupdate") {
-			const inner = (payload.event as Record<string, unknown>) ?? payload
-			const suRaw = inner.sessionUpdate
-			// Per spec: sessionUpdate is an object { type: "<variant>", ...fields }.
-			// Tolerate the legacy flat shape too (string variant + sibling fields).
-			const su: Record<string, unknown> =
-				suRaw && typeof suRaw === "object"
-					? (suRaw as Record<string, unknown>)
-					: (inner as Record<string, unknown>)
-			const variant = typeof suRaw === "string" ? suRaw : (su.type as string) ?? ""
-
-			if (variant === "working" || variant === "idle" || variant === "ready") {
-				// Collapse consecutive status updates: replace last status block.
-				const last = blocks[blocks.length - 1]
-				if (last && last.kind === "status") {
-					last.status = variant
-					last.ts = ts
-				} else {
-					blocks.push({ key: `s-${ev.localSeq}`, kind: "status", status: variant, ts })
-				}
-				assistantBuf = null
-				thoughtBuf = null
-				continue
-			}
-
-			if (variant === "error") {
-				const text =
-					(typeof su.content === "string" && su.content) ||
-					extractText(su.content) ||
-					(typeof su.message === "string" ? (su.message as string) : "") ||
-					"agent error"
-				blocks.push({ key: `e-${ev.localSeq}`, kind: "error", text, ts })
-				assistantBuf = null
-				thoughtBuf = null
-				continue
-			}
-
-			if (variant === "agent_message_chunk") {
-				const text = extractText(su.content)
-				if (assistantBuf) {
-					const b = blocks[assistantBuf.idx]
-					if (b.kind === "assistant") b.text += text
-				} else {
-					blocks.push({ key: `a-${ev.localSeq}`, kind: "assistant", text, ts })
-					assistantBuf = { idx: blocks.length - 1 }
-				}
-				thoughtBuf = null
-				continue
-			}
-
-			if (variant === "agent_thought_chunk") {
-				const text = extractText(su.content)
-				if (thoughtBuf) {
-					const b = blocks[thoughtBuf.idx]
-					if (b.kind === "thought") b.text += text
-				} else {
-					blocks.push({ key: `t-${ev.localSeq}`, kind: "thought", text, ts })
-					thoughtBuf = { idx: blocks.length - 1 }
-				}
-				assistantBuf = null
-				continue
-			}
-
-			if (variant === "tool_call" || variant === "tool_call_update") {
-				// tool_call_update wraps mutable fields under `.fields`. Missing fields = unchanged.
-				const fields: Record<string, unknown> =
-					variant === "tool_call_update" && su.fields && typeof su.fields === "object"
-						? (su.fields as Record<string, unknown>)
-						: su
-				const toolId = (su.toolCallId as string) ?? (fields.toolCallId as string) ?? `unknown-${ev.localSeq}`
-				const title = (fields.title as string) ?? undefined
-				const status = (fields.status as string) ?? undefined
-				const content = fields.content !== undefined ? extractText(fields.content) : undefined
-				const toolKind = (fields.kind as string) ?? undefined
-				const locations = Array.isArray(fields.locations)
-					? (fields.locations as unknown[])
-						.map((l) => {
-							if (typeof l === "string") return l
-							if (l && typeof l === "object") {
-								const o = l as { path?: string; line?: number }
-								return o.path ? (o.line ? `${o.path}:${o.line}` : o.path) : ""
-							}
-							return ""
-						})
-						.filter(Boolean)
-					: undefined
-
-				if (toolIndex[toolId] !== undefined) {
-					const b = blocks[toolIndex[toolId]]
-					if (b.kind === "tool") {
-						if (title) b.title = title
-						if (status) b.status = status
-						if (toolKind) b.toolKind = toolKind
-						if (content) b.content = content
-						if (locations && locations.length > 0) b.locations = locations
-					}
-				} else {
-					blocks.push({
-						key: `tc-${toolId}`,
-						kind: "tool",
-						toolId,
-						title: title ?? toolId,
-						toolKind,
-						status: status ?? "pending",
-						content: content ?? "",
-						locations,
-						ts,
-					})
-					toolIndex[toolId] = blocks.length - 1
-				}
-				assistantBuf = null
-				thoughtBuf = null
-				continue
-			}
-
-			if (variant === "plan") {
-				const rawEntries = Array.isArray(su.entries) ? (su.entries as Record<string, unknown>[]) : []
-				const entries = rawEntries.map((e) => ({
-					title: (e.title as string) ?? (e.content as string) ?? "",
-					status: e.status as string | undefined,
-					depth: typeof e.depth === "number" ? (e.depth as number) : 0,
-				}))
-				blocks.push({ key: `p-${ev.localSeq}`, kind: "plan", entries, ts })
-				assistantBuf = null
-				thoughtBuf = null
-				continue
-			}
-
-			blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: `agent_update/${variant}`, payload, ts })
-			assistantBuf = null
-			thoughtBuf = null
-			continue
-		}
-
-		if (
-			k === "snapshot" ||
-			k === "state_snapshot" ||
-			k === "commands_snapshot" ||
-			k === "session_started" || k === "sessionstarted" ||
-			k === "session_switched" || k === "sessionswitched" ||
-			k === "session_ended" || k === "sessionended" ||
-			k === "permission_request" || k === "permissionrequest"
-		) {
-			// Lifecycle / control events — surfaced elsewhere in the UI; skip in the chat log.
-			continue
-		}
-
-		blocks.push({ key: `r-${ev.localSeq}`, kind: "raw", eventKind: ev.kind, payload, ts })
-		assistantBuf = null
-		thoughtBuf = null
-	}
-
-	// Reference stability for previous blocks that haven't changed.
-	for (let i = 0; i < Math.min(blocks.length, prevBlocks.length); i++) {
-		const nb = blocks[i]
-		const ob = prevBlocks[i]
-		if (nb.key === ob.key && nb.kind === ob.kind) {
-			let identical = false
-			if (nb.kind === "user" && ob.kind === "user") identical = nb.text === ob.text
-			else if (nb.kind === "assistant" && ob.kind === "assistant") identical = nb.text === ob.text
-			else if (nb.kind === "thought" && ob.kind === "thought") identical = nb.text === ob.text
-			else if (nb.kind === "status" && ob.kind === "status") identical = nb.status === ob.status
-			else if (nb.kind === "tool" && ob.kind === "tool") {
-				identical = nb.status === ob.status && nb.content === ob.content && nb.title === ob.title
-			} else if (nb.kind === "plan" && ob.kind === "plan") {
-				// simple deep check for plan entries
-				identical = JSON.stringify(nb.entries) === JSON.stringify(ob.entries)
-			} else if (nb.kind === "error" && ob.kind === "error") identical = nb.text === ob.text
-			else if (nb.kind === "raw" && ob.kind === "raw") {
-				identical = nb.eventKind === ob.eventKind && JSON.stringify(nb.payload) === JSON.stringify(ob.payload)
-			}
-
-			if (identical) {
-				blocks[i] = ob
-			}
-		}
-	}
-
-	return blocks
-}
-
-function timeOf(ts: number): string {
-	return new Date(ts).toLocaleTimeString()
-}
-
-const BlockView = memo(function BlockView({ block, sessionAgent }: { block: Block; sessionAgent?: string }) {
-	if (block.kind === "user") {
-		return (
-			<div className="mb-3 flex gap-3">
-				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-secondary text-secondary-foreground">
-					<User2 className="size-4" />
-				</div>
-				<div className="min-w-0 flex-1">
-					<div className="flex items-baseline gap-2">
-						<span className="font-semibold text-sm">you</span>
-						<span className="text-[10px] uppercase tracking-wide text-muted-foreground">human</span>
-						<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
-					</div>
-					<div className="break-words text-sm text-foreground">
-						<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
-					</div>
-				</div>
-			</div>
-		)
-	}
-	if (block.kind === "assistant") {
-		return (
-			<div className="mb-3 flex gap-3">
-				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-					<Bot className="size-4" />
-				</div>
-				<div className="min-w-0 flex-1">
-					<div className="flex items-baseline gap-2">
-						<span className="font-semibold text-sm">{sessionAgent ?? "agent"}</span>
-						<span className="text-[10px] uppercase tracking-wide text-muted-foreground">agent</span>
-						<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
-					</div>
-					<div className="break-words text-sm text-foreground">
-						{block.text ? (
-							<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
-						) : (
-							<span className="text-muted-foreground italic">…</span>
-						)}
-					</div>
-				</div>
-			</div>
-		)
-	}
-	if (block.kind === "thought") {
-		return (
-			<div className="mb-3 flex gap-3">
-				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-					<Bot className="size-4" />
-				</div>
-				<div className="min-w-0 flex-1">
-					<details>
-						<summary className="cursor-pointer select-none flex items-baseline gap-2">
-							<span className="font-semibold text-sm">{sessionAgent ?? "agent"}</span>
-							<span className="text-[10px] uppercase tracking-wide text-muted-foreground">thought</span>
-							<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
-						</summary>
-						<div className="mt-1 italic text-sm text-muted-foreground">
-							<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
-						</div>
-					</details>
-				</div>
-			</div>
-		)
-	}
-	if (block.kind === "tool") {
-		const statusColor =
-			block.status === "completed" ? "text-emerald-500" :
-				block.status === "failed" || block.status === "error" ? "text-red-500" :
-					block.status === "in_progress" ? "text-amber-500" :
-						"text-muted-foreground"
-		const statusBg =
-			block.status === "completed" ? "bg-emerald-500/10 border-emerald-500/30" :
-				block.status === "failed" || block.status === "error" ? "bg-red-500/10 border-red-500/30" :
-					block.status === "in_progress" ? "bg-amber-500/10 border-amber-500/30" :
-						"bg-muted/40 border-border"
-		return (
-			<div className="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2.5">
-				<div className="flex items-center gap-2 flex-wrap">
-					<span className="rounded bg-background px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground border border-border">
-						{block.toolKind ?? "tool"}
-					</span>
-					<span className="font-medium text-sm truncate">{block.title}</span>
-					<span className={cn("ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium border", statusBg, statusColor)}>
-						{block.status}
-					</span>
-				</div>
-				{block.locations && block.locations.length > 0 && (
-					<div className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
-						{block.locations.join(" · ")}
-					</div>
-				)}
-				{block.content && (
-					<pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-zinc-100 bg-zinc-900 border border-border rounded p-2 max-h-64 overflow-auto">
-						{block.content}
-					</pre>
-				)}
-			</div>
-		)
-	}
-	if (block.kind === "plan") {
-		return (
-			<div className="mb-3 rounded-md border border-border bg-muted/20 px-3 py-2.5 text-xs">
-				<div className="font-semibold mb-1.5 text-sm">Plan</div>
-				<ul className="space-y-1">
-					{block.entries.map((e, i) => (
-						<li
-							key={i}
-							style={{ paddingLeft: `${(e.depth ?? 0) * 16}px` }}
-							className={cn(
-								"flex items-start gap-2",
-								e.status === "completed" && "line-through text-muted-foreground",
-							)}
-						>
-							<span className="font-mono text-[10px] text-muted-foreground w-20 flex-shrink-0">{e.status ?? "pending"}</span>
-							<span>{e.title}</span>
-						</li>
-					))}
-				</ul>
-			</div>
-		)
-	}
-	if (block.kind === "status") {
-		return (
-			<div className="mb-3 flex items-center gap-2 text-[11px] text-muted-foreground">
-				<span className={cn(
-					"inline-block size-1.5 rounded-full",
-					block.status === "working" ? "bg-amber-500 animate-pulse" :
-						block.status === "idle" || block.status === "ready" ? "bg-emerald-500" :
-							"bg-muted-foreground",
-				)} />
-				<span className="font-mono uppercase tracking-wide">{block.status}</span>
-				<span>· {timeOf(block.ts)}</span>
-			</div>
-		)
-	}
-	if (block.kind === "error") {
-		return (
-			<div className="mb-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2.5">
-				<div className="flex items-center gap-2 mb-1">
-					<span className="font-semibold text-sm text-red-600 dark:text-red-400">Error</span>
-					<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
-				</div>
-				<div className="text-sm text-foreground whitespace-pre-wrap break-words">{block.text}</div>
-			</div>
-		)
-	}
-	return (
-		<details className="mb-3 text-xs text-muted-foreground border-l-2 border-border pl-2">
-			<summary className="cursor-pointer">{block.eventKind} · {timeOf(block.ts)}</summary>
-			<pre className="whitespace-pre-wrap break-words mt-1 text-[10px]">{JSON.stringify(block.payload, null, 2)}</pre>
-		</details>
-	)
-})

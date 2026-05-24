@@ -57,15 +57,19 @@ pub async fn ingest_url(
     };
     tracing::debug!(content_len = html_or_md.content.len(), is_markdown = html_or_md.is_markdown, "fetched content");
     
-    // 2. HTML to Markdown (skip if already markdown)
+    // 2. HTML Cleaning and Markdown Conversion
     let is_markdown = html_or_md.is_markdown;
     let content = html_or_md.content;
     
     let md = if is_markdown {
-        tracing::debug!("content is already markdown, skipping html2md");
+        tracing::debug!("content is already markdown, skipping cleaning");
         content
     } else {
-        tokio::task::spawn_blocking(move || html2md::parse_html(&content))
+        // Pre-clean HTML before conversion
+        let cleaned_html = smart_clean_html(&content);
+        tracing::debug!(cleaned_len = cleaned_html.len(), "pre-cleaned HTML ready");
+
+        tokio::task::spawn_blocking(move || html2md::parse_html(&cleaned_html))
             .await
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("html2md join error: {e}")))?
     };
@@ -129,8 +133,33 @@ pub(crate) async fn fetch_with_reqwest(state: &AppState, url: &str) -> Result<Fe
 }
 
 pub(crate) async fn fetch_with_cdp(state: &AppState, url: &str) -> Result<FetchResult, ApiError> {
-    let cdp_url = state.openai_chat.cdp_url.as_ref()
-        .ok_or_else(|| ApiError::BadRequest("RAG_CDP_URL not configured".to_owned()))?;
+    let mut cdp_url = state.openai_chat.cdp_url.as_ref()
+        .ok_or_else(|| ApiError::BadRequest("RAG_CDP_URL not configured".to_owned()))?
+        .clone();
+
+    // 0. Automatic discovery if URL is HTTP
+    if cdp_url.starts_with("http") {
+        tracing::debug!(cdp_url = %cdp_url, "discovering WebSocket URL from base HTTP URL");
+        let version_url = format!("{}/json/version", cdp_url.trim_end_matches('/'));
+        let resp = state.http_client.get(&version_url).send().await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP discovery failed (request): {e}")))?;
+        
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::Internal(anyhow::anyhow!("CDP discovery failed (status {}): {}. Body: {}", status, version_url, body)));
+        }
+
+        let body: Value = resp.json().await
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP discovery failed (JSON): {e}")))?;
+        
+        if let Some(ws_url) = body["webSocketDebuggerUrl"].as_str() {
+            tracing::debug!(discovered_url = %ws_url, "found WebSocket debugger URL");
+            cdp_url = ws_url.to_owned();
+        } else {
+            return Err(ApiError::Internal(anyhow::anyhow!("CDP discovery failed: webSocketDebuggerUrl not found in {}", version_url)));
+        }
+    }
 
     tracing::debug!(cdp_url = %cdp_url, "connecting to remote CDP");
     
@@ -159,17 +188,85 @@ pub(crate) async fn fetch_with_cdp(state: &AppState, url: &str) -> Result<FetchR
     Ok(FetchResult { content, is_markdown: false })
 }
 
+/// Strip boilerplate (nav, footer, etc) and noise (script, style) from HTML.
+fn smart_clean_html(html: &str) -> String {
+    use scraper::{Html, Selector};
+
+    let document = Html::parse_document(html);
+    
+    // Find the most likely content root
+    let root_selectors = ["main", "article", "body"];
+    let mut best_root = None;
+    for s in root_selectors {
+        if let Ok(selector) = Selector::parse(s) {
+            if let Some(el) = document.select(&selector).next() {
+                best_root = Some(el);
+                break;
+            }
+        }
+    }
+
+    let root = match best_root {
+        Some(r) => r,
+        None => return html.to_owned(),
+    };
+
+    let mut output = String::new();
+    walk_and_filter(&root, &mut output);
+    output
+}
+
+fn walk_and_filter(node: &scraper::ElementRef, output: &mut String) {
+    let name = node.value().name();
+    
+    // Tags to drop entirely (including subtree)
+    let blacklist = [
+        "script", "style", "header", "nav", "footer", "aside", 
+        "iframe", "noscript", "svg", "form", "button", "canvas"
+    ];
+    
+    if blacklist.contains(&name) {
+        return;
+    }
+
+    // Open tag
+    output.push('<');
+    output.push_str(name);
+    for (attr, val) in node.value().attrs() {
+        if attr == "href" || attr == "src" || attr == "title" || attr == "alt" {
+            output.push(' ');
+            output.push_str(attr);
+            output.push_str("=\"");
+            output.push_str(val);
+            output.push('"');
+        }
+    }
+    output.push('>');
+
+    // Children
+    for child in node.children() {
+        if let Some(text) = child.value().as_text() {
+            output.push_str(text);
+        } else if let Some(el) = scraper::ElementRef::wrap(child) {
+            walk_and_filter(&el, output);
+        }
+    }
+
+    // Close tag
+    output.push_str("</");
+    output.push_str(name);
+    output.push('>');
+}
+
 const CLEAN_SYSTEM_PROMPT: &str = r#"You are a content extraction assistant.
 Your goal is to extract the main meaningful content from the provided Markdown of a web page.
 
 RULES:
-1. Remove navigation bars, footers, sidebars, advertisements, and social media widgets.
-2. Preserve the main headings (H1, H2, H3), lists, tables, and code blocks.
-3. Keep the original Markdown formatting for the content you extract.
-4. If the page contains an article, extract the article title and body.
-5. Remove redundant links and boilerplate text like 'Click here to read more' or 'Privacy Policy'.
-6. If the page is empty or contains no meaningful content, return an empty string.
-7. Output the extracted Markdown ONLY. No preamble, no comments."#;
+1. REMOVE all boilerplate: navigation bars, footers, sidebars, advertisements, social media, and redundant links.
+2. PRESERVE the main article/page body, headings (H1, H2, H3), lists, tables, and code blocks.
+3. Keep the original Markdown formatting.
+4. Output the extracted Markdown ONLY. 
+5. NO preamble, NO comments, NO "Here is the content"."#;
 
 async fn clean_with_llm(state: &AppState, md: &str) -> Result<String, ApiError> {
     let cfg = &state.openai_chat;

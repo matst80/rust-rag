@@ -46,5 +46,24 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-	matcher: ["/", "/entries/:path*", "/visualize", "/visualize/:path*", "/start-guide", "/mcp-setup"],
+	matcher: [
+		"/",
+		"/acp",
+		"/acp/:path*",
+		"/kanban",
+		"/kanban/:path*",
+		"/messages",
+		"/messages/:path*",
+		"/entries",
+		"/entries/:path*",
+		"/visualize",
+		"/visualize/:path*",
+		"/start-guide",
+		"/mcp-setup",
+		"/chat",
+		"/wiki",
+		"/wiki/:path*",
+		"/settings",
+		"/settings/:path*",
+	],
 }
