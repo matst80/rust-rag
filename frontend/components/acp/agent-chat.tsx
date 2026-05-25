@@ -14,7 +14,9 @@ import {
   Minimize2,
   Plus,
   Send,
+  StopCircle,
   Terminal as TerminalIcon,
+  Trash2,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -41,6 +43,7 @@ export function AgentChat() {
     eventsBySession,
     activeSessionId,
     setActiveSessionId,
+    terminals,
     sessionTerminals,
     activeTerminalId,
     setActiveTerminalId,
@@ -65,6 +68,7 @@ export function AgentChat() {
   const [selectedCommand, setSelectedCommand] = useState<
     Record<string, string | null>
   >({});
+  const [activeStandaloneTerminalId, setActiveStandaloneTerminalId] = useState<string | null>(null);
 
   const active = activeSessionId ? sessions[activeSessionId] : null;
   const draft = activeSessionId ? (drafts[activeSessionId] ?? "") : "";
@@ -146,6 +150,24 @@ export function AgentChat() {
     },
     [activeSessionId, selectedCommand],
   );
+
+  const terminateSession = useCallback(() => {
+    if (!activeSessionId) return;
+    if (!window.confirm("Are you sure you want to terminate this session?"))
+      return;
+    send({
+      type: "end_session",
+      session_id: activeSessionId,
+    });
+  }, [activeSessionId, send]);
+
+  const cancelActive = useCallback(() => {
+    if (!activeSessionId) return;
+    send({
+      type: "cancel",
+      session_id: activeSessionId,
+    });
+  }, [activeSessionId, send]);
 
   const bindTelegramThread = useCallback(() => {
     if (!activeSessionId) return;
@@ -244,23 +266,46 @@ export function AgentChat() {
         />
       )}
 
-      <SessionSidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onSelectSession={setActiveSessionId}
-        onSpawn={() => setIsSpawnDialogOpen(true)}
-        onClose={() => setSidebarOpen(false)}
-        conn={conn}
-        workers={workers}
-        instances={instances}
-        activeInstance={activeInstance}
-        onSelectInstance={selectInstance}
-        sidebarOpen={sidebarOpen}
-      />
-
+			<SessionSidebar
+				sessions={sessions}
+				activeSessionId={activeSessionId}
+				onSelectSession={(sid) => {
+					setActiveSessionId(sid)
+					setViewMode({ ...viewMode, [sid]: "chat" })
+					setTerminalFullScreen({ ...terminalFullScreen, [sid]: false })
+					setActiveStandaloneTerminalId(null)
+				}}
+				onSpawn={() => setIsSpawnDialogOpen(true)}
+				onClose={() => setSidebarOpen(false)}
+				onCreateTerminal={(sid) => {
+					createTerminal(sid)
+					setTerminalFullScreen({ ...terminalFullScreen, [sid]: true })
+				}}
+				onSelectTerminal={(sid, tid) => {
+					if (sid) {
+						setActiveSessionId(sid)
+						setActiveTerminalId({ ...activeTerminalId, [sid]: tid })
+						setViewMode({ ...viewMode, [sid]: "terminal" })
+						setTerminalFullScreen({ ...terminalFullScreen, [sid]: true })
+						setActiveStandaloneTerminalId(null)
+					} else {
+						setActiveSessionId(null)
+						setActiveStandaloneTerminalId(tid)
+					}
+				}}
+				terminals={terminals}
+				sessionTerminals={sessionTerminals}
+				activeTerminalId={activeTerminalId}
+				conn={conn}
+				workers={workers}
+				instances={instances}
+				activeInstance={activeInstance}
+				onSelectInstance={selectInstance}
+				sidebarOpen={sidebarOpen}
+			/>
       {/* Main Content Area */}
       <section className="flex min-w-0 flex-1 flex-col h-full overflow-hidden">
-        {!activeSessionId ? (
+        {!activeSessionId && !activeStandaloneTerminalId ? (
           <div className="flex-1 flex flex-col">
             <header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3">
               <button
@@ -283,6 +328,62 @@ export function AgentChat() {
             </header>
             <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
               Select or spawn a session
+            </div>
+          </div>
+        ) : activeStandaloneTerminalId ? (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {/* HEADER FOR STANDALONE TERMINAL */}
+            <header className="flex items-center gap-2 border-b border-border px-3 py-2 md:px-6 md:py-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                aria-label="Toggle sidebar"
+                title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              >
+                <Menu
+                  className={cn(
+                    "size-4 transition-transform",
+                    !sidebarOpen && "rotate-90",
+                  )}
+                />
+              </button>
+              <TerminalIcon className="size-4 shrink-0 text-muted-foreground" />
+              <div className="flex flex-1 flex-col min-w-0">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="truncate text-sm font-medium">
+                    Standalone Terminal {activeStandaloneTerminalId.slice(0, 8)}
+                  </span>
+                </div>
+                <span className="truncate font-mono text-[10px] text-muted-foreground/60">
+                  {terminals[activeStandaloneTerminalId]?.cwd}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => closeTerminal(activeStandaloneTerminalId)}
+                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-red-500/10 hover:text-red-500"
+                  title="Close Terminal"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+            </header>
+            <div className="flex-1 bg-zinc-950 overflow-hidden relative">
+              <TerminalView
+                key={activeStandaloneTerminalId}
+                terminalId={activeStandaloneTerminalId}
+                onInput={(data) =>
+                  onTerminalInput(activeStandaloneTerminalId, data)
+                }
+                onResize={(cols, rows) =>
+                  onTerminalResize(activeStandaloneTerminalId, cols, rows)
+                }
+                onAttach={(cols, rows) =>
+                  onTerminalAttach(activeStandaloneTerminalId, cols, rows)
+                }
+              />
             </div>
           </div>
         ) : (
@@ -363,6 +464,15 @@ export function AgentChat() {
                   title="New Terminal"
                 >
                   <Plus className="size-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={terminateSession}
+                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                  title="Terminate Session"
+                >
+                  <Trash2 className="size-4" />
                 </button>
               </div>
             </header>
@@ -659,6 +769,17 @@ export function AgentChat() {
                         <Send className="size-5" />
                       )}
                     </button>
+
+                    {active?.status === "Working" && (
+                      <button
+                        type="button"
+                        onClick={cancelActive}
+                        className="flex size-10 items-center justify-center rounded-md bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors shadow-sm"
+                        title="Stop/Cancel Agent"
+                      >
+                        <StopCircle className="size-5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </form>

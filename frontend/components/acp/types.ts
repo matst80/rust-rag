@@ -19,11 +19,14 @@ export interface SessionInfo {
 
 export interface TerminalInfo {
 	terminal_id: string
+	thread_id?: number | null
+	session_id?: string | null
 	cwd: string
-	command: string[]
+	command?: string[] | null
 	cols: number
 	rows: number
 	running: boolean
+	exit_code?: number | null
 }
 
 export interface ProjectInfo {

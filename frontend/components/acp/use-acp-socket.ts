@@ -110,7 +110,7 @@ export function useAcpSocket() {
 			if (k === "terminal_created" || k === "terminalcreated") {
 				const tinfo = (payload["terminal"] as TerminalInfo) ?? (payload as unknown as TerminalInfo)
 				const tid = tinfo.terminal_id
-				const sid = (payload["session_id"] as string | undefined) ?? (tinfo as any).session_id
+				const sid = (payload["session_id"] as string | undefined) ?? tinfo.session_id
 				if (tid) {
 					setTerminals((prev) => ({ ...prev, [tid]: tinfo }))
 					if (sid) {
@@ -185,7 +185,13 @@ export function useAcpSocket() {
 				const sessionTerms: Record<string, string[]> = {}
 				for (const t of terminalList) {
 					termMap[t.terminal_id] = t
-					const sid = (t as any).session_id
+					let sid = t.session_id
+					if (!sid && t.cwd) {
+						// Try to match orphaned terminal to a session by path
+						const match = list.find(s => s.project_path === t.cwd)
+						if (match) sid = match.acp_session_id
+					}
+
 					if (sid) {
 						if (!sessionTerms[sid]) sessionTerms[sid] = []
 						sessionTerms[sid].push(t.terminal_id)
