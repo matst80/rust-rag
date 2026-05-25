@@ -1,0 +1,76 @@
+--- src/acp_ws/session.rs
++++ src/acp_ws/session.rs
+@@ -26,8 +26,8 @@
+         kind.eq_ignore_ascii_case("TopicRemoved") || kind == "topic_removed"
+     }
+
+-    pub fn handle_event(&mut self, kind: &str, session_id: Option<&String>, payload: &Value) -> Option<String> {
+-        let mut removed_session_id = None;
++    pub fn handle_event(&mut self, kind: &str, session_id: Option<&String>, payload: &Value) -> Vec<String> {
++        let mut removed_session_ids = Vec::new();
+         if (Self::is_session_started(kind) || Self::is_session_renamed(kind))
+             && let Some(sid) = session_id
+         {
+@@ -48,14 +48,14 @@
+         if Self::is_session_ended(kind) {
+             if let Some(sid) = session_id {
+                 self.live_sessions.remove(sid);
+-                removed_session_id = Some(sid.clone());
++                removed_session_ids.push(sid.clone());
+             }
+         }
+
+         if Self::is_topic_removed(kind) {
+             if let Some(sid) = session_id {
+                 self.live_sessions.remove(sid);
+-                removed_session_id = Some(sid.clone());
++                removed_session_ids.push(sid.clone());
+             } else if let Some(tid) = payload.get("thread_id").and_then(Value::as_i64) {
+                 let mut to_remove = Vec::new();
+                 for (sid, info) in &self.live_sessions {
+@@ -65,15 +65,12 @@
+                 }
+                 for sid in to_remove {
+                     self.live_sessions.remove(&sid);
+-                    // Just return the first one removed, if any, to simplify caller logic
+-                    // Although realistically thread_id -> session_id is 1:1 or 1:N but we return the first.
+-                    if removed_session_id.is_none() {
+-                        removed_session_id = Some(sid);
+-                    }
++                    removed_session_ids.push(sid);
+                 }
+             }
+         }
+-        removed_session_id
++
++        removed_session_ids
+     }
+
+     pub fn apply_snapshot(&mut self, payload: &Value) {
+--- src/acp_ws/state.rs
++++ src/acp_ws/state.rs
+@@ -75,20 +75,22 @@
+             }
+         }
+
+-        let removed_session_id = self.session_manager.handle_event(kind, session_id, payload);
++        let removed_session_ids = self.session_manager.handle_event(kind, session_id, payload);
+         self.terminal_manager.handle_event(kind, payload);
+
+         if Self::is_permission_request(kind)
+             && let Some(req_id) = payload.get("request_id").and_then(Value::as_str)
+         {
+             self.pending_permissions.insert(req_id.to_owned(), event.clone());
+         }
+
+-        if let Some(sid) = &removed_session_id {
++        for sid in removed_session_ids {
+             if SessionManager::is_topic_removed(kind) {
+-                 self.buffer_manager.remove_session(sid);
++                 self.buffer_manager.remove_session(&sid);
+             }
+-            self.pending_permissions.retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
++            self.pending_permissions.retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
+         }
+
+         // Append to live history for subscriber_snapshot replay

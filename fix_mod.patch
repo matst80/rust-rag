@@ -1,0 +1,23 @@
+--- src/acp_ws/mod.rs
++++ src/acp_ws/mod.rs
+@@ -481,20 +481,6 @@
+         }
+         backoff = (backoff * 2).min(max_backoff);
+     }
+-                {
+-                    let mut g = inner.lock().await;
+-                    g.connected = true;
+-                    g.last_error = None;
+-                }
+-                backoff = initial_backoff;
+-
+-                let (mut sink, mut stream) = ws.split();
+-
+-                loop {
+-                    tokio::select! {
+-                        _ = shutdown.notified() => {
+-                            info!(instance_id = %instance_id, "acp_ws: shut down requested");
+-                            return;
+ }
+
+ async fn connect(
