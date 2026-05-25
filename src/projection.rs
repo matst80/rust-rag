@@ -614,7 +614,7 @@ fn write_metadata(
     info!("writing projection metadata for {} items", result.items_to_update.len());
     for (i, item) in result.items_to_update.iter().enumerate() {
         let (x, y, z) = result.coords[i];
-        let _cluster_id = result.assignments[i];
+        let cluster_id = result.assignments[i];
 
         let mut metadata = item.metadata.clone();
         let obj = match metadata.as_object_mut() {
