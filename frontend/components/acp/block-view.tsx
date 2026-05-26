@@ -61,11 +61,10 @@ export const BlockView = memo(function BlockView({
 					<Bot className="size-4" />
 				</div>
 				<div className="min-w-0 flex-1">
-					<details>
-						<summary className="cursor-pointer select-none flex items-baseline gap-2">
-							<span className="font-semibold text-sm">{sessionAgent ?? "agent"}</span>
-							<span className="text-[10px] uppercase tracking-wide text-muted-foreground">thought</span>
-							<span className="text-[10px] text-muted-foreground">{timeOf(block.ts)}</span>
+					<details open>
+						<summary className="cursor-pointer select-none flex items-baseline gap-2 group">
+							<span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 group-hover:text-foreground transition-colors">THOUGHT</span>
+							<span className="text-[10px] text-muted-foreground/40">{timeOf(block.ts)}</span>
 						</summary>
 						<div className="mt-1 italic text-sm text-muted-foreground">
 							<MessageMarkdown text={block.text} knownUsers={EMPTY_USERS} />
@@ -138,7 +137,7 @@ export const BlockView = memo(function BlockView({
 				<span className={cn(
 					"inline-block size-1.5 rounded-full",
 					block.status === "working" ? "bg-amber-500 animate-pulse" :
-						block.status === "idle" || block.status === "ready" ? "bg-emerald-500" :
+						block.status === "idle" || block.status === "ready" || block.status === "finished" ? "bg-emerald-500" :
 							"bg-muted-foreground",
 				)} />
 				<span className="font-mono uppercase tracking-wide">{block.status}</span>

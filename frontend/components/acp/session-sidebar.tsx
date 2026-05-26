@@ -12,8 +12,10 @@ import {
 interface SessionSidebarProps {
 	sessions: Record<string, SessionInfo>
 	activeSessionId: string | null
+	activeStandaloneTerminalId: string | null
 	onSelectSession: (id: string) => void
 	onSpawn: () => void
+	onNewTerminal?: () => void
 	onClose: () => void
 	onCreateTerminal: (sessionId: string) => void
 	onSelectTerminal: (sessionId: string, terminalId: string) => void
@@ -31,8 +33,10 @@ interface SessionSidebarProps {
 export const SessionSidebar = memo(function SessionSidebar({
 	sessions,
 	activeSessionId,
+	activeStandaloneTerminalId,
 	onSelectSession,
 	onSpawn,
+	onNewTerminal,
 	onClose,
 	onCreateTerminal,
 	onSelectTerminal,
@@ -72,6 +76,15 @@ export const SessionSidebar = memo(function SessionSidebar({
 						title="Spawn headless session"
 					>
 						<Plus className="size-4" />
+					</button>
+					<button
+						type="button"
+						onClick={onNewTerminal}
+						className="text-muted-foreground hover:text-foreground"
+						aria-label="New standalone terminal"
+						title="New standalone terminal"
+					>
+						<Terminal className="size-4" />
 					</button>
 					<button
 						type="button"
@@ -141,12 +154,11 @@ export const SessionSidebar = memo(function SessionSidebar({
 									<div className={cn("size-1.5 shrink-0 rounded-full", statusColor)} />
 									<div className="min-w-0 flex-1">
 										<div className="truncate text-xs font-semibold leading-tight">
-											{s.name || s.project_path?.split("/").pop() || s.acp_session_id.slice(0, 8)}
+											{s.name || s.folder || s.project_path?.split("/").pop() || s.acp_session_id.slice(0, 8)}
 										</div>
 										<div className="truncate font-mono text-[9px] opacity-60">
-											{s.project_path}
-										</div>
-									</div>
+											{s.folder || s.project_path}
+										</div>									</div>
 									{s.thread_id ? (
 										<Hash className="size-3 shrink-0 opacity-20" />
 									) : null}

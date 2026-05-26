@@ -7,10 +7,11 @@ export interface AcpEvent {
 
 export interface SessionInfo {
 	acp_session_id: string
-	project_path?: string
-	thread_id: number
+	project_path?: string // Legacy/Fallback
+	folder?: string       // Stable project label
+	thread_id: number | null
 	status: string
-	name?: string | null
+	name?: string | null  // Display label
 	agent_command: string
 	agent_name?: string | null
 	available_commands?: { name: string; description?: string; schema?: Record<string, unknown> }[]

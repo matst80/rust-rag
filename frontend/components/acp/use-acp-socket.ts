@@ -187,8 +187,8 @@ export function useAcpSocket() {
 					termMap[t.terminal_id] = t
 					let sid = t.session_id
 					if (!sid && t.cwd) {
-						// Try to match orphaned terminal to a session by path
-						const match = list.find(s => s.project_path === t.cwd)
+						// Try to match orphaned terminal to a session by folder or path
+						const match = list.find(s => s.folder === t.cwd || s.project_path === t.cwd)
 						if (match) sid = match.acp_session_id
 					}
 
@@ -211,14 +211,14 @@ export function useAcpSocket() {
 				setProjects(projects)
 			}
 
-			if (k === "session_started" || k === "sessionstarted") {
+			if (k === "session_started" || k === "sessionstarted" || k === "session_switched" || k === "sessionswitched") {
 				const info = payload as unknown as SessionInfo
 				setSessions((prev) => ({ ...prev, [info.acp_session_id]: info }))
 				setActiveSessionId(info.acp_session_id)
 			}
 
-			if (k === "session_ended" || k === "sessionended") {
-				const sid = sessionIdOf(payload)
+			if (k === "session_ended" || k === "sessionended" || k === "session_removed" || k === "sessionremoved") {
+				const sid = sessionIdOf(payload) || (payload["acp_session_id"] as string | undefined)
 				if (sid) {
 					setSessions((prev) => {
 						const next = { ...prev }
@@ -235,6 +235,25 @@ export function useAcpSocket() {
 					} catch {
 						// ignore
 					}
+				} else if (payload["thread_id"]) {
+					// Fallback for session_removed which might only have thread_id
+					const tid = Number(payload["thread_id"])
+					setSessions((prev) => {
+						const next = { ...prev }
+						for (const id in next) {
+							if (next[id].thread_id === tid) {
+								delete next[id]
+								// Also clean up events for this id if we found it
+								setEventsBySession((prevEvents) => {
+									const nextEvents = { ...prevEvents }
+									delete nextEvents[id]
+									return nextEvents
+								})
+								break
+							}
+						}
+						return next
+					})
 				}
 			}
 
@@ -251,7 +270,7 @@ export function useAcpSocket() {
 							if (!s || s.status === "Working") return prev
 							return { ...prev, [sid]: { ...s, status: "Working" } }
 						})
-					} else if (variant === "idle" || variant === "ready") {
+					} else if (variant === "idle" || variant === "ready" || variant === "finished") {
 						setSessions((prev) => {
 							const s = prev[sid]
 							if (!s || s.status === "Idle") return prev

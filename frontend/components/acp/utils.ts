@@ -81,7 +81,7 @@ export function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 					: (inner as Record<string, unknown>)
 			const variant = typeof suRaw === "string" ? suRaw : (su.type as string) ?? ""
 
-			if (variant === "working" || variant === "idle" || variant === "ready") {
+			if (variant === "working" || variant === "idle" || variant === "ready" || variant === "finished") {
 				const last = blocks[blocks.length - 1]
 				if (last && last.kind === "status") {
 					last.status = variant
