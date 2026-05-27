@@ -9,6 +9,8 @@ class TokenManager(context: Context) {
     companion object {
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_TOKEN = "auth_token"
+        private const val KEY_WIDGET_LATEST_TEXT = "widget_latest_text"
+        private const val KEY_WIDGET_LATEST_ID = "widget_latest_id"
         private const val DEFAULT_SERVER_URL = "https://rag.k6n.net"
     }
 
@@ -25,10 +27,26 @@ class TokenManager(context: Context) {
             prefs.edit().putString(KEY_TOKEN, value?.trim()).apply()
         }
 
+    var widgetLatestText: String?
+        get() = prefs.getString(KEY_WIDGET_LATEST_TEXT, null)
+        set(value) {
+            prefs.edit().putString(KEY_WIDGET_LATEST_TEXT, value?.trim()).apply()
+        }
+
+    var widgetLatestId: String?
+        get() = prefs.getString(KEY_WIDGET_LATEST_ID, null)
+        set(value) {
+            prefs.edit().putString(KEY_WIDGET_LATEST_ID, value?.trim()).apply()
+        }
+
     val isConfigured: Boolean
         get() = !token.isNullOrBlank()
 
     fun clear() {
-        prefs.edit().remove(KEY_TOKEN).apply()
+        prefs.edit()
+            .remove(KEY_TOKEN)
+            .remove(KEY_WIDGET_LATEST_TEXT)
+            .remove(KEY_WIDGET_LATEST_ID)
+            .apply()
     }
 }

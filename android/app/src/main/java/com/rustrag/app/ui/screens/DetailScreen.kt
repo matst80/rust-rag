@@ -53,6 +53,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.ui.tooling.preview.Preview
+import android.content.Intent
+import androidx.compose.material.icons.filled.MoreVert
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,6 +76,7 @@ fun DetailScreen(
     var editSourceId by remember { mutableStateOf("") }
     var editPath by remember { mutableStateOf("") }
     var isSavingEdits by remember { mutableStateOf(false) }
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val app = context.applicationContext as RagApplication
@@ -218,16 +221,67 @@ fun DetailScreen(
                                 )
                             }
                         } else {
-                            IconButton(onClick = { isEditing = true }) {
+                            var showMenu by remember { mutableStateOf(false) }
+                            IconButton(onClick = { showMenu = true }) {
                                 Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Edit Entry"
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "More Options"
                                 )
                             }
-                            IconButton(onClick = copyPathToClipboard) {
-                                Icon(
-                                    imageVector = Icons.Default.ContentCopy,
-                                    contentDescription = "Copy Path"
+                            DropdownMenu(
+                                expanded = showMenu,
+                                onDismissRequest = { showMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Edit") },
+                                    onClick = {
+                                        showMenu = false
+                                        isEditing = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Copy Path / ID") },
+                                    onClick = {
+                                        showMenu = false
+                                        copyPathToClipboard()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Share") },
+                                    onClick = {
+                                        showMenu = false
+                                        val shareIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, detail.text)
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(Intent.createChooser(shareIntent, "Share Entry"))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Trigger Analysis", color = MaterialTheme.colorScheme.primary) },
+                                    onClick = {
+                                        showMenu = false
+                                        isLoading = true
+                                        scope.launch {
+                                            try {
+                                                val updated = apiService.reanalyzeEntry(detail.id)
+                                                itemDetail = updated
+                                                Toast.makeText(context, "Analysis updated!", Toast.LENGTH_SHORT).show()
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Failed to analyze: ${e.message}", Toast.LENGTH_LONG).show()
+                                            } finally {
+                                                isLoading = false
+                                            }
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                                    onClick = {
+                                        showMenu = false
+                                        showDeleteConfirmDialog = true
+                                    }
                                 )
                             }
                         }
@@ -403,6 +457,48 @@ fun DetailScreen(
                 }
             }
         }
+    }
+
+    if (showDeleteConfirmDialog) {
+        val detail = itemDetail
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = { Text("Delete Entry") },
+            text = { Text("Are you sure you want to delete this entry? This action cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmDialog = false
+                        if (detail != null) {
+                            isLoading = true
+                            scope.launch {
+                                try {
+                                    apiService.deleteEntry(detail.id)
+                                    Toast.makeText(context, "Entry deleted", Toast.LENGTH_SHORT).show()
+                                    onBack()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Failed to delete: ${e.message}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isLoading = false
+                                }
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    shape = RoundedCornerShape(24.dp)
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 

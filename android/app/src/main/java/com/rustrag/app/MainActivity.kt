@@ -16,6 +16,7 @@ import com.rustrag.app.data.TokenManager
 import com.rustrag.app.ui.screens.LoginScreen
 import com.rustrag.app.ui.screens.Screen
 import com.rustrag.app.ui.screens.SearchScreen
+import com.rustrag.app.ui.screens.SearchTab
 import com.rustrag.app.ui.screens.DetailScreen
 import com.rustrag.app.data.AppSearchHelper
 import com.rustrag.app.ui.theme.RustRagTheme
@@ -29,6 +30,7 @@ class MainActivity : ComponentActivity() {
     // Live search query from incoming intents
     private val searchQueryState = mutableStateOf("")
     private val shouldFocusSearchState = mutableStateOf(false)
+    private val detailItemIdState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +68,8 @@ class MainActivity : ComponentActivity() {
 
                     var activeSearchQuery by searchQueryState
                     var shouldFocusSearch by shouldFocusSearchState
+                    var pendingDetailId by detailItemIdState
+                    var activeTab by remember { mutableStateOf(SearchTab.MEMORIES) }
 
                     // If focus is requested, auto navigate to search screen
                     LaunchedEffect(shouldFocusSearch) {
@@ -74,18 +78,52 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // Automatic search/recent-loader effect
-                    LaunchedEffect(currentScreen, searchSourceFilter, searchQueryText) {
+                    // If a detail ID is requested, auto navigate to detail screen
+                    LaunchedEffect(pendingDetailId) {
+                        val id = pendingDetailId
+                        if (id != null && tokenManager.isConfigured) {
+                            currentScreen = Screen.Detail(id)
+                            pendingDetailId = null // Clear it immediately
+                        }
+                    }
+
+                    // Automatic search/recent-loader effect when search query is blank
+                    LaunchedEffect(currentScreen, searchSourceFilter, searchQueryText, activeTab) {
                         if (currentScreen is Screen.Search && tokenManager.isConfigured) {
                             if (searchQueryText.isBlank()) {
                                 isSearching = true
                                 try {
-                                    searchResults = apiService.getRecentEntries(limit = 15, sourceId = searchSourceFilter.takeIf { it.isNotBlank() })
+                                    searchResults = apiService.getRecentEntries(
+                                        limit = if (activeTab == SearchTab.TODOS) 50 else 15,
+                                        sourceId = searchSourceFilter.takeIf { it.isNotBlank() },
+                                        typeName = if (activeTab == SearchTab.TODOS) "todo" else null
+                                    )
                                 } catch (e: Exception) {
                                     // Log or handle error silently or via Toast
                                 } finally {
                                     isSearching = false
                                 }
+                            }
+                        }
+                    }
+
+                    // Automatic search update when active tab, source filter, or screen changes with an active query text
+                    LaunchedEffect(currentScreen, searchSourceFilter, activeTab) {
+                        if (currentScreen is Screen.Search && tokenManager.isConfigured && searchQueryText.isNotBlank()) {
+                            isSearching = true
+                            try {
+                                val resp = apiService.search(
+                                    queryText = searchQueryText,
+                                    sourceId = searchSourceFilter.takeIf { it.isNotBlank() },
+                                    hybrid = searchModeHybrid,
+                                    rerank = if (searchModeRerank) true else null,
+                                    typeName = if (activeTab == SearchTab.TODOS) "todo" else null
+                                )
+                                searchResults = resp.results
+                            } catch (e: Exception) {
+                                // Log or handle error silently
+                            } finally {
+                                isSearching = false
                             }
                         }
                     }
@@ -103,7 +141,8 @@ class MainActivity : ComponentActivity() {
                                     queryText = searchQueryText,
                                     sourceId = searchSourceFilter.takeIf { it.isNotBlank() },
                                     hybrid = searchModeHybrid,
-                                    rerank = if (searchModeRerank) true else null
+                                    rerank = if (searchModeRerank) true else null,
+                                    typeName = if (activeTab == SearchTab.TODOS) "todo" else null
                                 )
                                 searchResults = resp.results
                             } catch (e: Exception) {
@@ -118,6 +157,14 @@ class MainActivity : ComponentActivity() {
                     LaunchedEffect(searchResults) {
                         if (searchResults.isNotEmpty()) {
                             appSearchHelper.indexMemories(searchResults)
+
+                            // Also update the widget cache if we have a recent list loaded
+                            val latest = searchResults.firstOrNull()
+                            if (latest != null) {
+                                tokenManager.widgetLatestText = latest.text
+                                tokenManager.widgetLatestId = latest.id
+                                RagSearchWidgetProvider.triggerUpdate(applicationContext)
+                            }
                         }
                     }
 
@@ -171,6 +218,8 @@ class MainActivity : ComponentActivity() {
                                     onNavigateToDetail = { id ->
                                         currentScreen = Screen.Detail(id)
                                     },
+                                    activeTab = activeTab,
+                                    onTabChange = { activeTab = it },
                                     onLogout = {
                                         tokenManager.clear()
                                         searchQueryText = ""
@@ -208,6 +257,16 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent) {
         if (intent.action == Intent.ACTION_VIEW) {
             val data = intent.data
+
+            // Handle detail deep link: rustrag://detail?id=xxx
+            if (data?.scheme == "rustrag" && data.host == "detail") {
+                val id = data.getQueryParameter("id")
+                if (!id.isNullOrBlank()) {
+                    detailItemIdState.value = id
+                    return
+                }
+            }
+
             // Extract from standard query param or from Gemini bundle extra
             val query = data?.getQueryParameter("query") ?: intent.getStringExtra("query")
             if (!query.isNullOrBlank()) {

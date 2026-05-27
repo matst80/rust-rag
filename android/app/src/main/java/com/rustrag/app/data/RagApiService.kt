@@ -86,14 +86,16 @@ class RagApiService(private val tokenManager: TokenManager) {
         queryText: String,
         sourceId: String? = null,
         hybrid: Boolean = true,
-        rerank: Boolean? = null
+        rerank: Boolean? = null,
+        typeName: String? = null
     ): SearchResponse = withContext(Dispatchers.IO) {
         val url = "${getBaseUrl()}/api/search"
         val searchReq = SearchRequest(
             query = queryText,
             sourceId = sourceId?.takeIf { it.isNotBlank() },
             hybrid = hybrid,
-            rerank = rerank
+            rerank = rerank,
+            typeName = typeName?.takeIf { it.isNotBlank() }
         )
         val requestBody = json.encodeToString(searchReq).toRequestBody(jsonMediaType)
 
@@ -130,13 +132,21 @@ class RagApiService(private val tokenManager: TokenManager) {
     }
 
     // 5. POST /api/store
-    suspend fun storeEntry(text: String, sourceId: String, path: String? = null): StoreResponse = withContext(Dispatchers.IO) {
+    suspend fun storeEntry(
+        text: String,
+        sourceId: String,
+        path: String? = null,
+        typeName: String? = null,
+        data: JsonElement? = null
+    ): StoreResponse = withContext(Dispatchers.IO) {
         val url = "${getBaseUrl()}/api/store"
         val storeReq = StoreRequest(
             text = text,
             sourceId = sourceId.trim().lowercase(),
             path = path?.trim()?.takeIf { it.isNotEmpty() },
-            metadata = buildJsonObject {}
+            metadata = buildJsonObject {},
+            typeName = typeName,
+            data = data
         )
         val requestBody = json.encodeToString(storeReq).toRequestBody(jsonMediaType)
 
@@ -190,10 +200,13 @@ class RagApiService(private val tokenManager: TokenManager) {
     }
 
     // 6. GET /admin/items
-    suspend fun getRecentEntries(limit: Int = 15, sourceId: String? = null): List<SearchResultPayload> = withContext(Dispatchers.IO) {
+    suspend fun getRecentEntries(limit: Int = 15, sourceId: String? = null, typeName: String? = null): List<SearchResultPayload> = withContext(Dispatchers.IO) {
         val urlBuilder = StringBuilder("${getBaseUrl()}/admin/items?limit=$limit")
         if (!sourceId.isNullOrBlank()) {
             urlBuilder.append("&source_id=$sourceId")
+        }
+        if (!typeName.isNullOrBlank()) {
+            urlBuilder.append("&type=$typeName")
         }
         val requestBuilder = Request.Builder()
             .url(urlBuilder.toString())
@@ -216,9 +229,62 @@ class RagApiService(private val tokenManager: TokenManager) {
                     updatedAt = item.updatedAt,
                     distance = -1f, // -1f denotes a recent item without similarity score
                     path = item.path,
-                    analysis = item.analysis
+                    analysis = item.analysis,
+                    typeName = item.typeName,
+                    data = item.data
                 )
             }
+        }
+    }
+
+    // 7. GET /admin/categories
+    suspend fun getCategories(): List<AdminCategoryPayload> = withContext(Dispatchers.IO) {
+        val url = "${getBaseUrl()}/admin/categories"
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .get()
+        addAuthHeader(requestBuilder)
+
+        client.newCall(requestBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Failed to load categories, code ${response.code}")
+            }
+            val bodyStr = response.body?.string() ?: throw IOException("Empty response body")
+            val resp = json.decodeFromString<CategoriesResponse>(bodyStr)
+            resp.categories
+        }
+    }
+
+    // 8. DELETE /admin/items/{id}
+    suspend fun deleteEntry(id: String): Boolean = withContext(Dispatchers.IO) {
+        val url = "${getBaseUrl()}/admin/items/$id"
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .delete()
+        addAuthHeader(requestBuilder)
+
+        client.newCall(requestBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Delete failed with code ${response.code}")
+            }
+            true
+        }
+    }
+
+    // 9. POST /admin/items/{id}/reanalyze
+    suspend fun reanalyzeEntry(id: String): AdminItemPayload = withContext(Dispatchers.IO) {
+        val url = "${getBaseUrl()}/admin/items/$id/reanalyze"
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .post("".toRequestBody(jsonMediaType))
+        addAuthHeader(requestBuilder)
+
+        client.newCall(requestBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Reanalysis failed with code ${response.code}")
+            }
+            val bodyStr = response.body?.string() ?: throw IOException("Empty response body")
+            json.decodeFromString<AdminItemPayload>(bodyStr)
         }
     }
 }

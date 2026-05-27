@@ -58,7 +58,9 @@ data class SearchResultPayload(
     @SerialName("updated_at") val updatedAt: Long,
     val distance: Float,
     val path: String? = null,
-    val analysis: StoreAnalysis? = null
+    val analysis: StoreAnalysis? = null,
+    @SerialName("type") val typeName: String? = null,
+    val data: JsonElement? = null
 )
 
 @Serializable
@@ -139,5 +141,16 @@ data class UpdateItemRequest(
     val path: String? = null,
     @SerialName("type") val typeName: String? = null,
     val data: JsonElement? = null
+)
+
+@Serializable
+data class AdminCategoryPayload(
+    @SerialName("source_id") val sourceId: String,
+    @SerialName("item_count") val itemCount: Long
+)
+
+@Serializable
+data class CategoriesResponse(
+    val categories: List<AdminCategoryPayload>
 )
 

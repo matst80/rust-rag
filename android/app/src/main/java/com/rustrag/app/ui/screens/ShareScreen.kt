@@ -48,7 +48,10 @@ fun ShareScreen(
             isSaving = true
             scope.launch {
                 try {
-                    apiService.storeEntry(textContent, sourceId, path)
+                    val result = apiService.storeEntry(textContent, sourceId, path)
+                    tokenManager.widgetLatestText = textContent
+                    tokenManager.widgetLatestId = result.id
+                    com.rustrag.app.RagSearchWidgetProvider.triggerUpdate(context)
                     Toast.makeText(context, "Persisted in RAG successfully!", Toast.LENGTH_SHORT).show()
                     onFinish(true)
                 } catch (e: Exception) {
