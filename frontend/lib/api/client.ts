@@ -45,6 +45,10 @@ import type {
   DeleteSchemaResponse,
   IngestUrlRequest,
   UpdateEdgeRequest,
+  DuplicateEdgeGroup,
+  MapPoint,
+  DriveSearchResult,
+  FetchedDriveDoc,
   CodeRepoSummary,
   CodeFileMeta,
   CodeFileDetail,
@@ -668,7 +672,7 @@ export async function getDuplicateEdges(): Promise<DuplicateEdgeGroup[]> {
   return ensureArray(response, "duplicate edges").map(group => ({
     from_item_id: group.from_item_id,
     to_item_id: group.to_item_id,
-    edges: ensureArray(group.edges, "duplicate edges list").map(toEdge),
+    edges: (ensureArray(group.edges, "duplicate edges list") as RawEdge[]).map(toEdge),
   }))
 }
 

@@ -158,15 +158,16 @@ function EntryCardInner({
                 <Clock className="size-2.5" />
                 {formatRelativeTime(entry.created_at)}
               </div>
-              {entry.updated_at > entry.created_at + 1000 && (
-                <div
-                  className="flex items-center gap-1"
-                  title={`Modified: ${new Date(entry.updated_at).toLocaleString()}`}
-                >
-                  <History className="size-2.5" />
-                  {formatRelativeTime(entry.updated_at)}
-                </div>
-              )}
+              {entry.updated_at &&
+                entry.updated_at > entry.created_at + 1000 && (
+                  <div
+                    className="flex items-center gap-1"
+                    title={`Modified: ${new Date(entry.updated_at).toLocaleString()}`}
+                  >
+                    <History className="size-2.5" />
+                    {formatRelativeTime(entry.updated_at)}
+                  </div>
+                )}
             </div>
 
             {"type" in entry && entry.type && (

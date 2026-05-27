@@ -101,14 +101,16 @@ REFINED TEXT:`
                   <>
                     <Button 
                       variant="ghost" 
-                      size="xs" 
+                      size="default"
+ 
                       className="h-7 px-3 text-[9px] uppercase tracking-wider font-bold text-muted-foreground hover:text-foreground" 
                       onClick={reset}
                     >
                       <X className="size-3 mr-1.5" /> Discard
                     </Button>
                     <Button 
-                      size="xs" 
+                      size="default"
+ 
                       className="h-7 px-4 text-[9px] uppercase tracking-[1.5px] font-black bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(var(--primary-rgb),0.3)]" 
                       onClick={handleAccept}
                     >

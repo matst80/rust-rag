@@ -34,13 +34,11 @@ function buildEmbeddedTheme(isDark: boolean): Theme {
         ...base.node.label,
         color: isDark ? "#e2e8f0" : "#1e293b",
         stroke: bg,
-        fontSize: 10,
       },
       subLabel: {
         ...(base.node.subLabel ?? { color: isDark ? "#94a3b8" : "#64748b", activeColor: "#4338ca" }),
         color: isDark ? "#94a3b8" : "#64748b",
         stroke: bg,
-        fontSize: 7,
       },
     },
     cluster: {
@@ -51,7 +49,6 @@ function buildEmbeddedTheme(isDark: boolean): Theme {
       label: {
         color: isDark ? "#94a3b8" : "#64748b",
         stroke: bg,
-        fontSize: 13,
       },
     },
   }
@@ -92,6 +89,7 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
         metadata: hit.metadata,
         source_id: hit.source_id,
         created_at: hit.created_at,
+        updated_at: hit.created_at,
       })
     }
     return merged
@@ -232,7 +230,6 @@ export function EmbeddedGraph({ centerId, onNodeClick }: EmbeddedGraphProps) {
           linkStrengthIntraCluster: 0.85,
           linkStrengthInterCluster: 0.005,
           nodeStrength: -250,
-          clusterPadding: 80,
           linkDistance: 100,
         }}
         labelType="auto"

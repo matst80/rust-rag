@@ -60,7 +60,7 @@ export function DuplicateEdgeList({ onFocusNode }: DuplicateEdgeListProps) {
               Duplicates Found
             </h4>
             <p className="text-xs text-amber-700/70 dark:text-amber-400/70">
-              {duplicateGroups.length} node pair(s) have multiple edges connecting them. Review and delete redundant relationships.
+              {duplicateGroups.length} node pair(s) have multiple edges connecting them. Review and delete redundant relationshipships.
             </p>
           </div>
         </div>
@@ -92,8 +92,8 @@ export function DuplicateEdgeList({ onFocusNode }: DuplicateEdgeListProps) {
 
             <div className="flex flex-col gap-2 pl-2">
               {group.edges.map((edge) => {
-                const relationStyle = edge.relation 
-                  ? RELATION_STYLES[edge.relation.toLowerCase()] 
+                const relationshipStyle = edge.relationship 
+                  ? RELATION_STYLES[edge.relationship.toLowerCase()] 
                   : ""
                 return (
                   <div
@@ -105,10 +105,10 @@ export function DuplicateEdgeList({ onFocusNode }: DuplicateEdgeListProps) {
                         variant="outline"
                         className={cn(
                           "h-5 px-1.5 font-mono text-[10px] font-black uppercase tracking-wider border-border/60 text-muted-foreground/80 bg-muted/5 leading-none",
-                          relationStyle
+                          relationshipStyle
                         )}
                       >
-                        {edge.relation || edge.edge_type}
+                        {edge.relationship || edge.edge_type}
                       </Badge>
                       <div className="flex flex-col min-w-0">
                          <span className="text-[10px] font-mono text-muted-foreground/60 font-medium">Weight: {edge.weight.toFixed(2)}</span>

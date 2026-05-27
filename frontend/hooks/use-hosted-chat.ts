@@ -45,8 +45,8 @@ export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHo
       // Expand messages to include tool results in the format expected by the API
       const expandedMessages = messages.flatMap(m => {
         if (m.tool_calls && m.tool_results && Object.keys(m.tool_results).length > 0) {
-          const expanded = []
-          expanded.push({ role: m.role, content: null, tool_calls: m.tool_calls })
+          const expanded: ChatCompletionMessage[] = []
+          expanded.push({ role: m.role, content: m.content || null, tool_calls: m.tool_calls })
           for (const tc of m.tool_calls) {
             if (m.tool_results[tc.id] !== undefined) {
               expanded.push({
@@ -57,19 +57,16 @@ export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHo
               })
             }
           }
-          if (m.content) {
-            expanded.push({ role: m.role, content: m.content })
-          }
           return expanded
         }
         return [{
           role: m.role,
-          content: m.content,
+          content: m.content || null,
           name: m.name,
           tool_call_id: m.tool_call_id,
           tool_calls: m.tool_calls
-        }]
-      })
+        } as ChatCompletionMessage]
+      }) as ChatCompletionMessage[]
 
       await api.chat.stream(
         {

@@ -1,82 +1,139 @@
-"use client"
+"use client";
 
-import { useState } from "react"
-import Link from "next/link"
+import { useState } from "react";
+import Link from "next/link";
 import {
-  RefreshCw, Sparkles, Plus, X, Save, GitBranch, Terminal, AlertTriangle,
-  CheckCircle2, Zap, ArrowUpCircle, AlertCircle, Copy, Ghost, Activity
-} from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
-import { useReanalyzeItem, useUpdateItem, useCreateEdge } from "@/lib/api"
-import { useSWRConfig } from "swr"
-import { toast } from "sonner"
-import { Editor } from "@monaco-editor/react"
-import { EntryTagList } from "../ui/entry-tag"
-import { cn } from "@/lib/utils"
+  RefreshCw,
+  Sparkles,
+  Plus,
+  X,
+  Save,
+  GitBranch,
+  Terminal,
+  AlertTriangle,
+  CheckCircle2,
+  Zap,
+  ArrowUpCircle,
+  AlertCircle,
+  Copy,
+  Ghost,
+  Activity,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { useReanalyzeItem, useUpdateItem, useCreateEdge } from "@/lib/api";
+import { useSWRConfig } from "swr";
+import { toast } from "sonner";
+import { Editor } from "@monaco-editor/react";
+import { EntryTagList } from "../ui/entry-tag";
+import { cn } from "@/lib/utils";
 import type {
   Entry,
   StoreAnalysis,
   StoreAnalysisSuggestedEdge,
   Edge,
   StoreAnalysisVerdict,
-} from "@/lib/api/types"
+} from "@/lib/api/types";
 
 interface AnalysisPanelProps {
-  entry: Entry
-  edges?: Edge[]
+  entry: Entry;
+  edges?: Edge[];
 }
 
-const RELATION_CONFIG: Record<string, { color: string, icon: any, label: string }> = {
-  agrees: { color: "text-emerald-500 border-emerald-500/30 bg-emerald-500/5", icon: CheckCircle2, label: "Agrees" },
-  refines: { color: "text-sky-500 border-sky-500/30 bg-sky-500/5", icon: Zap, label: "Refines" },
-  supersedes: { color: "text-amber-500 border-amber-500/30 bg-amber-500/5", icon: ArrowUpCircle, label: "Supersedes" },
-  contradicts: { color: "text-red-500 border-red-500/30 bg-red-500/5", icon: AlertCircle, label: "Contradicts" },
-  duplicates: { color: "text-fuchsia-500 border-fuchsia-500/30 bg-fuchsia-500/5", icon: Copy, label: "Duplicate" },
-  unrelated: { color: "text-muted-foreground border-border bg-muted/5", icon: Ghost, label: "Unrelated" },
-}
+const RELATION_CONFIG: Record<
+  string,
+  { color: string; icon: any; label: string }
+> = {
+  agrees: {
+    color: "text-emerald-500 border-emerald-500/30 bg-emerald-500/5",
+    icon: CheckCircle2,
+    label: "Agrees",
+  },
+  refines: {
+    color: "text-sky-500 border-sky-500/30 bg-sky-500/5",
+    icon: Zap,
+    label: "Refines",
+  },
+  supersedes: {
+    color: "text-amber-500 border-amber-500/30 bg-amber-500/5",
+    icon: ArrowUpCircle,
+    label: "Supersedes",
+  },
+  contradicts: {
+    color: "text-red-500 border-red-500/30 bg-red-500/5",
+    icon: AlertCircle,
+    label: "Contradicts",
+  },
+  duplicates: {
+    color: "text-fuchsia-500 border-fuchsia-500/30 bg-fuchsia-500/5",
+    icon: Copy,
+    label: "Duplicate",
+  },
+  unrelated: {
+    color: "text-muted-foreground border-border bg-muted/5",
+    icon: Ghost,
+    label: "Unrelated",
+  },
+};
 
 export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
-  const { mutate } = useSWRConfig()
-  const { trigger: reanalyze, isMutating: reanalyzing } = useReanalyzeItem(entry.id)
-  const { trigger: updateItem } = useUpdateItem(entry.id)
-  const { trigger: createEdge } = useCreateEdge()
+  const { mutate } = useSWRConfig();
+  const { trigger: reanalyze, isMutating: reanalyzing } = useReanalyzeItem(
+    entry.id,
+  );
+  const { trigger: updateItem } = useUpdateItem(entry.id);
+  const { trigger: createEdge } = useCreateEdge();
 
-  const analysis: StoreAnalysis | null = entry.analysis ?? null
+  const analysis: StoreAnalysis | null = entry.analysis ?? null;
 
   const initialOverrides = {
-    title: (entry.metadata.title as string | undefined) ?? analysis?.title ?? "",
-    summary: (entry.metadata.summary as string | undefined) ?? analysis?.summary ?? "",
-    doc_type: (entry.metadata.doc_type as string | undefined) ?? analysis?.doc_type ?? "",
-    freshness: (entry.metadata.freshness as string | undefined) ?? analysis?.freshness ?? "",
+    title:
+      (entry.metadata.title as string | undefined) ?? analysis?.title ?? "",
+    summary:
+      (entry.metadata.summary as string | undefined) ?? analysis?.summary ?? "",
+    doc_type:
+      (entry.metadata.doc_type as string | undefined) ??
+      analysis?.doc_type ??
+      "",
+    freshness:
+      (entry.metadata.freshness as string | undefined) ??
+      analysis?.freshness ??
+      "",
     cluster_hint:
-      (entry.metadata.cluster_hint as string | undefined) ?? analysis?.cluster_hint ?? "",
-  }
+      (entry.metadata.cluster_hint as string | undefined) ??
+      analysis?.cluster_hint ??
+      "",
+  };
   const initialTags = (() => {
-    const meta = entry.metadata.tags
+    const meta = entry.metadata.tags;
     if (typeof meta === "string" && meta.length > 0) {
-      return meta.split(",").map((t) => t.trim()).filter(Boolean)
+      return meta
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
     }
-    return analysis?.tags ?? []
-  })()
+    return analysis?.tags ?? [];
+  })();
 
-  const [editing, setEditing] = useState(false)
-  const [tags, setTags] = useState<string[]>(initialTags)
-  const [tagDraft, setTagDraft] = useState("")
-  const [overrides, setOverrides] = useState(initialOverrides)
-  const [dismissedEdges, setDismissedEdges] = useState<Set<string>>(new Set())
+  const [editing, setEditing] = useState(false);
+  const [tags, setTags] = useState<string[]>(initialTags);
+  const [tagDraft, setTagDraft] = useState("");
+  const [overrides, setOverrides] = useState(initialOverrides);
+  const [dismissedEdges, setDismissedEdges] = useState<Set<string>>(new Set());
 
   const handleReanalyze = async () => {
     try {
-      const updated = await reanalyze()
-      mutate(["item", entry.id], updated, { revalidate: false })
-      toast.success("Re-analyzed")
+      const updated = await reanalyze();
+      mutate(["item", entry.id], updated, { revalidate: false });
+      toast.success("Re-analyzed");
     } catch (e) {
-      toast.error(`Re-analyze failed: ${e instanceof Error ? e.message : "unknown"}`)
+      toast.error(
+        `Re-analyze failed: ${e instanceof Error ? e.message : "unknown"}`,
+      );
     }
-  }
+  };
 
   const handleSaveRefinements = async () => {
     try {
@@ -93,14 +150,14 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           freshness: overrides.freshness || null,
           cluster_hint: overrides.cluster_hint || null,
         },
-      })
-      mutate(["item", entry.id])
-      setEditing(false)
-      toast.success("Refinements saved to metadata")
+      });
+      mutate(["item", entry.id]);
+      setEditing(false);
+      toast.success("Refinements saved to metadata");
     } catch (e) {
-      toast.error(`Save failed: ${e instanceof Error ? e.message : "unknown"}`)
+      toast.error(`Save failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
-  }
+  };
 
   const handleApplyEdge = async (edge: StoreAnalysisSuggestedEdge) => {
     try {
@@ -110,23 +167,23 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
         relationship: edge.rel || "related",
         weight: edge.weight,
         directed: true,
-      })
-      mutate(["edges", entry.id])
-      setDismissedEdges((s) => new Set(s).add(edge.target_id))
-      toast.success(`Edge to ${edge.target_id.slice(0, 16)}… created`)
+      });
+      mutate(["edges", entry.id]);
+      setDismissedEdges((s) => new Set(s).add(edge.target_id));
+      toast.success(`Edge to ${edge.target_id.slice(0, 16)}… created`);
     } catch (e) {
-      toast.error(`Edge failed: ${e instanceof Error ? e.message : "unknown"}`)
+      toast.error(`Edge failed: ${e instanceof Error ? e.message : "unknown"}`);
     }
-  }
+  };
 
   const addTag = () => {
-    const t = tagDraft.trim()
-    if (!t || tags.includes(t)) return
-    setTags([...tags, t])
-    setTagDraft("")
-  }
+    const t = tagDraft.trim();
+    if (!t || tags.includes(t)) return;
+    setTags([...tags, t]);
+    setTagDraft("");
+  };
 
-  const removeTag = (t: string) => setTags(tags.filter((x) => x !== t))
+  const removeTag = (t: string) => setTags(tags.filter((x) => x !== t));
 
   if (!analysis && !reanalyzing) {
     return (
@@ -144,23 +201,28 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           </Button>
         </div>
       </div>
-    )
+    );
   }
 
-  const a = analysis ?? ({} as StoreAnalysis)
-  const at = entry.analysis_at ? new Date(entry.analysis_at).toLocaleString() : "—"
+  const a = analysis ?? ({} as StoreAnalysis);
+  const at = entry.analysis_at
+    ? new Date(entry.analysis_at).toLocaleString()
+    : "—";
 
   const mergedRelated = (() => {
-    const map = new Map<string, {
-      id: string
-      title?: string | null
-      thumbnail?: string | null
-      sourceType?: string | null
-      neighborRelation?: string | null
-      isNeighbor: boolean
-      verdict?: StoreAnalysisVerdict
-      suggestedEdge?: StoreAnalysisSuggestedEdge
-    }>()
+    const map = new Map<
+      string,
+      {
+        id: string;
+        title?: string | null;
+        thumbnail?: string | null;
+        sourceType?: string | null;
+        neighborRelation?: string | null;
+        isNeighbor: boolean;
+        verdict?: StoreAnalysisVerdict;
+        suggestedEdge?: StoreAnalysisSuggestedEdge;
+      }
+    >();
 
     // 1. Populate from neighbors
     if (entry.neighbors) {
@@ -172,22 +234,22 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           sourceType: n.source_type,
           neighborRelation: n.relationship,
           isNeighbor: true,
-        })
+        });
       }
     }
 
     // 2. Populate from verdicts
     if (a.verdicts) {
       for (const v of a.verdicts) {
-        const existing = map.get(v.target_id)
+        const existing = map.get(v.target_id);
         if (existing) {
-          existing.verdict = v
+          existing.verdict = v;
         } else {
           map.set(v.target_id, {
             id: v.target_id,
             isNeighbor: false,
             verdict: v,
-          })
+          });
         }
       }
     }
@@ -195,73 +257,80 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
     // 3. Populate from suggested edges
     if (a.suggested_edges) {
       for (const se of a.suggested_edges) {
-        const existing = map.get(se.target_id)
+        const existing = map.get(se.target_id);
         if (existing) {
-          existing.suggestedEdge = se
+          existing.suggestedEdge = se;
         } else {
           map.set(se.target_id, {
             id: se.target_id,
             isNeighbor: false,
             suggestedEdge: se,
-          })
+          });
         }
       }
     }
 
     // Convert to array
-    const items = Array.from(map.values())
+    const items = Array.from(map.values());
 
     // Filter out dismissed suggested edges ONLY if they don't have any other relationship/verdict
-    const activeItems = items.map(item => {
-      if (dismissedEdges.has(item.id)) {
-        return {
-          ...item,
-          suggestedEdge: undefined,
+    const activeItems = items
+      .map((item) => {
+        if (dismissedEdges.has(item.id)) {
+          return {
+            ...item,
+            suggestedEdge: undefined,
+          };
         }
-      }
-      return item
-    }).filter(item => {
-      const hasInfo = item.isNeighbor || item.verdict || item.suggestedEdge
-      return hasInfo
-    })
+        return item;
+      })
+      .filter((item) => {
+        const hasInfo = item.isNeighbor || item.verdict || item.suggestedEdge;
+        return hasInfo;
+      });
 
     // Sort:
     // - Unrelated items last (verdict.relation === "unrelated")
     // - Non-unrelated items first
     // - Within each group, sort by max score (verdict confidence, suggested edge weight, or neighbor similarity 0.5)
     return activeItems.sort((x, y) => {
-      const isXUnrelated = x.verdict?.relation === "unrelated"
-      const isYUnrelated = y.verdict?.relation === "unrelated"
+      const isXUnrelated = x.verdict?.relation === "unrelated";
+      const isYUnrelated = y.verdict?.relation === "unrelated";
 
-      if (isXUnrelated && !isYUnrelated) return 1
-      if (!isXUnrelated && isYUnrelated) return -1
+      if (isXUnrelated && !isYUnrelated) return 1;
+      if (!isXUnrelated && isYUnrelated) return -1;
 
       const valX = Math.max(
         x.verdict?.confidence ?? 0,
         x.suggestedEdge?.weight ?? 0,
-        x.isNeighbor ? 0.5 : 0
-      )
+        x.isNeighbor ? 0.5 : 0,
+      );
       const valY = Math.max(
         y.verdict?.confidence ?? 0,
         y.suggestedEdge?.weight ?? 0,
-        y.isNeighbor ? 0.5 : 0
-      )
-      if (valX !== valY) return valY - valX
+        y.isNeighbor ? 0.5 : 0,
+      );
+      if (valX !== valY) return valY - valX;
 
-      return x.id.localeCompare(y.id)
-    })
-  })()
+      return x.id.localeCompare(y.id);
+    });
+  })();
 
-  const getRelationConfig = (item: typeof mergedRelated[0]) => {
-    const rel = item.verdict?.relation || item.suggestedEdge?.rel || item.neighborRelation
-    if (!rel) return RELATION_CONFIG.unrelated
-    const r = rel.toLowerCase()
-    return RELATION_CONFIG[r] || {
-      color: "text-primary border-primary/20 bg-primary/5",
-      icon: GitBranch,
-      label: rel,
-    }
-  }
+  const getRelationConfig = (item: (typeof mergedRelated)[0]) => {
+    const rel =
+      item.verdict?.relation ||
+      item.suggestedEdge?.rel ||
+      item.neighborRelation;
+    if (!rel) return RELATION_CONFIG.unrelated;
+    const r = rel.toLowerCase();
+    return (
+      RELATION_CONFIG[r] || {
+        color: "text-primary border-primary/20 bg-primary/5",
+        icon: GitBranch,
+        label: rel,
+      }
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -271,7 +340,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
             Intelligence Report
           </h2>
           <div className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
-            <span className="text-primary/60">{entry.analysis_model || "unknown-model"}</span>
+            <span className="text-primary/60">
+              {entry.analysis_model || "unknown-model"}
+            </span>
             <span className="size-1 rounded-full bg-border" />
             <span>{at}</span>
           </div>
@@ -285,7 +356,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
             className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest font-black"
           >
             {editing ? (
-              <><Save className="size-3 mr-1.5" /> Save</>
+              <>
+                <Save className="size-3 mr-1.5" /> Save
+              </>
             ) : (
               "Refine"
             )}
@@ -295,9 +368,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
               size="sm"
               variant="ghost"
               onClick={() => {
-                setEditing(false)
-                setTags(initialTags)
-                setOverrides(initialOverrides)
+                setEditing(false);
+                setTags(initialTags);
+                setOverrides(initialOverrides);
               }}
               className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest text-muted-foreground"
             >
@@ -311,7 +384,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
             disabled={reanalyzing}
             className="h-7 px-3 font-mono text-[10px] uppercase tracking-widest border-primary/30 text-primary hover:bg-primary/5"
           >
-            <RefreshCw className={`size-3 mr-1.5 ${reanalyzing ? "animate-spin" : ""}`} />
+            <RefreshCw
+              className={`size-3 mr-1.5 ${reanalyzing ? "animate-spin" : ""}`}
+            />
             Re-run
           </Button>
         </div>
@@ -344,7 +419,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
               <LabeledInput
                 label="Cluster"
                 value={overrides.cluster_hint}
-                onChange={(v) => setOverrides({ ...overrides, cluster_hint: v })}
+                onChange={(v) =>
+                  setOverrides({ ...overrides, cluster_hint: v })
+                }
               />
             </div>
           </div>
@@ -352,7 +429,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           <div className="space-y-6">
             <div className="space-y-2">
               <FieldLabel>Executive Summary</FieldLabel>
-              <h3 className="text-lg font-bold text-foreground/90">{a.title || "No Title Extracted"}</h3>
+              <h3 className="text-lg font-bold text-foreground/90">
+                {a.title || "No Title Extracted"}
+              </h3>
               <p className="text-sm leading-relaxed text-muted-foreground italic font-serif">
                 {a.summary || "No summary available."}
               </p>
@@ -361,15 +440,21 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t border-border/40">
               <div className="space-y-1">
                 <FieldLabel>Doc Type</FieldLabel>
-                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">{a.doc_type || "—"}</div>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">
+                  {a.doc_type || "—"}
+                </div>
               </div>
               <div className="space-y-1">
                 <FieldLabel>Freshness</FieldLabel>
-                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">{a.freshness || "—"}</div>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase">
+                  {a.freshness || "—"}
+                </div>
               </div>
               <div className="space-y-1">
                 <FieldLabel>Cluster</FieldLabel>
-                <div className="text-xs font-mono font-bold text-foreground/80 uppercase truncate">{a.cluster_hint || "—"}</div>
+                <div className="text-xs font-mono font-bold text-foreground/80 uppercase truncate">
+                  {a.cluster_hint || "—"}
+                </div>
               </div>
               <div className="space-y-1">
                 <FieldLabel>Quality</FieldLabel>
@@ -385,7 +470,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
               <div className="mt-4 p-3 bg-red-500/5 border border-red-500/20 rounded-lg">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertTriangle className="size-3 text-red-500" />
-                  <span className="font-mono text-[9px] font-black uppercase tracking-widest text-red-500">Quality Alerts</span>
+                  <span className="font-mono text-[9px] font-black uppercase tracking-widest text-red-500">
+                    Quality Alerts
+                  </span>
                 </div>
                 <ul className="text-xs text-red-400 space-y-1 list-none">
                   {a.quality.issues.map((i, idx) => (
@@ -405,7 +492,10 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
       <div className="space-y-3">
         <FieldLabel>Tags</FieldLabel>
         <div className="flex flex-wrap gap-2">
-          <EntryTagList tags={tags} onRemoveTag={editing ? removeTag : undefined} />
+          <EntryTagList
+            tags={tags}
+            onRemoveTag={editing ? removeTag : undefined}
+          />
           {editing && (
             <div className="flex gap-2 w-full sm:w-auto">
               <Input
@@ -413,14 +503,19 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                 onChange={(e) => setTagDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    e.preventDefault()
-                    addTag()
+                    e.preventDefault();
+                    addTag();
                   }
                 }}
                 placeholder="add tag…"
                 className="h-7 text-[10px] font-mono bg-muted/20 border-border/40 w-32"
               />
-              <Button size="sm" variant="outline" onClick={addTag} className="h-7 w-7 p-0 border-primary/20 text-primary">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={addTag}
+                className="h-7 w-7 p-0 border-primary/20 text-primary"
+              >
                 <Plus className="size-3" />
               </Button>
             </div>
@@ -437,16 +532,16 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           </div>
           <div className="grid grid-cols-1 gap-3">
             {mergedRelated.map((item) => {
-              const isUnrelated = item.verdict?.relation === "unrelated"
-              const config = getRelationConfig(item)
-              const Icon = config.icon
+              const isUnrelated = item.verdict?.relation === "unrelated";
+              const config = getRelationConfig(item);
+              const Icon = config.icon;
 
               const existingEdge = edges?.find(
                 (edge) =>
                   (edge.source_id === entry.id && edge.target_id === item.id) ||
-                  (edge.target_id === entry.id && edge.source_id === item.id)
-              )
-              const isConnected = !!existingEdge
+                  (edge.target_id === entry.id && edge.source_id === item.id),
+              );
+              const isConnected = !!existingEdge;
 
               return (
                 <div
@@ -454,7 +549,8 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                   className={cn(
                     "relative group flex flex-col md:flex-row gap-4 justify-between items-start md:items-center border p-4 transition-all duration-300 rounded-xl bg-card/40 hover:bg-card/75 dark:hover:bg-black/60 shadow-sm",
                     config.color,
-                    isUnrelated && "opacity-60 hover:opacity-100 grayscale-[0.5] hover:grayscale-0 bg-muted/5 border-border text-muted-foreground"
+                    isUnrelated &&
+                      "opacity-60 hover:opacity-100 grayscale-[0.5] hover:grayscale-0 bg-muted/5 border-border text-muted-foreground",
                   )}
                 >
                   <div className="flex gap-3 flex-1 min-w-0">
@@ -482,12 +578,18 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                           </span>
                         )}
                         {item.isNeighbor && !item.neighborRelation && (
-                          <Badge variant="outline" className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-muted-foreground/20 text-muted-foreground/80 leading-none">
+                          <Badge
+                            variant="outline"
+                            className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-muted-foreground/20 text-muted-foreground/80 leading-none"
+                          >
                             Similar
                           </Badge>
                         )}
                         {isConnected && (
-                          <Badge variant="outline" className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-emerald-500/30 text-emerald-500 bg-emerald-500/5 leading-none">
+                          <Badge
+                            variant="outline"
+                            className="h-4 px-1.5 font-mono text-[8px] uppercase tracking-tighter border-emerald-500/30 text-emerald-500 bg-emerald-500/5 leading-none"
+                          >
                             Connected: {existingEdge.relationship}
                           </Badge>
                         )}
@@ -513,7 +615,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                           <div className="w-16 h-1 bg-current/10 rounded-full overflow-hidden hidden sm:block">
                             <div
                               className="h-full bg-current transition-all duration-1000"
-                              style={{ width: `${item.verdict.confidence * 100}%` }}
+                              style={{
+                                width: `${item.verdict.confidence * 100}%`,
+                              }}
                             />
                           </div>
                           <span className="font-mono text-[9px] tabular-nums opacity-60">
@@ -541,7 +645,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => setDismissedEdges((s) => new Set(s).add(item.id))}
+                          onClick={() =>
+                            setDismissedEdges((s) => new Set(s).add(item.id))
+                          }
                           className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500 transition-all duration-200"
                         >
                           <X className="size-3.5" />
@@ -550,7 +656,7 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                     )}
                   </div>
                 </div>
-              )
+              );
             })}
           </div>
         </div>
@@ -562,7 +668,9 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
           <summary className="flex items-center gap-2 font-mono text-[10px] font-black uppercase tracking-[2px] text-muted-foreground hover:text-primary cursor-pointer transition-colors list-none">
             <Terminal className="size-3.5" />
             Raw Model Output
-            <span className="ml-auto text-[8px] opacity-0 group-open:opacity-100">READONLY MONACO</span>
+            <span className="ml-auto text-[8px] opacity-0 group-open:opacity-100">
+              READONLY MONACO
+            </span>
           </summary>
           <div className="rounded-lg border border-border bg-muted/20 dark:bg-black/40 overflow-hidden shadow-inner">
             <Editor
@@ -578,7 +686,7 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
                 lineNumbers: "on",
                 scrollBeyondLastLine: false,
                 padding: { top: 12, bottom: 12 },
-                backgroundColor: "#00000000",
+                //backgroundColor: "#00000000",
                 domReadOnly: true,
               }}
             />
@@ -586,7 +694,7 @@ export function AnalysisPanel({ entry, edges }: AnalysisPanelProps) {
         </details>
       )}
     </div>
-  )
+  );
 }
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
@@ -594,7 +702,7 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
     <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
       {children}
     </span>
-  )
+  );
 }
 
 function LabeledInput({
@@ -602,9 +710,9 @@ function LabeledInput({
   value,
   onChange,
 }: {
-  label: string
-  value: string
-  onChange: (v: string) => void
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
 }) {
   return (
     <div className="space-y-1">
@@ -615,7 +723,7 @@ function LabeledInput({
         className="h-8 text-xs font-mono"
       />
     </div>
-  )
+  );
 }
 
 function LabeledTextarea({
@@ -623,9 +731,9 @@ function LabeledTextarea({
   value,
   onChange,
 }: {
-  label: string
-  value: string
-  onChange: (v: string) => void
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
 }) {
   return (
     <div className="space-y-1">
@@ -636,5 +744,5 @@ function LabeledTextarea({
         className="text-xs font-mono min-h-[60px]"
       />
     </div>
-  )
+  );
 }
