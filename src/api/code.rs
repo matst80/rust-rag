@@ -8,15 +8,13 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiError, AppState};
-use crate::code::ingest::{
-    ingest_file_content, IngestOptions, IngestReport, MAX_FILE_BYTES,
-};
+use crate::code::ingest::{IngestOptions, IngestReport, MAX_FILE_BYTES, ingest_file_content};
 use crate::db::code::{CodeFile, CodeRepo};
 use crate::db::code_store::CodeStore;
 
@@ -275,9 +273,7 @@ pub async fn upsert_repo(
     }))
 }
 
-pub async fn list_repos(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<RepoSummary>>, ApiError> {
+pub async fn list_repos(State(state): State<AppState>) -> Result<Json<Vec<RepoSummary>>, ApiError> {
     let store = require_store(&state)?;
     let repos = store.list_repos(false).await.map_err(ApiError::Internal)?;
     let mut out = Vec::with_capacity(repos.len());
@@ -520,7 +516,13 @@ pub async fn search_code(
     Ok(Json(
         hits.into_iter()
             .map(|h| {
-                let snippet = h.chunk.content.lines().take(8).collect::<Vec<_>>().join("\n");
+                let snippet = h
+                    .chunk
+                    .content
+                    .lines()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 SearchHit {
                     repo: h.chunk.repo_name,
                     path: h.chunk.path,

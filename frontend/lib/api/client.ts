@@ -96,6 +96,7 @@ interface RawEdge {
   to_item_id: string
   edge_type: string
   relation: string | null
+  sort_order: string
   weight: number
   directed: boolean
   metadata: EntryMetadata
@@ -157,6 +158,7 @@ function toEdge(edge: RawEdge): Edge {
     target_id: edge.to_item_id,
     relationship: edge.relation ?? edge.edge_type,
     edge_type: edge.edge_type,
+    sort_order: edge.sort_order,
     weight: edge.weight,
     directed: edge.directed,
     distance: typeof edge.metadata?.distance === "number" ? edge.metadata.distance : undefined,
@@ -707,6 +709,7 @@ export async function createEdge(data: CreateEdgeRequest): Promise<Edge> {
       from_item_id: data.source_id,
       to_item_id: data.target_id,
       relation: data.relationship,
+      sort_order: data.sort_order,
       directed: data.directed,
       weight: data.weight,
       metadata: data.metadata,

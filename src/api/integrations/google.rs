@@ -134,19 +134,23 @@ pub async fn status(
         return Ok(Json(empty_status()));
     };
     let subject_owned = subject.clone();
-    let record = tokio::task::spawn_blocking(move || {
-        store.find_oauth_credentials(&subject_owned, PROVIDER)
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let record =
+        tokio::task::spawn_blocking(move || store.find_oauth_credentials(&subject_owned, PROVIDER))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
 
     Ok(Json(match record {
         Some(r) => StatusResponse {
             connected: true,
             provider: PROVIDER,
             account_email: r.account_email,
-            scopes: r.scopes.split(' ').filter(|s| !s.is_empty()).map(str::to_owned).collect(),
+            scopes: r
+                .scopes
+                .split(' ')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
             expires_at: r.expires_at,
             updated_at: Some(r.updated_at),
         },
@@ -239,7 +243,9 @@ pub async fn callback(
         .ok_or_else(|| ApiError::ServiceUnavailable("OAUTH_TOKEN_ENC_KEY not configured".into()))?;
 
     if let Some(err) = query.error {
-        return Err(ApiError::BadRequest(format!("google returned error: {err}")));
+        return Err(ApiError::BadRequest(format!(
+            "google returned error: {err}"
+        )));
     }
 
     let code = query
@@ -309,9 +315,10 @@ pub async fn callback(
 
     let return_to = sanitize_return_to(claims.return_to.as_deref());
     let mut response = Redirect::temporary(&return_to).into_response();
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, HeaderValue::from_str(&clear_cookie).unwrap());
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_cookie).unwrap(),
+    );
     Ok(response)
 }
 
@@ -324,12 +331,11 @@ pub async fn disconnect(
         .oauth_creds
         .clone()
         .ok_or_else(|| ApiError::ServiceUnavailable("oauth creds store not wired".into()))?;
-    let deleted = tokio::task::spawn_blocking(move || {
-        store.delete_oauth_credentials(&subject, PROVIDER)
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let deleted =
+        tokio::task::spawn_blocking(move || store.delete_oauth_credentials(&subject, PROVIDER))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(ApiError::Internal)?;
     Ok(Json(DisconnectResponse { deleted }))
 }
 
@@ -384,8 +390,14 @@ async fn exchange_code(
         ("grant_type", "authorization_code"),
         ("code", code),
         ("client_id", cfg.client_id.as_deref().unwrap_or_default()),
-        ("client_secret", cfg.client_secret.as_deref().unwrap_or_default()),
-        ("redirect_uri", cfg.redirect_uri.as_deref().unwrap_or_default()),
+        (
+            "client_secret",
+            cfg.client_secret.as_deref().unwrap_or_default(),
+        ),
+        (
+            "redirect_uri",
+            cfg.redirect_uri.as_deref().unwrap_or_default(),
+        ),
         ("code_verifier", verifier),
     ];
     let resp = state

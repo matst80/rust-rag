@@ -190,6 +190,7 @@ export interface Edge {
   target_id: string;
   relationship: string;
   edge_type: string;
+  sort_order: string;
   weight: number;
   directed: boolean;
   distance?: number;
@@ -207,6 +208,21 @@ export interface GraphNeighborhood {
   nodes: Entry[];
   edges: Edge[];
   pairwise_distances: GraphNodeDistance[];
+}
+
+export interface CmsTreeChild {
+  edge: Edge;
+  node: CmsTreeNode;
+}
+
+export interface CmsTreeNode {
+  entry: Entry;
+  children: CmsTreeChild[];
+}
+
+export interface CmsTreeResponse {
+  root_id: string;
+  tree: CmsTreeNode;
 }
 
 export interface GraphStatus {
@@ -310,12 +326,15 @@ export interface CreateEdgeRequest {
   source_id: string;
   target_id: string;
   relationship: string;
+  sort_order?: string;
   directed?: boolean;
   weight?: number;
   metadata?: EntryMetadata;
 }
 
 export interface UpdateEdgeRequest {
+  relation?: string;
+  sort_order?: string;
   metadata: EntryMetadata;
 }
 

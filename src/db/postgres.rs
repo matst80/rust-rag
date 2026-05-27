@@ -10,11 +10,11 @@ use tracing::info;
 use super::{
     AttachmentRecord, AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord,
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord, MessageQuery,
-    MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth, NewMcpToken,
-    NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord, OAuthCredentialsRecord,
-    OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow, PushStore,
-    PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder, UpsertOAuthCredentials,
+    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord,
+    MessageQuery, MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth,
+    NewMcpToken, NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord,
+    OAuthCredentialsRecord, OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow,
+    PushStore, PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder, UpsertOAuthCredentials,
     UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
 };
 
@@ -97,7 +97,10 @@ async fn seed_default_ontology_predicates(client: &tokio_postgres::Client) -> Re
 
     use crate::db::default_ontology_predicates;
     let predicates = default_ontology_predicates();
-    info!("postgres: seeding {} default ontology predicates", predicates.len());
+    info!(
+        "postgres: seeding {} default ontology predicates",
+        predicates.len()
+    );
     for p in predicates {
         // Stored as source_id='*' so the worker's `WHERE source_id=$1 OR source_id='*'`
         // query picks them up regardless of which namespace the item lives in.
@@ -184,6 +187,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0015_code_ingestion",
         include_str!("../../migrations/0015_code_ingestion.sql"),
     ),
+    (
+        "0016_graph_edge_sort_order",
+        include_str!("../../migrations/0016_graph_edge_sort_order.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -198,10 +205,7 @@ async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
 
     for (name, sql) in MIGRATIONS {
         let already = client
-            .query_opt(
-                "SELECT 1 FROM schema_migrations WHERE name = $1",
-                &[name],
-            )
+            .query_opt("SELECT 1 FROM schema_migrations WHERE name = $1", &[name])
             .await
             .context("checking schema_migrations")?;
         if already.is_some() {
@@ -213,10 +217,7 @@ async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
             .await
             .with_context(|| format!("applying migration {name}"))?;
         client
-            .execute(
-                "INSERT INTO schema_migrations (name) VALUES ($1)",
-                &[name],
-            )
+            .execute("INSERT INTO schema_migrations (name) VALUES ($1)", &[name])
             .await
             .context("recording applied migration")?;
     }
@@ -284,6 +285,7 @@ fn row_to_graph_edge(row: &tokio_postgres::Row) -> Result<GraphEdgeRecord> {
         to_item_id: row.try_get("to_item_id")?,
         edge_type: GraphEdgeType::from_str(&edge_type_str)?,
         relation: row.try_get("relation")?,
+        sort_order: row.try_get("sort_order")?,
         weight: row.try_get("weight")?,
         directed: row.try_get("directed")?,
         metadata: row.try_get::<_, Value>("metadata")?,
@@ -360,7 +362,10 @@ fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
         path: row.try_get("path").ok(),
         type_name: row.try_get::<_, Option<String>>("type").ok().flatten(),
         data: row.try_get::<_, Option<Value>>("data").ok().flatten(),
-        analysis: row.try_get::<_, Option<Value>>("analysis_json").ok().flatten(),
+        analysis: row
+            .try_get::<_, Option<Value>>("analysis_json")
+            .ok()
+            .flatten(),
     })
 }
 
@@ -610,7 +615,9 @@ impl VectorStore for PostgresVectorStore {
                         chunk_text,
                         path: item.path.clone(),
                         type_name: row.try_get::<_, Option<String>>("type")?,
-                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        tags: row
+                            .try_get::<_, Option<Vec<String>>>("tags")?
+                            .unwrap_or_default(),
                         analysis: item.analysis.clone(),
                     })
                 })
@@ -749,14 +756,14 @@ impl VectorStore for PostgresVectorStore {
                 .query(
                     sql,
                     &[
-                        &dense_vec,                  // $1
-                        &sparse_vec,                 // $2
-                        &source,                     // $3
-                        &limit,                      // $4
-                        &RRF_CANDIDATE_LIMIT,        // $5
-                        &RRF_K,                      // $6
-                        &half_life_days,             // $7
-                        &type_name,                  // $8
+                        &dense_vec,           // $1
+                        &sparse_vec,          // $2
+                        &source,              // $3
+                        &limit,               // $4
+                        &RRF_CANDIDATE_LIMIT, // $5
+                        &RRF_K,               // $6
+                        &half_life_days,      // $7
+                        &type_name,           // $8
                     ],
                 )
                 .await?;
@@ -780,8 +787,12 @@ impl VectorStore for PostgresVectorStore {
                     // `1 - distance`) sensible and monotonic in RRF score.
                     let pseudo = 1.0 - (final_score * 10.0).tanh();
                     let mut retrievers = Vec::with_capacity(2);
-                    if matched_dense  { retrievers.push("dense".to_owned());  }
-                    if matched_sparse { retrievers.push("sparse".to_owned()); }
+                    if matched_dense {
+                        retrievers.push("dense".to_owned());
+                    }
+                    if matched_sparse {
+                        retrievers.push("sparse".to_owned());
+                    }
                     Ok(SearchHit {
                         id: item.id.clone(),
                         text: item.text.clone(),
@@ -795,7 +806,9 @@ impl VectorStore for PostgresVectorStore {
                         chunk_text,
                         path: item.path.clone(),
                         type_name: row.try_get::<_, Option<String>>("type")?,
-                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        tags: row
+                            .try_get::<_, Option<Vec<String>>>("tags")?
+                            .unwrap_or_default(),
                         analysis: item.analysis.clone(),
                     })
                 })
@@ -1008,10 +1021,7 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             let row = tx
-                .query_opt(
-                    "SELECT stored_name FROM attachments WHERE id = $1",
-                    &[&id],
-                )
+                .query_opt("SELECT stored_name FROM attachments WHERE id = $1", &[&id])
                 .await?;
             let stored_name: Option<String> = row.map(|r| r.get(0));
             if stored_name.is_some() {
@@ -1023,10 +1033,7 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn list_all_paths(
-        &self,
-        source_id_filter: Option<&str>,
-    ) -> Result<Vec<PathRow>> {
+    fn list_all_paths(&self, source_id_filter: Option<&str>) -> Result<Vec<PathRow>> {
         let pool = self.pool.clone();
         let filter = source_id_filter.map(|s| s.to_owned());
         self.block(async move {
@@ -1063,11 +1070,7 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn list_path_children(
-        &self,
-        source_id: &str,
-        prefix: Option<&str>,
-    ) -> Result<Vec<PathChild>> {
+    fn list_path_children(&self, source_id: &str, prefix: Option<&str>) -> Result<Vec<PathChild>> {
         let pool = self.pool.clone();
         let source = source_id.to_owned();
         let prefix_norm = prefix
@@ -1114,11 +1117,7 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn distances_for_ids(
-        &self,
-        query_embedding: &[f32],
-        ids: &[String],
-    ) -> Result<Vec<SearchHit>> {
+    fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1156,7 +1155,9 @@ impl VectorStore for PostgresVectorStore {
                         chunk_text: None,
                         path: row.try_get("path")?,
                         type_name: row.try_get("type")?,
-                        tags: row.try_get::<_, Option<Vec<String>>>("tags")?.unwrap_or_default(),
+                        tags: row
+                            .try_get::<_, Option<Vec<String>>>("tags")?
+                            .unwrap_or_default(),
                         analysis: item.analysis.clone(),
                     })
                 })
@@ -1183,7 +1184,9 @@ impl VectorStore for PostgresVectorStore {
                         position: row.try_get(0)?,
                         content: row.try_get(1)?,
                         embedding: embedding.to_vec(),
-                        section_path: row.try_get::<_, Option<Vec<String>>>(3)?.unwrap_or_default(),
+                        section_path: row
+                            .try_get::<_, Option<Vec<String>>>(3)?
+                            .unwrap_or_default(),
                         sparse: None,
                     })
                 })
@@ -1284,7 +1287,9 @@ impl VectorStore for PostgresVectorStore {
                 continue;
             }
             for edge in self.list_graph_edges(Some(&current_id), edge_type, None)? {
-                edge_map.entry(edge.id.clone()).or_insert_with(|| edge.clone());
+                edge_map
+                    .entry(edge.id.clone())
+                    .or_insert_with(|| edge.clone());
                 for neighbor_id in [&edge.from_item_id, &edge.to_item_id] {
                     if visited_nodes.len() >= limit || visited_nodes.contains(neighbor_id) {
                         continue;
@@ -1306,11 +1311,14 @@ impl VectorStore for PostgresVectorStore {
         let mut edges: Vec<GraphEdgeRecord> = edge_map
             .into_values()
             .filter(|e| {
-                visited_nodes.contains(&e.from_item_id)
-                    && visited_nodes.contains(&e.to_item_id)
+                visited_nodes.contains(&e.from_item_id) && visited_nodes.contains(&e.to_item_id)
             })
             .collect();
-        edges.sort_by(|a, b| a.id.cmp(&b.id));
+        edges.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         let pairwise_distances = pairwise_doc_distances(self, &ordered_node_ids)?;
 
@@ -1329,7 +1337,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let row = client
                 .query_opt(
-                    "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                    "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                             directed, metadata, created_at, updated_at \
                      FROM graph_edges WHERE id = $1",
                     &[&id],
@@ -1353,13 +1361,13 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let rows = client
                 .query(
-                    "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                    "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                             directed, metadata, created_at, updated_at \
                      FROM graph_edges \
                      WHERE ($1::TEXT IS NULL OR from_item_id = $1 OR to_item_id = $1) \
                        AND ($2::TEXT IS NULL OR edge_type = $2) \
                        AND ($3::TEXT IS NULL OR metadata->>'status' = $3) \
-                     ORDER BY updated_at DESC, id ASC",
+                     ORDER BY sort_order ASC, updated_at DESC, id ASC",
                     &[&item_id, &edge_type_str, &status],
                 )
                 .await?;
@@ -1494,13 +1502,14 @@ impl VectorStore for PostgresVectorStore {
                 let edge_id = format!("similarity:{from_id}:{to_id}");
                 tx.execute(
                     "INSERT INTO graph_edges \
-                         (id, from_item_id, to_item_id, edge_type, relation, weight, \
+                         (id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                           directed, metadata, created_at, updated_at) \
-                     VALUES ($1, $2, $3, 'similarity', NULL, $4, FALSE, $5, $6, $6)",
+                     VALUES ($1, $2, $3, 'similarity', NULL, $4, $5, FALSE, $6, $7, $7)",
                     &[
                         &edge_id,
                         &from_id,
                         &to_id,
+                        &super::format_edge_sort_order((inserted + 1) as i64),
                         &weight,
                         &metadata,
                         &now,
@@ -1521,7 +1530,7 @@ impl VectorStore for PostgresVectorStore {
         let pool = self.pool.clone();
         self.block(async move {
             let client = pool.get().await.context("acquiring postgres connection")?;
-            
+
             // Find pairs with > 1 edge
             let rows = client
                 .query(
@@ -1537,23 +1546,23 @@ impl VectorStore for PostgresVectorStore {
             for row in rows {
                 let from: String = row.get(0);
                 let to: String = row.get(1);
-                
+
                 let edge_rows = client
                     .query(
-                        "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                        "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                 directed, metadata, created_at, updated_at \
                          FROM graph_edges \
                          WHERE from_item_id = $1 AND to_item_id = $2 \
-                         ORDER BY updated_at DESC",
+                         ORDER BY sort_order ASC, updated_at DESC, id ASC",
                         &[&from, &to],
                     )
                     .await?;
-                
+
                 let mut edges = Vec::with_capacity(edge_rows.len());
                 for er in edge_rows {
                     edges.push(row_to_graph_edge(&er)?);
                 }
-                
+
                 groups.push(super::DuplicateEdgeGroup {
                     from_item_id: from,
                     to_item_id: to,
@@ -1590,14 +1599,12 @@ impl VectorStore for PostgresVectorStore {
         );
         let pool = self.pool.clone();
         let relation_owned = input.relation.map(|r| r.into_owned());
+        let explicit_sort_order = input.sort_order.clone();
         // Detect ontology-worker source so we can de-dup against the partial
         // unique index from migration 0011. Other manual edges (human curator)
         // are not covered by that index and always insert fresh.
-        let from_ontology = input
-            .metadata
-            .get("source")
-            .and_then(|v| v.as_str())
-            == Some("ontology_worker");
+        let from_ontology =
+            input.metadata.get("source").and_then(|v| v.as_str()) == Some("ontology_worker");
         let record = self.block(async move {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
@@ -1611,6 +1618,20 @@ impl VectorStore for PostgresVectorStore {
                     anyhow::bail!("item {endpoint} not found");
                 }
             }
+            let sort_order = match explicit_sort_order.as_deref() {
+                Some(value) => super::normalize_edge_sort_order(value)?,
+                None => {
+                    let row = tx
+                        .query_one(
+                            "SELECT COALESCE(MAX(CAST(sort_order AS BIGINT)), 0)::BIGINT
+                             FROM graph_edges WHERE from_item_id = $1",
+                            &[&input.from_item_id],
+                        )
+                        .await?;
+                    let current: i64 = row.get(0);
+                    super::format_edge_sort_order(current + super::EDGE_SORT_ORDER_STEP)
+                }
+            };
             // For ontology-worker edges, an existing row for the same
             // (from, to, relation) tuple is a no-op — keep the original
             // verdict (and any HITL approval/rejection state). Return the
@@ -1618,19 +1639,20 @@ impl VectorStore for PostgresVectorStore {
             let inserted_row = if from_ontology {
                 tx.query_opt(
                     "INSERT INTO graph_edges \
-                         (id, from_item_id, to_item_id, edge_type, relation, weight, \
+                         (id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                           directed, metadata, created_at, updated_at) \
-                     VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8) \
+                     VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $9, $9) \
                      ON CONFLICT (from_item_id, to_item_id) \
                          WHERE edge_type = 'manual' AND metadata->>'source' = 'ontology_worker' \
                      DO NOTHING \
-                     RETURNING id, from_item_id, to_item_id, edge_type, relation, weight, \
+                     RETURNING id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                directed, metadata, created_at, updated_at",
                     &[
                         &edge_id,
                         &input.from_item_id,
                         &input.to_item_id,
                         &relation_owned,
+                        &sort_order,
                         &input.weight,
                         &input.directed,
                         &input.metadata,
@@ -1642,16 +1664,17 @@ impl VectorStore for PostgresVectorStore {
                 Some(
                     tx.query_one(
                         "INSERT INTO graph_edges \
-                             (id, from_item_id, to_item_id, edge_type, relation, weight, \
+                             (id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                               directed, metadata, created_at, updated_at) \
-                         VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $8) \
-                         RETURNING id, from_item_id, to_item_id, edge_type, relation, weight, \
+                         VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $9, $9) \
+                         RETURNING id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                    directed, metadata, created_at, updated_at",
                         &[
                             &edge_id,
                             &input.from_item_id,
                             &input.to_item_id,
                             &relation_owned,
+                            &sort_order,
                             &input.weight,
                             &input.directed,
                             &input.metadata,
@@ -1667,7 +1690,7 @@ impl VectorStore for PostgresVectorStore {
                     // Conflict — fetch and return the existing edge so the
                     // caller's logging stays meaningful.
                     tx.query_one(
-                        "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, \
+                        "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                 directed, metadata, created_at, updated_at \
                          FROM graph_edges \
                          WHERE edge_type = 'manual' \
@@ -1709,7 +1732,13 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(
+        &self,
+        id: &str,
+        relation: Option<String>,
+        metadata: Value,
+        sort_order: Option<String>,
+    ) -> Result<GraphEdgeRecord> {
         if !self.graph_config.enabled {
             anyhow::bail!("graph features are disabled");
         }
@@ -1719,22 +1748,27 @@ impl VectorStore for PostgresVectorStore {
         self.block(async move {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
-            
+
             let row = tx
-                .query_opt("SELECT id FROM graph_edges WHERE id = $1 FOR UPDATE", &[&id])
+                .query_opt("SELECT sort_order FROM graph_edges WHERE id = $1 FOR UPDATE", &[&id])
                 .await?;
-            if row.is_none() {
+            let Some(row) = row else {
                 anyhow::bail!("edge {id} not found");
-            }
+            };
+            let current_sort_order: String = row.get(0);
+            let normalized_sort_order = match sort_order {
+                Some(value) => super::normalize_edge_sort_order(&value)?,
+                None => current_sort_order,
+            };
 
             tx.execute(
-                "UPDATE graph_edges SET relation = $1, metadata = $2, updated_at = $3 WHERE id = $4",
-                &[&relation, &metadata, &timestamp, &id],
+                "UPDATE graph_edges SET relation = $1, sort_order = $2, metadata = $3, updated_at = $4 WHERE id = $5",
+                &[&relation, &normalized_sort_order, &metadata, &timestamp, &id],
             )
             .await?;
 
             let row = tx.query_one(
-                "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at \
+                "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at \
                  FROM graph_edges WHERE id = $1",
                 &[&id],
             ).await?;
@@ -1746,11 +1780,12 @@ impl VectorStore for PostgresVectorStore {
                 to_item_id: row.get(2),
                 edge_type: GraphEdgeType::from_str(&edge_type_str).unwrap_or(GraphEdgeType::Manual),
                 relation: row.get(4),
-                weight: row.get(5),
-                directed: row.get(6),
-                metadata: row.get(7),
-                created_at: row.get(8),
-                updated_at: row.get(9),
+                sort_order: row.get(5),
+                weight: row.get(6),
+                directed: row.get(7),
+                metadata: row.get(8),
+                created_at: row.get(9),
+                updated_at: row.get(10),
             };
 
             tx.commit().await?;
@@ -1795,9 +1830,14 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn list_ontology_predicates(&self, source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+    fn list_ontology_predicates(
+        &self,
+        source_id: Option<&str>,
+    ) -> Result<Vec<OntologyPredicateRecord>> {
         let pool = self.pool.clone();
-        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        let sid = source_id
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| "*".to_owned());
         self.block(async move {
             let client = pool.get().await?;
             let rows = client
@@ -1831,10 +1871,16 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
-    fn get_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+    fn get_ontology_predicate(
+        &self,
+        name: &str,
+        source_id: Option<&str>,
+    ) -> Result<Option<OntologyPredicateRecord>> {
         let pool = self.pool.clone();
         let name = name.to_owned();
-        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        let sid = source_id
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| "*".to_owned());
         self.block(async move {
             let client = pool.get().await?;
             let row = client
@@ -1895,7 +1941,9 @@ impl VectorStore for PostgresVectorStore {
     fn delete_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<bool> {
         let pool = self.pool.clone();
         let name = name.to_owned();
-        let sid = source_id.map(|s| s.to_owned()).unwrap_or_else(|| "*".to_owned());
+        let sid = source_id
+            .map(|s| s.to_owned())
+            .unwrap_or_else(|| "*".to_owned());
         self.block(async move {
             let client = pool.get().await?;
             let n = client
@@ -2061,7 +2109,9 @@ impl VectorStore for PostgresVectorStore {
             let Some(row) = row else {
                 return Ok(false);
             };
-            let mut metadata: Value = row.try_get("metadata").unwrap_or(Value::Object(Default::default()));
+            let mut metadata: Value = row
+                .try_get("metadata")
+                .unwrap_or(Value::Object(Default::default()));
             let column_tags: Vec<String> = row.try_get("tags").unwrap_or_default();
             let obj = metadata
                 .as_object_mut()
@@ -2240,9 +2290,7 @@ impl MessageStore for PostgresVectorStore {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let row = client
                 .query_opt(
-                    &format!(
-                        "DELETE FROM messages WHERE id = $1 RETURNING {MESSAGE_COLUMNS}"
-                    ),
+                    &format!("DELETE FROM messages WHERE id = $1 RETURNING {MESSAGE_COLUMNS}"),
                     &[&id],
                 )
                 .await?;
@@ -2294,9 +2342,7 @@ impl MessageStore for PostgresVectorStore {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let rows = client
                 .query(
-                    &format!(
-                        "DELETE FROM messages WHERE channel = $1 RETURNING {MESSAGE_COLUMNS}"
-                    ),
+                    &format!("DELETE FROM messages WHERE channel = $1 RETURNING {MESSAGE_COLUMNS}"),
                     &[&channel],
                 )
                 .await?;
@@ -2327,8 +2373,7 @@ impl MessageStore for PostgresVectorStore {
             if let Some(min_at) = query.min_created_at {
                 params.push(Box::new(min_at));
                 let idx = params.len();
-                where_clauses
-                    .push(format!("(created_at >= ${idx} OR updated_at >= ${idx})"));
+                where_clauses.push(format!("(created_at >= ${idx} OR updated_at >= ${idx})"));
             }
             if let Some(max_at) = query.max_created_at {
                 params.push(Box::new(max_at));
@@ -2491,9 +2536,7 @@ impl AuthStore for PostgresVectorStore {
             let client = pool.get().await.context("acquiring postgres connection")?;
             let row = client
                 .query_opt(
-                    &format!(
-                        "SELECT {MCP_TOKEN_COLUMNS} FROM mcp_tokens WHERE token_hash = $1"
-                    ),
+                    &format!("SELECT {MCP_TOKEN_COLUMNS} FROM mcp_tokens WHERE token_hash = $1"),
                     &[&hash],
                 )
                 .await?;
@@ -2771,8 +2814,7 @@ impl AuthStore for PostgresVectorStore {
     }
 }
 
-const OAUTH_CREDS_COLUMNS: &str =
-    "subject, provider, access_token_enc, refresh_token_enc, scopes, expires_at, account_email, \
+const OAUTH_CREDS_COLUMNS: &str = "subject, provider, access_token_enc, refresh_token_enc, scopes, expires_at, account_email, \
      created_at, updated_at";
 
 fn row_to_oauth_creds(row: &tokio_postgres::Row) -> Result<OAuthCredentialsRecord> {
@@ -3096,11 +3138,7 @@ impl UserMemoryStore for PostgresVectorStore {
         })
     }
 
-    fn get_recent_query_embeddings(
-        &self,
-        subject: &str,
-        limit: usize,
-    ) -> Result<Vec<Vec<f32>>> {
+    fn get_recent_query_embeddings(&self, subject: &str, limit: usize) -> Result<Vec<Vec<f32>>> {
         let pool = self.pool.clone();
         let subject = subject.to_owned();
         let limit = limit as i64;

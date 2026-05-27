@@ -231,9 +231,7 @@ async fn generate_sub_queries(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_else(|_| status.to_string());
-        return Err(anyhow!(
-            "upstream chat provider returned {status}: {body}"
-        ));
+        return Err(anyhow!("upstream chat provider returned {status}: {body}"));
     }
 
     let body: Value = response.json().await?;
@@ -314,29 +312,33 @@ async fn run_search(
     top_k: usize,
     max_distance: f32,
 ) -> anyhow::Result<Vec<SearchResultPayload>> {
-    let embedder = state.embedder.get_ready().map_err(|error| anyhow!(error.to_string()))?;
+    let embedder = state
+        .embedder
+        .get_ready()
+        .map_err(|error| anyhow!(error.to_string()))?;
     let store = state.store.clone();
     let query_owned = query.to_owned();
     let source_owned = source_id.map(|s| s.to_owned());
     let type_name_owned = type_name.map(|s| s.to_owned());
 
-    let results = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
-        let (embedding, sparse) = embedder.embed_both(&query_owned)?;
-        let hits = store.search_hybrid(
-            &query_owned,
-            &embedding,
-            &sparse,
-            top_k,
-            source_owned.as_deref(),
-            type_name_owned.as_deref(),
-        )?;
-        Ok(hits
-            .into_iter()
-            .filter(|hit| hit.distance <= max_distance)
-            .map(SearchResultPayload::from)
-            .collect())
-    })
-    .await??;
+    let results =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
+            let (embedding, sparse) = embedder.embed_both(&query_owned)?;
+            let hits = store.search_hybrid(
+                &query_owned,
+                &embedding,
+                &sparse,
+                top_k,
+                source_owned.as_deref(),
+                type_name_owned.as_deref(),
+            )?;
+            Ok(hits
+                .into_iter()
+                .filter(|hit| hit.distance <= max_distance)
+                .map(SearchResultPayload::from)
+                .collect())
+        })
+        .await??;
 
     Ok(results)
 }

@@ -31,11 +31,11 @@ import { ThemeToggle } from "@/components/theme-toggle"
 
 const navigation = [
   { name: "Search", href: "/", icon: Search },
-  { name: "Agents", href: "/acp", icon: Terminal },
   { name: "Kanban", href: "/kanban", icon: LayoutGrid },
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Wiki", href: "/wiki", icon: FolderTree },
   { name: "Graph", href: "/visualize", icon: GitBranch },
+  { name: "Agents", href: "/acp", icon: Terminal },
 ]
 
 const navigationRight = [

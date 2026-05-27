@@ -284,7 +284,11 @@ pub async fn upload_multipart(
     let extension = safe_name
         .as_deref()
         .and_then(extension_from_filename)
-        .or_else(|| mime.as_deref().and_then(extension_from_mime).map(str::to_owned))
+        .or_else(|| {
+            mime.as_deref()
+                .and_then(extension_from_mime)
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     let stored_name = write_to_disk(&state, &bytes, &extension).await?;
     let sha = format!("{:x}", Sha256::digest(&bytes));
@@ -373,7 +377,10 @@ async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<Stri
 
         let resp = client
             .get(current.clone())
-            .header("Accept", "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8")
+            .header(
+                "Accept",
+                "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8",
+            )
             .send()
             .await
             .map_err(|e| ApiError::BadRequest(format!("fetch failed: {e}")))?;
@@ -390,9 +397,7 @@ async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<Stri
             continue;
         }
         if !status.is_success() {
-            return Err(ApiError::BadRequest(format!(
-                "remote returned {status}"
-            )));
+            return Err(ApiError::BadRequest(format!("remote returned {status}")));
         }
         if let Some(len) = resp.content_length() {
             if len > max_bytes {
@@ -444,14 +449,25 @@ pub async fn attach_from_url_core(
     let extension = filename
         .as_deref()
         .and_then(extension_from_filename)
-        .or_else(|| mime.as_deref().and_then(extension_from_mime).map(str::to_owned))
+        .or_else(|| {
+            mime.as_deref()
+                .and_then(extension_from_mime)
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
     let stored_name = write_to_disk(state, &bytes, &extension).await?;
     let sha = format!("{:x}", Sha256::digest(&bytes));
     let size = i64::try_from(bytes.len()).ok();
-    let record =
-        persist_record(state, request.item_id, filename, stored_name, mime, size, Some(sha))
-            .await?;
+    let record = persist_record(
+        state,
+        request.item_id,
+        filename,
+        stored_name,
+        mime,
+        size,
+        Some(sha),
+    )
+    .await?;
     Ok(record.into())
 }
 
@@ -509,8 +525,7 @@ pub async fn entries_tree_core(
 ) -> Result<EntriesTreeResponse, ApiError> {
     super::validate_source_id(&query.source_id)?;
     let prefix_norm = match query.prefix.as_deref() {
-        Some(p) => crate::db::normalize_path(p)
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        Some(p) => crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
         None => None,
     };
 

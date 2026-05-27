@@ -163,6 +163,30 @@ ${(entry.text ?? "").slice(0, 6000)}`
               </div>
             )}
 
+            {entry.type === "cms_page" && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-300">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-xs font-black uppercase tracking-[3px] text-primary/80">
+                    Rendered Page
+                  </span>
+                  <Link
+                    href={`/cms/${encodeURIComponent(id)}`}
+                    target="_blank"
+                    className="font-mono text-[10px] font-black uppercase tracking-[2px] text-primary hover:text-primary/80"
+                  >
+                    Open HTML
+                  </Link>
+                </div>
+                <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+                  <iframe
+                    title={`Rendered CMS page ${id}`}
+                    src={`/cms/${encodeURIComponent(id)}`}
+                    className="h-[560px] w-full bg-background"
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Analysis */}
             <AnalysisPanel entry={entry} edges={edges} />
 

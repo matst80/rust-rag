@@ -301,13 +301,7 @@ impl CodeStore {
                    AND ($4::text IS NULL OR path LIKE ($4 || '%')) \
                  ORDER BY embedding <=> $1::vector \
                  LIMIT $5",
-                &[
-                    &vector,
-                    &q.repo,
-                    &q.language,
-                    &q.path_prefix,
-                    &limit,
-                ],
+                &[&vector, &q.repo, &q.language, &q.path_prefix, &limit],
             )
             .await?;
         rows.iter()
@@ -352,10 +346,7 @@ impl CodeStore {
         rows.iter().map(row_to_chunk).collect()
     }
 
-    pub async fn lookup_chunks_by_path_pattern(
-        &self,
-        pattern: &str,
-    ) -> Result<Vec<CodeChunkRow>> {
+    pub async fn lookup_chunks_by_path_pattern(&self, pattern: &str) -> Result<Vec<CodeChunkRow>> {
         let client = self.pool.get().await?;
         let rows = client
             .query(
@@ -429,9 +420,7 @@ impl CodeStore {
 
     pub async fn find_tests(&self, repo: Option<&str>) -> Result<Vec<CodeChunkRow>> {
         let client = self.pool.get().await?;
-        let mut sql = String::from(
-            "SELECT * FROM code_chunks WHERE is_test = TRUE",
-        );
+        let mut sql = String::from("SELECT * FROM code_chunks WHERE is_test = TRUE");
         let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
         let r_owned;
         if let Some(r) = repo {

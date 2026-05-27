@@ -122,7 +122,11 @@ fn strip_brackets<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
 fn clamp_unit<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
     let raw = f32::deserialize(d).unwrap_or(0.0);
     // Some models return 0-100 percentages; rescale when clearly in that range.
-    let v = if raw > 1.5 && raw <= 100.0 { raw / 100.0 } else { raw };
+    let v = if raw > 1.5 && raw <= 100.0 {
+        raw / 100.0
+    } else {
+        raw
+    };
     Ok(v.clamp(0.0, 1.0))
 }
 
@@ -238,12 +242,7 @@ async fn fetch_neighbors(
         Ok(hits
             .into_iter()
             .filter(|h| h.distance <= threshold)
-            .filter(|h| {
-                excluded
-                    .as_deref()
-                    .map(|x| h.id != x)
-                    .unwrap_or(true)
-            })
+            .filter(|h| excluded.as_deref().map(|x| h.id != x).unwrap_or(true))
             .take(max_neighbors)
             .collect())
     })
@@ -376,7 +375,10 @@ pub async fn chat_completion_text(
             body_preview = %truncate(&body, 500),
             "LLM envelope is not valid JSON"
         );
-        anyhow!("LLM envelope not valid JSON ({e}); preview: {}", truncate(&body, 200))
+        anyhow!(
+            "LLM envelope not valid JSON ({e}); preview: {}",
+            truncate(&body, 200)
+        )
     })?;
 
     let message = envelope
@@ -430,7 +432,11 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 /// Thin wrapper around [`chat_completion_text`] that pulls config from
 /// `AppState.analysis` — what the `/api/store/analyze` endpoint uses.
-pub(crate) async fn call_llm(state: &AppState, system_prompt: &str, user_prompt: &str) -> Result<String> {
+pub(crate) async fn call_llm(
+    state: &AppState,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String> {
     let cfg = &state.analysis;
     let base_url = cfg
         .base_url
@@ -501,7 +507,11 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
         );
         let _g = span.enter();
         let started = std::time::Instant::now();
-        let neighbor_source = if state.analysis.cross_source { None } else { Some(source_id.as_str()) };
+        let neighbor_source = if state.analysis.cross_source {
+            None
+        } else {
+            Some(source_id.as_str())
+        };
         match run_analysis(&state, &text, neighbor_source, Some(&item_id)).await {
             Ok(analysis) => {
                 let model = state
@@ -547,7 +557,8 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                             store.merge_item_tags(&id_owned, &tags)
                         })
                         .await;
-                        if let Err(e) = res.unwrap_or_else(|e| Err(anyhow!("tag merge join: {e}"))) {
+                        if let Err(e) = res.unwrap_or_else(|e| Err(anyhow!("tag merge join: {e}")))
+                        {
                             tracing::warn!(error=%e, "tag merge failed");
                         }
                     }
@@ -560,6 +571,7 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                                     from_item_id: item_id.clone(),
                                     to_item_id: verdict.target_id.clone(),
                                     relation: Some(std::borrow::Cow::Borrowed("unrelated")),
+                                    sort_order: None,
                                     weight: -1.0,
                                     directed: false,
                                     metadata: serde_json::json!({
@@ -578,7 +590,10 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                                 ManualEdgeInput {
                                     from_item_id: item_id.clone(),
                                     to_item_id: verdict.target_id.clone(),
-                                    relation: Some(std::borrow::Cow::Owned(verdict.relation.clone())),
+                                    relation: Some(std::borrow::Cow::Owned(
+                                        verdict.relation.clone(),
+                                    )),
+                                    sort_order: None,
                                     weight: verdict.confidence,
                                     directed: true,
                                     metadata: serde_json::json!({
@@ -594,8 +609,8 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                         let store = state.store.clone();
                         let target = verdict.target_id.clone();
                         let relation = verdict.relation.clone();
-                        let res = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
-                            .await;
+                        let res =
+                            tokio::task::spawn_blocking(move || store.add_manual_edge(input)).await;
                         if let Err(e) = res
                             .map_err(|e| anyhow!("edge join: {e}"))
                             .and_then(|r| r.map(|_| ()))

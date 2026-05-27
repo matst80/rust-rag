@@ -688,6 +688,43 @@ function GenericDataView({ data }: { data: any }) {
   )
 }
 
+function CmsTemplateView({ type, data }: { type: string; data: any }) {
+  const fields = Object.entries(data ?? {})
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/30 pb-4">
+        <div>
+          <p className="font-mono text-[10px] font-black uppercase tracking-[3px] text-primary/70">
+            CMS Template
+          </p>
+          <h3 className="text-xl font-bold tracking-tight">{type}</h3>
+        </div>
+        <Badge variant="outline" className="font-mono text-[10px] uppercase">
+          Rendered via /cms/&lt;id&gt;
+        </Badge>
+      </div>
+      {fields.length > 0 ? (
+        <div className="grid gap-3 md:grid-cols-2">
+          {fields.map(([key, value]) => (
+            <div key={key} className="rounded-xl border border-border/50 bg-background/60 p-4">
+              <div className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                {key}
+              </div>
+              <div className="mt-2 text-sm text-foreground/85 break-words">
+                {typeof value === "string" ? value : JSON.stringify(value)}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-dashed border-border/60 p-4 text-sm text-muted-foreground">
+          This component is driven by its sorted child edges.
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function StructuredDataView({ type, data }: StructuredDataViewProps) {
   if (!data) return null
 
@@ -711,6 +748,8 @@ export function StructuredDataView({ type, data }: StructuredDataViewProps) {
           <FactView data={data} />
         ) : type === "workout" ? (
           <WorkoutView data={data} />
+        ) : type.startsWith("cms_") ? (
+          <CmsTemplateView type={type} data={data} />
         ) : (
           <GenericDataView data={data} />
         )}

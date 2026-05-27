@@ -13,10 +13,7 @@ pub(super) fn register_sqlite_vec() {
     });
 }
 
-pub(super) fn initialize_schema(
-    connection: &Connection,
-    embedding_dimension: usize,
-) -> Result<()> {
+pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: usize) -> Result<()> {
     connection.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS items (
@@ -61,6 +58,7 @@ pub(super) fn initialize_schema(
             to_item_id TEXT NOT NULL,
             edge_type TEXT NOT NULL CHECK (edge_type IN ('similarity', 'manual')),
             relation TEXT,
+            sort_order TEXT NOT NULL DEFAULT '00000000000000000000',
             weight REAL NOT NULL,
             directed INTEGER NOT NULL DEFAULT 0 CHECK (directed IN (0, 1)),
             metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata)),
@@ -224,8 +222,18 @@ pub(super) fn initialize_schema(
         "TEXT NOT NULL DEFAULT 'pending'",
     )?;
     ensure_column_exists(connection, "items", "path", "TEXT")?;
+    connection.execute_batch("CREATE INDEX IF NOT EXISTS idx_items_path ON items(path);")?;
+    ensure_column_exists(
+        connection,
+        "graph_edges",
+        "sort_order",
+        "TEXT NOT NULL DEFAULT '00000000000000000000'",
+    )?;
     connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_items_path ON items(path);",
+        "UPDATE graph_edges
+         SET sort_order = printf('%020d', COALESCE(updated_at, created_at, 0))
+         WHERE sort_order IS NULL OR trim(sort_order) = '';
+         CREATE INDEX IF NOT EXISTS idx_graph_edges_sort_order ON graph_edges(sort_order ASC, id ASC);",
     )?;
     ensure_column_exists(connection, "items", "analysis_json", "TEXT")?;
     ensure_column_exists(connection, "items", "analysis_at", "INTEGER")?;

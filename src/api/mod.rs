@@ -5,17 +5,16 @@ use crate::{
     },
     crypto::EncryptionKey,
     db::{
-        AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord, GraphEdgeType,
-        GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord, ListItemsRequest,
-        ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
-        MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore, PushStore, SearchHit,
-        SortOrder, UserEventType, UserMemoryStore, VectorStore, PROFILE_EVENTS_WINDOW,
-        PROFILE_REFRESH_AFTER,
+        AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord,
+        GraphEdgeType, GraphNeighborhood, GraphNodeDistance, GraphStatus, ItemRecord,
+        ListItemsRequest, ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind,
+        MessageStore, MessageUpdate, NewMessage, NewUserEvent, OAuthCredsStore,
+        PROFILE_EVENTS_WINDOW, PROFILE_REFRESH_AFTER, PushStore, SearchHit, SortOrder,
+        UserEventType, UserMemoryStore, VectorStore,
     },
     embedding::EmbeddingService,
 };
 use anyhow::Result;
-use chrono::Utc;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -24,6 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use chrono::Utc;
 use jsonwebtoken::{DecodingKey, Validation, decode};
 
 use schemars::JsonSchema;
@@ -44,28 +44,28 @@ use tower_http::{
 use tracing::error;
 use uuid::Uuid;
 
-pub mod attachments;
 pub mod analysis;
+pub mod attachments;
 mod auth;
 mod chunking;
 pub mod code;
+mod dreaming;
+mod ingest_url;
+mod integrations;
 mod multimodal;
-mod openai;
 mod ontology;
+mod openai;
 mod presence;
+mod push;
 mod query;
 pub mod schemas;
 mod tombstones;
-mod ingest_url;
-mod dreaming;
-mod integrations;
-mod push;
 
 pub use analysis::{
     AnalyzeEntryParams, ChatCompletionRequest, StoreAnalysis, chat_completion_text, run_analysis,
 };
-pub use dreaming::{run_dreaming_worker, process_dreaming_round};
 pub use auth::SessionSubject;
+pub use dreaming::{process_dreaming_round, run_dreaming_worker};
 pub use presence::{PresenceEntry, PresenceTracker};
 pub use tombstones::{Tombstone, TombstoneTracker};
 
@@ -164,6 +164,7 @@ pub struct AppState {
     pub web_push: Arc<WebPushConfig>,
     pub whisper: Arc<crate::config::WhisperConfig>,
     pub projection_worker: Arc<crate::projection::ProjectionWorker>,
+    pub cms_runtime: Arc<crate::cms::CmsRuntime>,
 }
 
 impl AppState {
@@ -225,16 +226,13 @@ impl AppState {
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
             projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
+            cms_runtime: Arc::new(crate::cms::CmsRuntime::new(store.clone())),
         }
     }
 
     /// Wire the Web Push backend + VAPID config. Call once during startup.
     /// `None` for the store disables all push paths (endpoints will 503).
-    pub fn with_web_push(
-        mut self,
-        config: WebPushConfig,
-        store: Arc<dyn PushStore>,
-    ) -> Self {
+    pub fn with_web_push(mut self, config: WebPushConfig, store: Arc<dyn PushStore>) -> Self {
         self.web_push = Arc::new(config);
         self.push = Some(store);
         self
@@ -371,6 +369,7 @@ impl AppState {
             web_push: Arc::new(WebPushConfig::default()),
             whisper: Arc::new(crate::config::WhisperConfig::default()),
             projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
+            cms_runtime: Arc::new(crate::cms::CmsRuntime::new(store.clone())),
         }
     }
 }
@@ -623,6 +622,7 @@ pub struct CreateManualEdgeRequest {
     pub from_item_id: String,
     pub to_item_id: String,
     pub relation: Option<String>,
+    pub sort_order: Option<String>,
     pub weight: Option<f32>,
     pub directed: Option<bool>,
     #[serde(default = "default_metadata")]
@@ -633,6 +633,7 @@ pub struct CreateManualEdgeRequest {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct UpdateGraphEdgeRequest {
     pub relation: Option<String>,
+    pub sort_order: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: Value,
 }
@@ -792,6 +793,7 @@ pub struct GraphEdgePayload {
     pub to_item_id: String,
     pub edge_type: GraphEdgeType,
     pub relation: Option<String>,
+    pub sort_order: String,
     pub weight: f32,
     pub directed: bool,
     #[schemars(schema_with = "metadata_schema")]
@@ -818,6 +820,40 @@ pub struct GraphNodeDistancePayload {
     pub from_item_id: String,
     pub to_item_id: String,
     pub distance: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct CmsEdgePayload {
+    pub id: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub relationship: String,
+    pub edge_type: String,
+    pub sort_order: String,
+    pub weight: f32,
+    pub directed: bool,
+    #[schemars(schema_with = "metadata_schema")]
+    pub metadata: Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct CmsTreeChildPayload {
+    pub edge: CmsEdgePayload,
+    pub node: Box<CmsTreeNodePayload>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct CmsTreeNodePayload {
+    pub entry: AdminItemPayload,
+    pub children: Vec<CmsTreeChildPayload>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct CmsTreeResponse {
+    pub root_id: String,
+    pub tree: CmsTreeNodePayload,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -1078,9 +1114,7 @@ impl UserMemoryStore for NoopUserMemory {
     }
 }
 
-async fn rebuild_map(
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn rebuild_map(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     state
         .projection_worker
         .run_rebuild(state.http_client.clone(), state.analysis.clone())
@@ -1125,8 +1159,7 @@ pub async fn build_map_points(
         cluster_name: Option<String>,
         cluster_description: Option<String>,
     }
-    let mut raw_by_id: std::collections::HashMap<String, Raw> =
-        std::collections::HashMap::new();
+    let mut raw_by_id: std::collections::HashMap<String, Raw> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut item_lookup: std::collections::HashMap<String, ItemRecord> =
         std::collections::HashMap::new();
@@ -1142,7 +1175,10 @@ pub async fn build_map_points(
             continue;
         };
         let z = proj.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let cluster_at_write = proj.get("cluster").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let cluster_at_write = proj
+            .get("cluster")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
         // `cluster_raw` falls back to `cluster` for items written before the
         // raw/effective split landed.
         let cluster_raw = proj
@@ -1205,7 +1241,9 @@ pub async fn build_map_points(
         if raw.cluster_at_write != raw.cluster_raw {
             continue;
         }
-        let entry = cluster_labels.entry(raw.cluster_raw).or_insert((None, None));
+        let entry = cluster_labels
+            .entry(raw.cluster_raw)
+            .or_insert((None, None));
         if entry.0.is_none() {
             entry.0 = raw.cluster_name.clone();
         }
@@ -1236,8 +1274,12 @@ pub async fn build_map_points(
         let item = &item_lookup[&id];
         let (title, doc_type, tags) = match item.analysis.as_ref() {
             Some(a) => (
-                a.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                a.get("doc_type").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                a.get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                a.get("doc_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 a.get("tags").and_then(|v| v.as_array()).map(|arr| {
                     arr.iter()
                         .filter_map(|t| t.as_str().map(|s| s.to_string()))
@@ -1298,6 +1340,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/graph/edges", get(list_graph_edges))
         .route("/graph/neighborhood/{id}", get(graph_neighborhood))
         .route("/api/graph/neighborhood/{id}", get(graph_neighborhood))
+        .route("/api/cms/tree/{id}", get(get_cms_tree))
         .route("/api/map", get(get_map))
         .route("/admin/map/rebuild", post(rebuild_map))
         .route("/admin/categories", get(list_categories))
@@ -1321,10 +1364,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/ingest/image", post(multimodal::ingest_image))
         .route("/api/ingest/url", post(ingest_url::ingest_url))
-        .route(
-            "/api/attachments",
-            post(attachments::upload_multipart),
-        )
+        .route("/api/attachments", post(attachments::upload_multipart))
         .route(
             "/api/attachments/from-url",
             post(attachments::attach_from_url),
@@ -1357,10 +1397,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/acp/heartbeat", post(heartbeat_acp_instance))
         .route("/api/acp/ws", get(acp_ws_proxy))
         .route("/api/whisper/ws", get(whisper_proxy))
-        .route(
-            "/api/acp/register/{name}",
-            delete(unregister_acp_instance),
-        )
+        .route("/api/acp/register/{name}", delete(unregister_acp_instance))
         .route(
             "/api/messages/channels/{channel}",
             delete(clear_message_channel),
@@ -1399,16 +1436,19 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/code/repos/{name}", delete(code::delete_repo))
         .route("/api/code/repos/{name}/plan", post(code::plan_ingest))
-        .route("/api/code/repos/{name}/files", post(code::ingest_batch).get(code::list_files))
-        .route("/api/code/repos/{name}/files/{*path}", get(code::get_file_detail))
+        .route(
+            "/api/code/repos/{name}/files",
+            post(code::ingest_batch).get(code::list_files),
+        )
+        .route(
+            "/api/code/repos/{name}/files/{*path}",
+            get(code::get_file_detail),
+        )
         .route("/api/code/repos/{name}/sweep", post(code::sweep))
         .route("/api/code/search", post(code::search_code))
         .route("/api/push/vapid-public-key", get(push::vapid_public_key))
         .route("/api/push/subscribe", post(push::subscribe))
-        .route(
-            "/api/push/subscriptions",
-            get(push::list_subscriptions),
-        )
+        .route("/api/push/subscriptions", get(push::list_subscriptions))
         .route(
             "/api/push/subscriptions/{id}",
             delete(push::delete_subscription),
@@ -1424,9 +1464,7 @@ pub fn router(state: AppState) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
-        .expose_headers([
-            axum::http::HeaderName::from_static("mcp-session-id"),
-        ]);
+        .expose_headers([axum::http::HeaderName::from_static("mcp-session-id")]);
     let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
         .route("/api/dream", post(dreaming_endpoint))
@@ -1610,8 +1648,10 @@ async fn require_api_key(
                 format!("{}://{}", proto, host)
             })
             .unwrap_or_else(|| state.auth.app_base_url.clone().unwrap_or_default());
-        let resource_metadata =
-            format!("{}/.well-known/oauth-protected-resource", base.trim_end_matches('/'));
+        let resource_metadata = format!(
+            "{}/.well-known/oauth-protected-resource",
+            base.trim_end_matches('/')
+        );
         let www_auth = format!(
             "Bearer realm=\"rust-rag-mcp\", resource_metadata=\"{}\"",
             resource_metadata
@@ -1620,7 +1660,10 @@ async fn require_api_key(
             StatusCode::UNAUTHORIZED,
             [
                 (axum::http::header::WWW_AUTHENTICATE, www_auth),
-                (axum::http::header::CONTENT_TYPE, "application/json".to_owned()),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json".to_owned(),
+                ),
             ],
             "{\"error\":\"unauthorized\"}",
         )
@@ -1669,9 +1712,7 @@ pub(crate) async fn store_entry_core(
 
     if let Some(ref type_name) = request.type_name {
         let data = request.data.clone().ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "type `{type_name}` requires a `data` payload"
-            ))
+            ApiError::BadRequest(format!("type `{type_name}` requires a `data` payload"))
         })?;
         let cache = state.schema_cache.clone();
         let store = state.store.clone();
@@ -1693,8 +1734,7 @@ pub(crate) async fn store_entry_core(
 
     let chunk_ids = if let Some(ref cfg) = request.chunk {
         // Build chunk slices (returns 1 slice if text fits in one chunk).
-        let slices =
-            chunking::chunk_document(&request.text, cfg.max_chars, cfg.overlap_chars);
+        let slices = chunking::chunk_document(&request.text, cfg.max_chars, cfg.overlap_chars);
         let n = slices.len();
 
         if n <= 1 {
@@ -1711,7 +1751,11 @@ pub(crate) async fn store_entry_core(
                 data: request.data.clone(),
                 analysis: None,
             };
-            let embed_text = slices.into_iter().next().map(|s| s.embed_text).unwrap_or_else(|| request.text.clone());
+            let embed_text = slices
+                .into_iter()
+                .next()
+                .map(|s| s.embed_text)
+                .unwrap_or_else(|| request.text.clone());
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let embedding = embedder.embed(&embed_text)?;
                 store.upsert_item(item, &embedding)?;
@@ -1787,7 +1831,11 @@ pub(crate) async fn store_entry_core(
             let mut embedded = Vec::with_capacity(chunks.len());
             for c in chunks {
                 let (embedding, sparse) = embedder.embed_both(&c.content)?;
-                let sparse = if sparse.is_empty() { None } else { Some(sparse) };
+                let sparse = if sparse.is_empty() {
+                    None
+                } else {
+                    Some(sparse)
+                };
                 embedded.push(crate::db::DocChunk {
                     position: c.position,
                     content: c.content,
@@ -1828,10 +1876,7 @@ pub(crate) async fn store_entry_core(
         None
     };
 
-    let stored_ids: Vec<String> = chunk_ids
-        .as_deref()
-        .unwrap_or(&[id.clone()])
-        .to_vec();
+    let stored_ids: Vec<String> = chunk_ids.as_deref().unwrap_or(&[id.clone()]).to_vec();
 
     // Best-effort async LLM analysis: contradictions, edges, cluster hint,
     // tags, freshness. Only fires when RAG_ANALYSIS_ENABLED + model are set.
@@ -1863,12 +1908,30 @@ pub(crate) async fn store_entry_core(
         });
     }
 
+    invalidate_cms_nodes(state, [id.clone()]).await?;
+
     Ok(StoreResponse {
         id,
         source_id,
         created_at,
         chunk_ids,
     })
+}
+
+pub(crate) async fn invalidate_cms_nodes<I, S>(
+    state: &AppState,
+    node_ids: I,
+) -> Result<(), ApiError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let cms_runtime = state.cms_runtime.clone();
+    let ids: Vec<String> = node_ids.into_iter().map(Into::into).collect();
+    tokio::task::spawn_blocking(move || cms_runtime.invalidate_nodes(ids))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)
 }
 
 pub(crate) async fn search_core(
@@ -1932,21 +1995,23 @@ pub(crate) async fn search_core(
         let source_id = source_id.clone();
         let type_name = type_name.clone();
         let top_k = top_k;
-        tokio::task::spawn_blocking(move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
-            let (items, _) = store.list_items(ListItemsRequest {
-                source_id,
-                type_name,
-                limit: Some(top_k),
-                sort_order: SortOrder::Desc,
-                ..Default::default()
-            })?;
-            let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
-            // For empty queries, we set retrievers to "recent"
-            for hit in &mut hits {
-                hit.retrievers = vec!["recent".to_owned()];
-            }
-            Ok((hits, Vec::new(), Vec::new()))
-        })
+        tokio::task::spawn_blocking(
+            move || -> Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
+                let (items, _) = store.list_items(ListItemsRequest {
+                    source_id,
+                    type_name,
+                    limit: Some(top_k),
+                    sort_order: SortOrder::Desc,
+                    ..Default::default()
+                })?;
+                let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
+                // For empty queries, we set retrievers to "recent"
+                for hit in &mut hits {
+                    hit.retrievers = vec!["recent".to_owned()];
+                }
+                Ok((hits, Vec::new(), Vec::new()))
+            },
+        )
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?
@@ -1974,7 +2039,12 @@ pub(crate) async fn search_core(
                         type_name.as_deref(),
                     )?
                 } else {
-                    store.search(&embedding, candidate_top_k, source_id.as_deref(), type_name.as_deref())?
+                    store.search(
+                        &embedding,
+                        candidate_top_k,
+                        source_id.as_deref(),
+                        type_name.as_deref(),
+                    )?
                 };
                 let mut filtered: Vec<SearchHit> = hits
                     .into_iter()
@@ -2011,8 +2081,7 @@ pub(crate) async fn search_core(
                                         total_chars,
                                         "reranker ok"
                                     );
-                                    for (hit, score) in
-                                        filtered.iter_mut().zip(scores.into_iter())
+                                    for (hit, score) in filtered.iter_mut().zip(scores.into_iter())
                                     {
                                         hit.distance = 1.0 - score;
                                         if !hit.retrievers.iter().any(|r| r == "rerank") {
@@ -2089,7 +2158,8 @@ pub(crate) async fn search_core(
                         }
                     }
 
-                    let existing: HashSet<&str> = filtered.iter().map(|hit| hit.id.as_str()).collect();
+                    let existing: HashSet<&str> =
+                        filtered.iter().map(|hit| hit.id.as_str()).collect();
                     let mut relations: HashMap<String, Option<String>> = HashMap::new();
                     for edge in edges {
                         // Skip anti-edges for the "Related" panel.
@@ -2345,11 +2415,12 @@ async fn list_graph_edges(
 
     let status = query.status;
 
-    let edges =
-        tokio::task::spawn_blocking(move || store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref()))
-            .await
-            .map_err(ApiError::TaskJoin)?
-            .map_err(map_graph_error)?;
+    let edges = tokio::task::spawn_blocking(move || {
+        store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref())
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(map_graph_error)?;
 
     Ok(Json(GraphEdgesResponse {
         edges: edges.into_iter().map(Into::into).collect(),
@@ -2375,6 +2446,23 @@ async fn graph_neighborhood(
             .map_err(map_graph_error)?;
 
     Ok(Json(neighborhood.into()))
+}
+
+async fn get_cms_tree(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CmsTreeResponse>, ApiError> {
+    let cms_runtime = state.cms_runtime.clone();
+    let root_id = id.clone();
+    let tree = tokio::task::spawn_blocking(move || cms_runtime.build_tree(&root_id))
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(CmsTreeResponse {
+        root_id: id,
+        tree: tree.into(),
+    }))
 }
 
 async fn list_categories(
@@ -2470,7 +2558,8 @@ async fn get_item(
                 match e.edge_type {
                     GraphEdgeType::Manual => {
                         let status = e.metadata.get("status").and_then(|v| v.as_str());
-                        let confidence = e.metadata
+                        let confidence = e
+                            .metadata
                             .get("confidence")
                             .and_then(|v| v.as_f64())
                             .unwrap_or(1.0);
@@ -2500,15 +2589,31 @@ async fn get_item(
                     return std::cmp::Ordering::Greater;
                 }
             }
-            b.1.weight.partial_cmp(&a.1.weight).unwrap_or(std::cmp::Ordering::Equal)
+            if type_a == GraphEdgeType::Manual {
+                return a
+                    .1
+                    .sort_order
+                    .cmp(&b.1.sort_order)
+                    .then_with(|| a.1.id.cmp(&b.1.id));
+            }
+            b.1.weight
+                .partial_cmp(&a.1.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let neighbors: Vec<EntryNeighbor> = neighbors_with_edges
             .into_iter()
             .map(|(n, e)| {
-                let source_type = n.metadata.get("source_type").and_then(|v| v.as_str()).map(|s| s.to_owned());
+                let source_type = n
+                    .metadata
+                    .get("source_type")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
                 let thumbnail = if source_type.as_deref() == Some("image") {
-                    n.metadata.get("source_file").and_then(|v| v.as_str()).map(|s| s.to_owned())
+                    n.metadata
+                        .get("source_file")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned())
                 } else {
                     None
                 };
@@ -2559,7 +2664,11 @@ async fn reanalyze_item(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
 
-    let neighbor_source = if state.analysis.cross_source { None } else { Some(item.source_id.as_str()) };
+    let neighbor_source = if state.analysis.cross_source {
+        None
+    } else {
+        Some(item.source_id.as_str())
+    };
     let analysis = run_analysis(&state, &item.text, neighbor_source, Some(&item.id))
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
@@ -2573,10 +2682,12 @@ async fn reanalyze_item(
     let store = state.store.clone();
     let item_id = item.id.clone();
     let model_for_store = model.clone();
-    tokio::task::spawn_blocking(move || store.update_item_analysis(&item_id, &json, &model_for_store))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(ApiError::Internal)?;
+    tokio::task::spawn_blocking(move || {
+        store.update_item_analysis(&item_id, &json, &model_for_store)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2597,9 +2708,9 @@ async fn update_item(
     validate_metadata(&request.metadata)?;
     validate_source_id(&request.source_id)?;
     let path_override = match request.path.as_deref() {
-        Some(p) => Some(
-            crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
-        ),
+        Some(p) => {
+            Some(crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?)
+        }
         None => None,
     };
 
@@ -2656,6 +2767,8 @@ async fn update_item(
     .map_err(ApiError::TaskJoin)?
     .map_err(|error| map_missing_item("item", error))?;
 
+    invalidate_cms_nodes(&state, [updated.id.clone()]).await?;
+
     Ok(Json(updated.into()))
 }
 
@@ -2663,6 +2776,7 @@ async fn delete_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteResponse>, ApiError> {
+    invalidate_cms_nodes(&state, [id.clone()]).await?;
     let store = state.store.clone();
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
@@ -2732,14 +2846,19 @@ async fn rechunk_item(
     .ok_or_else(|| ApiError::NotFound(format!("item {id} not found")))?;
 
     let max_chars = body.max_chars.unwrap_or(state.chunking.chunk_max_chars);
-    let overlap_chars = body.overlap_chars.unwrap_or(state.chunking.chunk_overlap_chars);
+    let overlap_chars = body
+        .overlap_chars
+        .unwrap_or(state.chunking.chunk_overlap_chars);
 
     let request = StoreRequest {
         id: Some(item.id.clone()),
         text: item.text,
         metadata: item.metadata,
         source_id: item.source_id,
-        chunk: Some(ChunkConfig { max_chars, overlap_chars }),
+        chunk: Some(ChunkConfig {
+            max_chars,
+            overlap_chars,
+        }),
         path: None,
         type_name: None,
         data: None,
@@ -2747,7 +2866,11 @@ async fn rechunk_item(
     let response = store_entry_core(&state, request, subject.0).await?;
 
     // Delete the original unchunked item if chunking produced multiple chunks.
-    if response.chunk_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+    if response
+        .chunk_ids
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+    {
         let store = state.store.clone();
         let parent_id = id.clone();
         tokio::task::spawn_blocking(move || store.delete_item(&parent_id))
@@ -2829,7 +2952,10 @@ async fn llm_rechunk_item(
 
     let mut req = state
         .http_client
-        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .json(&payload);
     if let Some(key) = openai_config.api_key.as_deref() {
         req = req.bearer_auth(key);
@@ -2843,11 +2969,17 @@ async fn llm_rechunk_item(
         .map_err(|e| ApiError::Internal(e.into()))?;
 
     #[derive(serde::Deserialize)]
-    struct Resp { choices: Vec<Choice> }
+    struct Resp {
+        choices: Vec<Choice>,
+    }
     #[derive(serde::Deserialize)]
-    struct Choice { message: Msg }
+    struct Choice {
+        message: Msg,
+    }
     #[derive(serde::Deserialize)]
-    struct Msg { content: Option<String> }
+    struct Msg {
+        content: Option<String>,
+    }
 
     let chat: Resp = response
         .json()
@@ -2882,39 +3014,40 @@ async fn llm_rechunk_item(
     let store = state.store.clone();
     let total = texts.len();
 
-    let chunk_ids: Vec<String> = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
-        let mut ids = Vec::with_capacity(total);
-        for (i, text) in texts.into_iter().enumerate() {
-            let chunk_id = format!("{parent_id}:c:{i}");
-            let mut metadata = base_metadata.clone();
-            if let Some(obj) = metadata.as_object_mut() {
-                obj.insert(
-                    "_chunk".to_owned(),
-                    serde_json::json!({ "parent": parent_id, "i": i, "n": total }),
-                );
+    let chunk_ids: Vec<String> =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<String>> {
+            let mut ids = Vec::with_capacity(total);
+            for (i, text) in texts.into_iter().enumerate() {
+                let chunk_id = format!("{parent_id}:c:{i}");
+                let mut metadata = base_metadata.clone();
+                if let Some(obj) = metadata.as_object_mut() {
+                    obj.insert(
+                        "_chunk".to_owned(),
+                        serde_json::json!({ "parent": parent_id, "i": i, "n": total }),
+                    );
+                }
+                let record = ItemRecord {
+                    id: chunk_id.clone(),
+                    text: text.clone(),
+                    metadata,
+                    source_id: source_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                    path: parent_path.clone(),
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                };
+                let embedding = embedder.embed(&text)?;
+                store.upsert_item(record, &embedding)?;
+                ids.push(chunk_id);
             }
-            let record = ItemRecord {
-                id: chunk_id.clone(),
-                text: text.clone(),
-                metadata,
-                source_id: source_id.clone(),
-                created_at: now,
-                updated_at: now,
-                path: parent_path.clone(),
-                type_name: None,
-                data: None,
-                analysis: None,
-            };
-            let embedding = embedder.embed(&text)?;
-            store.upsert_item(record, &embedding)?;
-            ids.push(chunk_id);
-        }
-        store.delete_item(&parent_id)?;
-        Ok(ids)
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+            store.delete_item(&parent_id)?;
+            Ok(ids)
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
 
     if let Some(ref sub) = subject.0 {
         let memory = state.user_memory.clone();
@@ -3030,7 +3163,10 @@ async fn smart_store(
 
     let mut req = state
         .http_client
-        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .json(&payload);
     if let Some(key) = openai_config.api_key.as_deref() {
         req = req.bearer_auth(key);
@@ -3044,11 +3180,17 @@ async fn smart_store(
         .map_err(|e| ApiError::Internal(e.into()))?;
 
     #[derive(serde::Deserialize)]
-    struct Resp { choices: Vec<Choice> }
+    struct Resp {
+        choices: Vec<Choice>,
+    }
     #[derive(serde::Deserialize)]
-    struct Choice { message: Msg }
+    struct Choice {
+        message: Msg,
+    }
     #[derive(serde::Deserialize)]
-    struct Msg { content: Option<String> }
+    struct Msg {
+        content: Option<String>,
+    }
 
     let chat: Resp = response
         .json()
@@ -3090,18 +3232,19 @@ async fn smart_store(
         responses.push(resp);
     }
 
-    Ok((StatusCode::CREATED, Json(SmartStoreResponse { items: responses })))
+    Ok((
+        StatusCode::CREATED,
+        Json(SmartStoreResponse { items: responses }),
+    ))
 }
 
-async fn dreaming_endpoint(
-    State(state): State<AppState>,
-) -> Result<StatusCode, ApiError> {
+async fn dreaming_endpoint(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     if !state.analysis.is_configured() {
         return Err(ApiError::ServiceUnavailable(
             "dreaming requires analysis (LLM) to be configured".to_owned(),
         ));
     }
-    
+
     // Spawn in background so the HTTP request doesn't timeout
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -3109,7 +3252,7 @@ async fn dreaming_endpoint(
             error!("manual dreaming error: {e}");
         }
     });
-    
+
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -3151,6 +3294,7 @@ async fn create_manual_edge(
         from_item_id: request.from_item_id,
         to_item_id: request.to_item_id,
         relation: request.relation.map(Cow::Owned),
+        sort_order: request.sort_order,
         weight: request.weight.unwrap_or(1.0),
         directed: request.directed.unwrap_or(false),
         metadata: request.metadata,
@@ -3160,6 +3304,8 @@ async fn create_manual_edge(
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(map_graph_error)?;
+
+    invalidate_cms_nodes(&state, [edge.from_item_id.clone(), edge.to_item_id.clone()]).await?;
 
     Ok((StatusCode::CREATED, Json(edge.into())))
 }
@@ -3172,10 +3318,14 @@ async fn update_graph_edge(
     validate_metadata(&request.metadata)?;
 
     let store = state.store.clone();
-    let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, request.relation, request.metadata))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(map_graph_error)?;
+    let edge = tokio::task::spawn_blocking(move || {
+        store.update_graph_edge(&id, request.relation, request.metadata, request.sort_order)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(map_graph_error)?;
+
+    invalidate_cms_nodes(&state, [edge.from_item_id.clone(), edge.to_item_id.clone()]).await?;
 
     Ok(Json(edge.into()))
 }
@@ -3185,6 +3335,15 @@ async fn delete_graph_edge(
     Path(id): Path<String>,
 ) -> Result<Json<DeleteResponse>, ApiError> {
     let store = state.store.clone();
+    let cms_runtime = state.cms_runtime.clone();
+    let edge_before_delete = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let id = id.clone();
+        move || store.get_graph_edge(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(map_graph_error)?;
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || store.delete_graph_edge(&id)
@@ -3195,6 +3354,15 @@ async fn delete_graph_edge(
 
     if !deleted {
         return Err(ApiError::NotFound(format!("graph edge {id} not found")));
+    }
+
+    if let Some(edge) = edge_before_delete {
+        tokio::task::spawn_blocking(move || {
+            cms_runtime.invalidate_nodes([edge.from_item_id, edge.to_item_id])
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
     }
 
     Ok(Json(DeleteResponse { id, deleted }))
@@ -3232,9 +3400,7 @@ async fn send_message(
         _ => true,
     };
     if request.text.trim().is_empty() && metadata_empty {
-        return Err(ApiError::BadRequest(
-            "text or metadata required".to_owned(),
-        ));
+        return Err(ApiError::BadRequest("text or metadata required".to_owned()));
     }
 
     let sender = resolve_message_sender(&auth, request.sender.as_deref(), session.0.as_deref())?;
@@ -3365,8 +3531,8 @@ async fn list_messages(
     if wait_secs > 0 && records.is_empty() {
         let notified = state.message_notify.notified();
         tokio::pin!(notified);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(wait_secs), &mut notified)
-            .await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(wait_secs), &mut notified).await;
         let (r, t) = run_query(build_request()).await?;
         records = r;
         total_count = t;
@@ -3762,10 +3928,7 @@ async fn whisper_proxy(
     Ok(ws.on_upgrade(move |socket| whisper_proxy_task(socket, upstream_url)))
 }
 
-async fn whisper_proxy_task(
-    client_socket: axum::extract::ws::WebSocket,
-    upstream_url: String,
-) {
+async fn whisper_proxy_task(client_socket: axum::extract::ws::WebSocket, upstream_url: String) {
     use axum::extract::ws::Message as AxumMessage;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async;
@@ -3791,10 +3954,11 @@ async fn whisper_proxy_task(
                 AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.to_vec().into()),
                 AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.to_vec().into()),
                 AxumMessage::Close(c) => {
-                    let close_frame = c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                        code: cf.code.into(),
-                        reason: cf.reason.to_string().into(),
-                    });
+                    let close_frame =
+                        c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: cf.code.into(),
+                            reason: cf.reason.to_string().into(),
+                        });
                     TungsteniteMessage::Close(close_frame)
                 }
             };
@@ -3881,7 +4045,9 @@ fn resolve_message_sender_kind(
             )),
         },
         AuthKind::McpToken => Ok(requested_kind.unwrap_or(MessageSenderKind::Agent)),
-        AuthKind::ApiKey | AuthKind::Disabled => Ok(requested_kind.unwrap_or(MessageSenderKind::Human)),
+        AuthKind::ApiKey | AuthKind::Disabled => {
+            Ok(requested_kind.unwrap_or(MessageSenderKind::Human))
+        }
     }
 }
 
@@ -4008,14 +4174,31 @@ fn resolve_presence_identity(
                 .as_deref()
                 .or(session_subject)
                 .ok_or_else(|| ApiError::Unauthorized("session subject missing".to_owned()))?;
-            Ok(Some((subject.to_owned(), MessageSenderKind::Human.as_serialized())))
+            Ok(Some((
+                subject.to_owned(),
+                MessageSenderKind::Human.as_serialized(),
+            )))
         }
-        AuthKind::McpToken => Ok(requested_user
-            .or_else(|| auth.subject.clone())
-            .map(|user| (user, query.user_kind.unwrap_or(MessageSenderKind::Agent).as_serialized()))),
-        AuthKind::ApiKey | AuthKind::Disabled => Ok(requested_user
-            .or_else(|| auth.subject.clone())
-            .map(|user| (user, query.user_kind.unwrap_or(MessageSenderKind::Human).as_serialized()))),
+        AuthKind::McpToken => Ok(requested_user.or_else(|| auth.subject.clone()).map(|user| {
+            (
+                user,
+                query
+                    .user_kind
+                    .unwrap_or(MessageSenderKind::Agent)
+                    .as_serialized(),
+            )
+        })),
+        AuthKind::ApiKey | AuthKind::Disabled => {
+            Ok(requested_user.or_else(|| auth.subject.clone()).map(|user| {
+                (
+                    user,
+                    query
+                        .user_kind
+                        .unwrap_or(MessageSenderKind::Human)
+                        .as_serialized(),
+                )
+            }))
+        }
     }
 }
 
@@ -4174,6 +4357,7 @@ impl From<GraphEdgeRecord> for GraphEdgePayload {
             to_item_id: value.to_item_id,
             edge_type: value.edge_type,
             relation: value.relation,
+            sort_order: value.sort_order,
             weight: value.weight,
             directed: value.directed,
             metadata: value.metadata,
@@ -4194,6 +4378,45 @@ impl From<GraphNeighborhood> for GraphNeighborhoodResponse {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+        }
+    }
+}
+
+impl From<GraphEdgeRecord> for CmsEdgePayload {
+    fn from(value: GraphEdgeRecord) -> Self {
+        Self {
+            id: value.id,
+            source_id: value.from_item_id,
+            target_id: value.to_item_id,
+            relationship: value
+                .relation
+                .clone()
+                .unwrap_or_else(|| value.edge_type.as_str().to_owned()),
+            edge_type: value.edge_type.as_str().to_owned(),
+            sort_order: value.sort_order,
+            weight: value.weight,
+            directed: value.directed,
+            metadata: value.metadata,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<crate::cms::CmsTreeChild> for CmsTreeChildPayload {
+    fn from(value: crate::cms::CmsTreeChild) -> Self {
+        Self {
+            edge: value.edge.into(),
+            node: Box::new(value.node.into()),
+        }
+    }
+}
+
+impl From<crate::cms::CmsTreeNode> for CmsTreeNodePayload {
+    fn from(value: crate::cms::CmsTreeNode) -> Self {
+        Self {
+            entry: value.entry.into(),
+            children: value.children.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -4284,7 +4507,6 @@ fn map_missing_item(kind: &str, error: anyhow::Error) -> ApiError {
         ApiError::Internal(error.context(format!("failed to update {kind}")))
     }
 }
-
 
 pub(super) fn map_graph_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
@@ -4512,17 +4734,25 @@ mod tests {
                 .iter()
                 .filter(|(item, _)| {
                     if let Some(source) = &request.source_id {
-                        if &item.source_id != source { return false; }
+                        if &item.source_id != source {
+                            return false;
+                        }
                     }
                     if let Some(min) = request.min_created_at {
-                        if item.created_at < min { return false; }
+                        if item.created_at < min {
+                            return false;
+                        }
                     }
                     if let Some(max) = request.max_created_at {
-                        if item.created_at > max { return false; }
+                        if item.created_at > max {
+                            return false;
+                        }
                     }
                     for (key, val) in &request.metadata_filter {
                         if let Some(meta_val) = item.metadata.get(key) {
-                            if meta_val.as_str() != Some(val) { return false; }
+                            if meta_val.as_str() != Some(val) {
+                                return false;
+                            }
                         } else {
                             return false;
                         }
@@ -4732,6 +4962,9 @@ mod tests {
                 to_item_id: input.to_item_id,
                 edge_type: GraphEdgeType::Manual,
                 relation: input.relation.map(|r| r.into_owned()),
+                sort_order: input
+                    .sort_order
+                    .unwrap_or_else(|| crate::db::format_edge_sort_order(timestamp)),
                 weight: input.weight,
                 directed: input.directed,
                 metadata: input.metadata,
@@ -4742,7 +4975,13 @@ mod tests {
             Ok(edge)
         }
 
-        fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
+        fn update_graph_edge(
+            &self,
+            id: &str,
+            relation: Option<String>,
+            metadata: Value,
+            sort_order: Option<String>,
+        ) -> Result<GraphEdgeRecord> {
             if !self.graph_enabled {
                 anyhow::bail!("graph support is disabled");
             }
@@ -4754,6 +4993,9 @@ mod tests {
                 .ok_or_else(|| anyhow!("edge {} not found", id))?;
 
             edge.relation = relation;
+            if let Some(sort_order) = sort_order {
+                edge.sort_order = crate::db::normalize_edge_sort_order(&sort_order)?;
+            }
             edge.metadata = metadata;
             edge.updated_at += 1;
             Ok(edge.clone())
@@ -4848,7 +5090,8 @@ mod tests {
                 .iter()
                 .filter(|message| {
                     message.kind == "permission_request"
-                        && message.metadata.get("request_id").and_then(Value::as_str) == Some(request_id)
+                        && message.metadata.get("request_id").and_then(Value::as_str)
+                            == Some(request_id)
                 })
                 .cloned()
                 .collect())
@@ -4882,15 +5125,29 @@ mod tests {
             let messages = self.messages.lock().expect("store mutex poisoned");
             let mut filtered = messages
                 .iter()
-                .filter(|message| query.channel.as_ref().is_none_or(|channel| &message.channel == channel))
-                .filter(|message| query.sender.as_ref().is_none_or(|sender| &message.sender == sender))
+                .filter(|message| {
+                    query
+                        .channel
+                        .as_ref()
+                        .is_none_or(|channel| &message.channel == channel)
+                })
+                .filter(|message| {
+                    query
+                        .sender
+                        .as_ref()
+                        .is_none_or(|sender| &message.sender == sender)
+                })
                 .filter(|message| query.kind.as_ref().is_none_or(|kind| &message.kind == kind))
                 .filter(|message| {
                     query.min_created_at.is_none_or(|min_at| {
                         message.created_at >= min_at || message.updated_at >= min_at
                     })
                 })
-                .filter(|message| query.max_created_at.is_none_or(|max_at| message.created_at <= max_at))
+                .filter(|message| {
+                    query
+                        .max_created_at
+                        .is_none_or(|max_at| message.created_at <= max_at)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
 
@@ -4908,7 +5165,10 @@ mod tests {
             let total = filtered.len() as i64;
             let offset = query.offset.unwrap_or(0);
             let limit = query.limit.unwrap_or(100);
-            Ok((filtered.into_iter().skip(offset).take(limit).collect(), total))
+            Ok((
+                filtered.into_iter().skip(offset).take(limit).collect(),
+                total,
+            ))
         }
 
         fn list_channels(&self) -> Result<Vec<ChannelSummary>> {
@@ -4923,13 +5183,19 @@ mod tests {
             }
             let mut channels = by_channel
                 .into_iter()
-                .map(|(channel, (message_count, last_message_at))| ChannelSummary {
-                    channel,
-                    message_count,
-                    last_message_at,
-                })
+                .map(
+                    |(channel, (message_count, last_message_at))| ChannelSummary {
+                        channel,
+                        message_count,
+                        last_message_at,
+                    },
+                )
                 .collect::<Vec<_>>();
-            channels.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at).then_with(|| a.channel.cmp(&b.channel)));
+            channels.sort_by(|a, b| {
+                b.last_message_at
+                    .cmp(&a.last_message_at)
+                    .then_with(|| a.channel.cmp(&b.channel))
+            });
             Ok(channels)
         }
     }
@@ -5159,6 +5425,7 @@ mod tests {
             to_item_id: to.to_owned(),
             edge_type: GraphEdgeType::Manual,
             relation: Some("supports".to_owned()),
+            sort_order: crate::db::format_edge_sort_order(1024),
             weight: 1.0,
             directed: true,
             metadata: json!({"kind": "manual"}),
@@ -5174,6 +5441,7 @@ mod tests {
             to_item_id: to.to_owned(),
             edge_type: GraphEdgeType::Similarity,
             relation: None,
+            sort_order: crate::db::format_edge_sort_order(2048),
             weight: 0.9,
             directed: false,
             metadata: json!({"distance": 0.2}),
@@ -6232,6 +6500,121 @@ mod tests {
         )
     }
 
+    async fn mint_mcp_bearer(server: &TestServer, secret: &str, subject: &str) -> String {
+        let code = server
+            .post("/auth/device/code")
+            .json(&json!({}))
+            .await
+            .json::<auth::DeviceCodeResponse>();
+        let cookie = mint_session_cookie(secret, subject);
+        server
+            .post("/auth/device/approve")
+            .add_header(
+                axum::http::header::COOKIE,
+                cookie.parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .json(&json!({"user_code": code.user_code}))
+            .await
+            .assert_status_ok();
+        server
+            .post("/auth/device/token")
+            .json(&json!({"device_code": code.device_code}))
+            .await
+            .json::<auth::DeviceTokenResponse>()
+            .access_token
+    }
+
+    async fn initialize_mcp_session(server: &TestServer, token: &str) -> Option<String> {
+        let response = server
+            .post("/mcp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .add_header(
+                axum::http::header::HOST,
+                "localhost".parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .add_header(
+                axum::http::header::ACCEPT,
+                "application/json, text/event-stream"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": { "name": "rust-rag-test", "version": "0.0.1" }
+                }
+            }))
+            .await;
+        response.assert_status_ok();
+        let session_id = response
+            .maybe_header("mcp-session-id")
+            .map(|value| value.to_str().unwrap().to_owned());
+        let body = response.json::<Value>();
+        assert!(
+            body.get("error").is_none(),
+            "MCP initialize failed: {body:?}"
+        );
+        session_id
+    }
+
+    async fn call_mcp_tool(
+        server: &TestServer,
+        token: &str,
+        session_id: Option<&str>,
+        id: i64,
+        name: &str,
+        arguments: Value,
+    ) -> Value {
+        let mut request = server
+            .post("/mcp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .add_header(
+                axum::http::header::HOST,
+                "localhost".parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .add_header(
+                axum::http::header::ACCEPT,
+                "application/json, text/event-stream"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            );
+        if let Some(session_id) = session_id {
+            request = request.add_header(
+                axum::http::HeaderName::from_static("mcp-session-id"),
+                session_id.parse::<axum::http::HeaderValue>().unwrap(),
+            );
+        }
+        let response = request
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments
+                }
+            }))
+            .await;
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        assert!(body.get("error").is_none(), "MCP tool failed: {body:?}");
+        body
+    }
+
     #[tokio::test]
     async fn device_flow_end_to_end_mints_bearer_usable_on_protected_routes() {
         let (state, _store) = auth_test_state();
@@ -6376,6 +6759,183 @@ mod tests {
             response.status_code(),
             StatusCode::UNAUTHORIZED,
             "MCP endpoint should accept the minted bearer",
+        );
+    }
+
+    #[tokio::test]
+    async fn cms_tree_updates_when_mutated_via_mcp() {
+        let page = ItemRecord {
+            id: "page-1".to_owned(),
+            text: "Landing page".to_owned(),
+            metadata: json!({"title": "Landing"}),
+            source_id: "project:rust-rag:knowledge".to_owned(),
+            created_at: 1,
+            updated_at: 1,
+            path: None,
+            type_name: Some("cms_page".to_owned()),
+            data: Some(json!({"title": "Landing"})),
+            analysis: None,
+        };
+        let section_a = ItemRecord {
+            id: "section-a".to_owned(),
+            text: "Section A".to_owned(),
+            metadata: json!({"title": "Section A"}),
+            source_id: "project:rust-rag:knowledge".to_owned(),
+            created_at: 2,
+            updated_at: 2,
+            path: None,
+            type_name: Some("cms_section".to_owned()),
+            data: Some(json!({"title": "Section A"})),
+            analysis: None,
+        };
+        let section_b = ItemRecord {
+            id: "section-b".to_owned(),
+            text: "Section B".to_owned(),
+            metadata: json!({"title": "Section B"}),
+            source_id: "project:rust-rag:knowledge".to_owned(),
+            created_at: 3,
+            updated_at: 3,
+            path: None,
+            type_name: Some("cms_section".to_owned()),
+            data: Some(json!({"title": "Section B"})),
+            analysis: None,
+        };
+        let leaf = ItemRecord {
+            id: "leaf-1".to_owned(),
+            text: "before".to_owned(),
+            metadata: json!({"title": "Leaf"}),
+            source_id: "project:rust-rag:knowledge".to_owned(),
+            created_at: 4,
+            updated_at: 4,
+            path: None,
+            type_name: Some("cms_markdown".to_owned()),
+            data: Some(json!({"markdown": "before"})),
+            analysis: None,
+        };
+        let store = Arc::new(MockStore::seed_graph(
+            vec![page, section_a, section_b, leaf],
+            vec![],
+        ));
+        let state = auth_test_state_with_store(store);
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let token = mint_mcp_bearer(&server, &secret, "user-cms").await;
+        let session_id = initialize_mcp_session(&server, &token).await;
+
+        let cold_tree = server
+            .get("/api/cms/tree/page-1")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .await;
+        cold_tree.assert_status_ok();
+        let cold_body = cold_tree.json::<CmsTreeResponse>();
+        assert!(cold_body.tree.children.is_empty());
+
+        call_mcp_tool(
+            &server,
+            &token,
+            session_id.as_deref(),
+            2,
+            "create_manual_edge",
+            json!({
+                "from_item_id": "page-1",
+                "to_item_id": "section-b",
+                "relation": "contains",
+                "sort_order": "00000000000000000020",
+                "directed": true,
+                "metadata": {}
+            }),
+        )
+        .await;
+        call_mcp_tool(
+            &server,
+            &token,
+            session_id.as_deref(),
+            3,
+            "create_manual_edge",
+            json!({
+                "from_item_id": "page-1",
+                "to_item_id": "section-a",
+                "relation": "contains",
+                "sort_order": "00000000000000000010",
+                "directed": true,
+                "metadata": {}
+            }),
+        )
+        .await;
+        call_mcp_tool(
+            &server,
+            &token,
+            session_id.as_deref(),
+            4,
+            "create_manual_edge",
+            json!({
+                "from_item_id": "section-a",
+                "to_item_id": "leaf-1",
+                "relation": "contains",
+                "sort_order": "00000000000000000010",
+                "directed": true,
+                "metadata": {}
+            }),
+        )
+        .await;
+
+        let tree_with_edges = server
+            .get("/api/cms/tree/page-1")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .await;
+        tree_with_edges.assert_status_ok();
+        let tree_with_edges = tree_with_edges.json::<CmsTreeResponse>();
+        let child_ids = tree_with_edges
+            .tree
+            .children
+            .iter()
+            .map(|child| child.node.entry.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(child_ids, vec!["section-a", "section-b"]);
+        assert_eq!(
+            tree_with_edges.tree.children[0].node.children[0].node.entry.text,
+            "before"
+        );
+
+        call_mcp_tool(
+            &server,
+            &token,
+            session_id.as_deref(),
+            5,
+            "update_item",
+            json!({
+                "id": "leaf-1",
+                "text": "after",
+                "metadata": {"title": "Leaf"},
+                "source_id": "project:rust-rag:knowledge"
+            }),
+        )
+        .await;
+
+        let refreshed_tree = server
+            .get("/api/cms/tree/page-1")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .await;
+        refreshed_tree.assert_status_ok();
+        let refreshed_tree = refreshed_tree.json::<CmsTreeResponse>();
+        assert_eq!(
+            refreshed_tree.tree.children[0].node.children[0].node.entry.text,
+            "after"
         );
     }
 
@@ -6598,12 +7158,14 @@ mod tests {
             .await;
 
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
-        assert!(store
-            .messages
-            .lock()
-            .expect("store mutex poisoned")
-            .iter()
-            .any(|message| message.id == "msg-1"));
+        assert!(
+            store
+                .messages
+                .lock()
+                .expect("store mutex poisoned")
+                .iter()
+                .any(|message| message.id == "msg-1")
+        );
     }
 
     fn pkce_pair() -> (String, String) {
@@ -6638,11 +7200,7 @@ mod tests {
             ])
             .await;
         assert_eq!(resp.status_code(), StatusCode::SEE_OTHER);
-        let location = resp
-            .header("location")
-            .to_str()
-            .unwrap()
-            .to_owned();
+        let location = resp.header("location").to_str().unwrap().to_owned();
         // location is like "http://127.0.0.1:9999/cb?code=...&state=xyz"
         let qs = location.split_once('?').unwrap().1;
         let pairs: HashMap<String, String> = url::form_urlencoded::parse(qs.as_bytes())
@@ -6829,10 +7387,16 @@ mod tests {
         resp.assert_status_ok();
         let body = resp.json::<Value>();
         let grants = body["grant_types_supported"].as_array().unwrap();
-        assert!(grants
-            .iter()
-            .all(|g| g.as_str() != Some("urn:ietf:params:oauth:grant-type:device_code")));
-        assert!(grants.iter().any(|g| g.as_str() == Some("authorization_code")));
+        assert!(
+            grants
+                .iter()
+                .all(|g| g.as_str() != Some("urn:ietf:params:oauth:grant-type:device_code"))
+        );
+        assert!(
+            grants
+                .iter()
+                .any(|g| g.as_str() == Some("authorization_code"))
+        );
         assert_eq!(body["response_types_supported"], json!(["code"]));
         assert_eq!(body["code_challenge_methods_supported"], json!(["S256"]));
         assert!(body["authorization_endpoint"].is_string());

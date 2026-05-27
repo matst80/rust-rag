@@ -5,13 +5,14 @@
 use super::{ApiError, AppState};
 use crate::ontology::{self, OntologyRunReport};
 use anyhow::anyhow;
-use axum::{Json, extract::{Path, State}};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use tracing::info;
 
 #[tracing::instrument(name = "ontology.admin.run_batch", skip(state))]
-pub async fn run_batch(
-    State(state): State<AppState>,
-) -> Result<Json<OntologyRunReport>, ApiError> {
+pub async fn run_batch(State(state): State<AppState>) -> Result<Json<OntologyRunReport>, ApiError> {
     let model = ensure_configured(&state)?;
     info!(
         model = %model,
@@ -88,7 +89,5 @@ fn ensure_configured(state: &AppState) -> Result<String, ApiError> {
         .ontology_llm
         .default_model
         .clone()
-        .ok_or_else(|| {
-            ApiError::ServiceUnavailable("ontology LLM model not set".to_owned())
-        })
+        .ok_or_else(|| ApiError::ServiceUnavailable("ontology LLM model not set".to_owned()))
 }

@@ -21,14 +21,10 @@ pub async fn ingest_image(
     let mut source_id = "images".to_owned();
     let mut metadata_extra: Option<serde_json::Value> = None;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| {
-            tracing::error!("failed to read multipart field: {e}");
-            ApiError::BadRequest(e.to_string())
-        })?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("failed to read multipart field: {e}");
+        ApiError::BadRequest(e.to_string())
+    })? {
         let name = field.name().unwrap_or("").to_owned();
         match name.as_str() {
             "file" => {
@@ -46,23 +42,17 @@ pub async fn ingest_image(
                 );
             }
             "source_id" => {
-                source_id = field
-                    .text()
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("failed to read source_id text: {e}");
-                        ApiError::BadRequest(e.to_string())
-                    })?;
+                source_id = field.text().await.map_err(|e| {
+                    tracing::error!("failed to read source_id text: {e}");
+                    ApiError::BadRequest(e.to_string())
+                })?;
                 tracing::debug!(source_id = %source_id, "received source_id field");
             }
             "metadata" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("failed to read metadata text: {e}");
-                        ApiError::BadRequest(e.to_string())
-                    })?;
+                let text = field.text().await.map_err(|e| {
+                    tracing::error!("failed to read metadata text: {e}");
+                    ApiError::BadRequest(e.to_string())
+                })?;
                 metadata_extra = Some(serde_json::from_str(&text).map_err(|e| {
                     tracing::error!("failed to parse metadata JSON: {e}");
                     ApiError::BadRequest(format!("invalid metadata JSON: {e}"))
@@ -92,13 +82,11 @@ pub async fn ingest_image(
     let upload_dir = state.upload_path.as_str();
 
     tracing::info!(upload_dir = %upload_dir, stored_name = %stored_name, "saving uploaded image to disk");
-    fs::create_dir_all(upload_dir)
-        .await
-        .map_err(|e| {
-            let err = anyhow::anyhow!("failed to create upload dir {upload_dir:?}: {e}");
-            tracing::error!("{err}");
-            ApiError::Internal(err)
-        })?;
+    fs::create_dir_all(upload_dir).await.map_err(|e| {
+        let err = anyhow::anyhow!("failed to create upload dir {upload_dir:?}: {e}");
+        tracing::error!("{err}");
+        ApiError::Internal(err)
+    })?;
     fs::write(format!("{upload_dir}/{stored_name}"), &bytes)
         .await
         .map_err(|e| {
@@ -109,7 +97,10 @@ pub async fn ingest_image(
 
     tracing::info!("extracting text from image via LLM");
     let extracted_text = extract_image_text(&state, &bytes, &ext).await?;
-    tracing::debug!(extracted_len = extracted_text.len(), "successfully extracted text from image");
+    tracing::debug!(
+        extracted_len = extracted_text.len(),
+        "successfully extracted text from image"
+    );
 
     let mut metadata = json!({
         "source_type": "image",
@@ -137,20 +128,18 @@ pub async fn ingest_image(
     };
 
     tracing::info!("storing image metadata and extracted text in vector store");
-    let response = store_entry_core(&state, store_req, session.0).await.map_err(|e| {
-        tracing::error!("failed to store image entry: {e}");
-        e
-    })?;
-    
+    let response = store_entry_core(&state, store_req, session.0)
+        .await
+        .map_err(|e| {
+            tracing::error!("failed to store image entry: {e}");
+            e
+        })?;
+
     tracing::info!(item_id = %response.id, "image ingestion completed successfully");
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-async fn extract_image_text(
-    state: &AppState,
-    bytes: &[u8],
-    ext: &str,
-) -> Result<String, ApiError> {
+async fn extract_image_text(state: &AppState, bytes: &[u8], ext: &str) -> Result<String, ApiError> {
     // Prefer dedicated multimodal config; fall back to the default LLM endpoint.
     let (base_url, api_key, model, client) = if state.multimodal.is_configured() {
         tracing::debug!("using dedicated multimodal configuration");
@@ -165,7 +154,11 @@ async fn extract_image_text(
         (
             state.openai_chat.base_url.as_deref().unwrap(),
             state.openai_chat.api_key.as_deref(),
-            state.openai_chat.default_model.as_deref().unwrap_or("gpt-4o"),
+            state
+                .openai_chat
+                .default_model
+                .as_deref()
+                .unwrap_or("gpt-4o"),
             &state.http_client,
         )
     } else {
@@ -204,21 +197,26 @@ async fn extract_image_text(
 
     let url = format!("{base_url}/chat/completions");
     tracing::debug!(url = %url, model = %model, "sending request to multimodal LLM");
-    
+
     let mut builder = client.post(&url).json(&body);
     if let Some(key) = api_key {
         builder = builder.header("Authorization", format!("Bearer {key}"));
     }
 
     let response_res = builder.send().await;
-    
+
     let response_body = match response_res {
         Ok(resp) => {
             let status = resp.status();
             if !status.is_success() {
-                let error_text = resp.text().await.unwrap_or_else(|_| "could not read error body".to_owned());
+                let error_text = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "could not read error body".to_owned());
                 tracing::error!(status = %status, error_body = %error_text, "LLM request failed");
-                return Err(ApiError::Internal(anyhow::anyhow!("LLM request failed with status {status}: {error_text}")));
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "LLM request failed with status {status}: {error_text}"
+                )));
             }
             resp.json::<serde_json::Value>().await.map_err(|e| {
                 tracing::error!("failed to parse LLM response JSON: {e}");

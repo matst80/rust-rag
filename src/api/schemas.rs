@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::db::{SchemaRecord, VectorStore};
 use crate::validation;
 
-use super::{api_validation_error, ApiError, AppState};
+use super::{ApiError, AppState, api_validation_error};
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaPayload {

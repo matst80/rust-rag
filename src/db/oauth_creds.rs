@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 
-use super::{
-    OAuthCredentialsRecord, OAuthCredsStore, SqliteVectorStore, UpsertOAuthCredentials,
-};
+use super::{OAuthCredentialsRecord, OAuthCredsStore, SqliteVectorStore, UpsertOAuthCredentials};
 
 impl OAuthCredsStore for SqliteVectorStore {
     fn upsert_oauth_credentials(

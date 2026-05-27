@@ -16,8 +16,8 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -263,6 +263,9 @@ pub struct GraphEdgeRecord {
     pub to_item_id: String,
     pub edge_type: GraphEdgeType,
     pub relation: Option<String>,
+    /// Fixed-width lexicographically sortable rank key used to order sibling
+    /// edges deterministically for page/component rendering.
+    pub sort_order: String,
     pub weight: f32,
     pub directed: bool,
     pub metadata: Value,
@@ -358,7 +361,8 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
         OntologyPredicateRecord {
             name: "implemented_by".to_owned(),
             source_id: None,
-            description: "to is the concrete realization, implementation, or instance of from".to_owned(),
+            description: "to is the concrete realization, implementation, or instance of from"
+                .to_owned(),
             direction: "to is the concrete realization of from".to_owned(),
             example_from: Some("Auth spec".to_owned()),
             example_to: Some("JWT handler".to_owned()),
@@ -379,7 +383,10 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
 }
 
 fn seed_default_predicates(connection: &Connection) -> Result<()> {
-    let count: i64 = connection.query_row("SELECT count(*) FROM ontology_predicates", [], |row| row.get(0))?;
+    let count: i64 =
+        connection.query_row("SELECT count(*) FROM ontology_predicates", [], |row| {
+            row.get(0)
+        })?;
     if count > 0 {
         return Ok(());
     }
@@ -671,9 +678,31 @@ pub struct ManualEdgeInput {
     pub from_item_id: String,
     pub to_item_id: String,
     pub relation: Option<Cow<'static, str>>,
+    pub sort_order: Option<String>,
     pub weight: f32,
     pub directed: bool,
     pub metadata: Value,
+}
+
+pub const EDGE_SORT_ORDER_WIDTH: usize = 20;
+pub const EDGE_SORT_ORDER_STEP: i64 = 1024;
+
+pub fn format_edge_sort_order(value: i64) -> String {
+    format!("{value:0width$}", width = EDGE_SORT_ORDER_WIDTH)
+}
+
+pub fn normalize_edge_sort_order(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("sort_order must not be empty");
+    }
+    let parsed = trimmed
+        .parse::<i64>()
+        .with_context(|| format!("sort_order '{trimmed}' must be an integer"))?;
+    if parsed < 0 {
+        anyhow::bail!("sort_order must be greater than or equal to zero");
+    }
+    Ok(format_edge_sort_order(parsed))
 }
 
 /// How many recent search events to average when rebuilding an interest profile.
@@ -833,11 +862,7 @@ pub trait UserMemoryStore: Send + Sync {
     fn touch_item_accesses(&self, item_ids: &[String], now: i64) -> Result<()>;
     fn get_user_profile(&self, subject: &str) -> Result<Option<UserProfile>>;
     fn upsert_user_profile(&self, profile: UserProfile) -> Result<()>;
-    fn get_recent_query_embeddings(
-        &self,
-        subject: &str,
-        limit: usize,
-    ) -> Result<Vec<Vec<f32>>>;
+    fn get_recent_query_embeddings(&self, subject: &str, limit: usize) -> Result<Vec<Vec<f32>>>;
     fn count_events_since(&self, subject: &str, horizon: i64) -> Result<i64>;
 }
 
@@ -949,10 +974,7 @@ pub trait VectorStore: Send + Sync {
     /// Every distinct (source_id, path) with entry count. Lets the wiki
     /// sidebar render the full tree from a single round-trip. When
     /// `source_id_filter` is `Some`, scoped to one namespace.
-    fn list_all_paths(
-        &self,
-        _source_id_filter: Option<&str>,
-    ) -> Result<Vec<PathRow>> {
+    fn list_all_paths(&self, _source_id_filter: Option<&str>) -> Result<Vec<PathRow>> {
         anyhow::bail!("path tree not supported by this store")
     }
     fn distances_for_ids(&self, query_embedding: &[f32], ids: &[String]) -> Result<Vec<SearchHit>>;
@@ -974,16 +996,29 @@ pub trait VectorStore: Send + Sync {
     fn rebuild_similarity_graph(&self) -> Result<usize>;
     fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
-    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord>;
+    fn update_graph_edge(
+        &self,
+        id: &str,
+        relation: Option<String>,
+        metadata: Value,
+        sort_order: Option<String>,
+    ) -> Result<GraphEdgeRecord>;
     fn delete_graph_edge(&self, id: &str) -> Result<bool>;
     fn get_items_pending_ontology(&self, limit: usize) -> Result<Vec<ItemRecord>>;
     fn mark_ontology_status(&self, id: &str, status: &str) -> Result<()>;
 
     /// Ontology predicates management.
-    fn list_ontology_predicates(&self, _source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+    fn list_ontology_predicates(
+        &self,
+        _source_id: Option<&str>,
+    ) -> Result<Vec<OntologyPredicateRecord>> {
         anyhow::bail!("ontology predicates not supported by this store")
     }
-    fn get_ontology_predicate(&self, _name: &str, _source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+    fn get_ontology_predicate(
+        &self,
+        _name: &str,
+        _source_id: Option<&str>,
+    ) -> Result<Option<OntologyPredicateRecord>> {
         anyhow::bail!("ontology predicates not supported by this store")
     }
     fn upsert_ontology_predicate(&self, _record: OntologyPredicateRecord) -> Result<()> {
@@ -1123,7 +1158,6 @@ impl SqliteVectorStore {
         }
         Ok(())
     }
-
 }
 
 impl VectorStore for SqliteVectorStore {
@@ -1244,7 +1278,11 @@ impl VectorStore for SqliteVectorStore {
             // if we want to filter by type first. But for simplicity we'll just
             // filter after joining or include it in the query.
             // Actually, if type_name is set, we might want to increase k to ensure we get enough hits of that type.
-            let k = if type_name.is_some() { top_k * 5 } else { top_k };
+            let k = if type_name.is_some() {
+                top_k * 5
+            } else {
+                top_k
+            };
 
             let mut statement = connection.prepare(
                 "
@@ -1529,7 +1567,6 @@ impl VectorStore for SqliteVectorStore {
         list_items_internal(connection, request)
     }
 
-
     fn get_item(&self, id: &str) -> Result<Option<ItemRecord>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
@@ -1649,10 +1686,7 @@ impl VectorStore for SqliteVectorStore {
         Ok(stored_name)
     }
 
-    fn list_all_paths(
-        &self,
-        source_id_filter: Option<&str>,
-    ) -> Result<Vec<PathRow>> {
+    fn list_all_paths(&self, source_id_filter: Option<&str>) -> Result<Vec<PathRow>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -1691,11 +1725,7 @@ impl VectorStore for SqliteVectorStore {
         Ok(rows)
     }
 
-    fn list_path_children(
-        &self,
-        source_id: &str,
-        prefix: Option<&str>,
-    ) -> Result<Vec<PathChild>> {
+    fn list_path_children(&self, source_id: &str, prefix: Option<&str>) -> Result<Vec<PathChild>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -1859,7 +1889,11 @@ impl VectorStore for SqliteVectorStore {
                     && visited_nodes.contains(&edge.to_item_id)
             })
             .collect::<Vec<_>>();
-        edges.sort_by(|a, b| a.id.cmp(&b.id));
+        edges.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         Ok(GraphNeighborhood {
             center_id: center_id.to_owned(),
@@ -1876,7 +1910,7 @@ impl VectorStore for SqliteVectorStore {
             .ok_or_else(|| anyhow!("sqlite connection not open"))?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+            "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at
              FROM graph_edges WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], map_graph_edge_row)?;
@@ -1943,8 +1977,6 @@ impl VectorStore for SqliteVectorStore {
         if !input.directed && input.from_item_id > input.to_item_id {
             std::mem::swap(&mut input.from_item_id, &mut input.to_item_id);
         }
-
-        let metadata_json = serde_json::to_string(&input.metadata)?;
         let timestamp = current_timestamp_millis()?;
         let edge_id = format!(
             "manual:{}:{}:{}",
@@ -1963,19 +1995,32 @@ impl VectorStore for SqliteVectorStore {
         if get_item_internal(&transaction, &input.to_item_id)?.is_none() {
             anyhow::bail!("item {} not found", input.to_item_id);
         }
+        let sort_order = match input.sort_order.as_deref() {
+            Some(value) => normalize_edge_sort_order(value)?,
+            None => {
+                let existing = transaction.query_row(
+                    "SELECT MAX(CAST(sort_order AS INTEGER)) FROM graph_edges WHERE from_item_id = ?1",
+                    params![input.from_item_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?;
+                format_edge_sort_order(existing.unwrap_or(0) + EDGE_SORT_ORDER_STEP)
+            }
+        };
+        let metadata_json = serde_json::to_string(&input.metadata)?;
 
         transaction.execute(
             "
             INSERT INTO graph_edges (
-                id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+                id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, ?7, ?8, ?8)
+            VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, ?7, ?8, ?9, ?9)
             ",
             params![
                 edge_id,
                 input.from_item_id,
                 input.to_item_id,
                 input.relation.as_deref(),
+                sort_order,
                 input.weight,
                 bool_to_sqlite(input.directed),
                 metadata_json,
@@ -1990,6 +2035,7 @@ impl VectorStore for SqliteVectorStore {
             to_item_id: input.to_item_id,
             edge_type: GraphEdgeType::Manual,
             relation: input.relation.map(|r| r.into_owned()),
+            sort_order,
             weight: input.weight,
             directed: input.directed,
             metadata: input.metadata,
@@ -1997,7 +2043,13 @@ impl VectorStore for SqliteVectorStore {
             updated_at: timestamp,
         })
     }
-    fn update_graph_edge(&self, id: &str, relation: Option<String>, metadata: Value) -> Result<GraphEdgeRecord> {
+    fn update_graph_edge(
+        &self,
+        id: &str,
+        relation: Option<String>,
+        metadata: Value,
+        sort_order: Option<String>,
+    ) -> Result<GraphEdgeRecord> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let conn = guard
             .as_ref()
@@ -2005,36 +2057,48 @@ impl VectorStore for SqliteVectorStore {
 
         let metadata_str = serde_json::to_string(&metadata)?;
         let now = current_timestamp_millis()?;
+        let current_sort_order: Option<String> = conn
+            .query_row(
+                "SELECT sort_order FROM graph_edges WHERE id = ?",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let sort_order = match (sort_order, current_sort_order) {
+            (Some(value), _) => normalize_edge_sort_order(&value)?,
+            (None, Some(value)) => value,
+            (None, None) => anyhow::bail!("edge {id} not found"),
+        };
 
         conn.execute(
-            "UPDATE graph_edges SET relation = ?, metadata = ?, updated_at = ? WHERE id = ?",
-            params![relation, metadata_str, now, id],
+            "UPDATE graph_edges SET relation = ?, sort_order = ?, metadata = ?, updated_at = ? WHERE id = ?",
+            params![relation, sort_order, metadata_str, now, id],
         )?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at FROM graph_edges WHERE id = ?"
+            "SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at FROM graph_edges WHERE id = ?"
         )?;
 
         let edge = stmt.query_row(params![id], |row| {
             let edge_type_str: String = row.get(3)?;
-            let metadata_str: String = row.get(7)?;
+            let metadata_str: String = row.get(8)?;
             Ok(GraphEdgeRecord {
                 id: row.get(0)?,
                 from_item_id: row.get(1)?,
                 to_item_id: row.get(2)?,
                 edge_type: GraphEdgeType::from_str(&edge_type_str).unwrap_or(GraphEdgeType::Manual),
                 relation: row.get(4)?,
-                weight: row.get(5)?,
-                directed: row.get(6)?,
+                sort_order: row.get(5)?,
+                weight: row.get(6)?,
+                directed: row.get(7)?,
                 metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })?;
 
         Ok(edge)
     }
-
 
     fn delete_graph_edge(&self, id: &str) -> Result<bool> {
         self.ensure_graph_enabled()?;
@@ -2094,7 +2158,18 @@ impl VectorStore for SqliteVectorStore {
                 ))
             })?
             .map(|r| {
-                let (id, text, metadata_str, source_id, created_at, updated_at, path, type_name, data_str, analysis_str) = r?;
+                let (
+                    id,
+                    text,
+                    metadata_str,
+                    source_id,
+                    created_at,
+                    updated_at,
+                    path,
+                    type_name,
+                    data_str,
+                    analysis_str,
+                ) = r?;
                 Ok(ItemRecord {
                     id,
                     text,
@@ -2124,8 +2199,11 @@ impl VectorStore for SqliteVectorStore {
         )?;
         Ok(())
     }
-    
-    fn list_ontology_predicates(&self, source_id: Option<&str>) -> Result<Vec<OntologyPredicateRecord>> {
+
+    fn list_ontology_predicates(
+        &self,
+        source_id: Option<&str>,
+    ) -> Result<Vec<OntologyPredicateRecord>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -2162,7 +2240,11 @@ impl VectorStore for SqliteVectorStore {
         Ok(predicates)
     }
 
-    fn get_ontology_predicate(&self, name: &str, source_id: Option<&str>) -> Result<Option<OntologyPredicateRecord>> {
+    fn get_ontology_predicate(
+        &self,
+        name: &str,
+        source_id: Option<&str>,
+    ) -> Result<Option<OntologyPredicateRecord>> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -2173,19 +2255,21 @@ impl VectorStore for SqliteVectorStore {
              FROM ontology_predicates WHERE name = ?1 AND (source_id = ?2 OR source_id = '*')
              ORDER BY source_id DESC LIMIT 1",
         )?;
-        let record = stmt.query_row(params![name, sid], |row| {
-            let sid_val: String = row.get(1)?;
-            Ok(OntologyPredicateRecord {
-                name: row.get(0)?,
-                source_id: if sid_val == "*" { None } else { Some(sid_val) },
-                description: row.get(2)?,
-                direction: row.get(3)?,
-                example_from: row.get(4)?,
-                example_to: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+        let record = stmt
+            .query_row(params![name, sid], |row| {
+                let sid_val: String = row.get(1)?;
+                Ok(OntologyPredicateRecord {
+                    name: row.get(0)?,
+                    source_id: if sid_val == "*" { None } else { Some(sid_val) },
+                    description: row.get(2)?,
+                    direction: row.get(3)?,
+                    example_from: row.get(4)?,
+                    example_to: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
             })
-        }).optional()?;
+            .optional()?;
         Ok(record)
     }
 
@@ -2334,7 +2418,10 @@ impl VectorStore for SqliteVectorStore {
         } else {
             0
         };
-        let n = tx.execute("DELETE FROM schemas WHERE type_name = ?1", params![type_name])?;
+        let n = tx.execute(
+            "DELETE FROM schemas WHERE type_name = ?1",
+            params![type_name],
+        )?;
         tx.commit()?;
         Ok((n > 0, unset))
     }
@@ -2370,8 +2457,8 @@ impl VectorStore for SqliteVectorStore {
         let Some(metadata_str) = row else {
             return Ok(false);
         };
-        let mut metadata: Value =
-            serde_json::from_str(&metadata_str).unwrap_or_else(|_| Value::Object(Default::default()));
+        let mut metadata: Value = serde_json::from_str(&metadata_str)
+            .unwrap_or_else(|_| Value::Object(Default::default()));
         let obj = metadata
             .as_object_mut()
             .context("metadata is not a JSON object")?;
@@ -2402,7 +2489,6 @@ impl VectorStore for SqliteVectorStore {
         Ok(true)
     }
 }
-
 
 impl UserMemoryStore for SqliteVectorStore {
     fn log_user_event(&self, event: NewUserEvent) -> Result<()> {
@@ -2489,7 +2575,12 @@ impl UserMemoryStore for SqliteVectorStore {
              SET interest_embedding = excluded.interest_embedding,
                  event_horizon = excluded.event_horizon,
                  updated_at = excluded.updated_at",
-            params![profile.subject, blob, profile.event_horizon, profile.updated_at],
+            params![
+                profile.subject,
+                blob,
+                profile.event_horizon,
+                profile.updated_at
+            ],
         )?;
         Ok(())
     }
@@ -2555,7 +2646,18 @@ impl MessageStore for SqliteVectorStore {
                 },
             )
             .optional()?;
-        let Some((id, channel, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at)) = row else {
+        let Some((
+            id,
+            channel,
+            sender,
+            sender_kind_str,
+            text,
+            kind,
+            metadata_str,
+            created_at,
+            updated_at,
+        )) = row
+        else {
             return Ok(None);
         };
         Ok(Some(MessageRecord {
@@ -2665,8 +2767,17 @@ impl MessageStore for SqliteVectorStore {
                 )
                 .optional()?;
 
-        let Some((_, channel, sender, sender_kind_str, mut text, kind, metadata_str, created_at, _)) =
-            existing
+        let Some((
+            _,
+            channel,
+            sender,
+            sender_kind_str,
+            mut text,
+            kind,
+            metadata_str,
+            created_at,
+            _,
+        )) = existing
         else {
             return Ok(None);
         };
@@ -2734,8 +2845,17 @@ impl MessageStore for SqliteVectorStore {
                 )
                 .optional()?;
 
-        let Some((id_v, channel, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at)) =
-            existing
+        let Some((
+            id_v,
+            channel,
+            sender,
+            sender_kind_str,
+            text,
+            kind,
+            metadata_str,
+            created_at,
+            updated_at,
+        )) = existing
         else {
             return Ok(None);
         };
@@ -2750,7 +2870,8 @@ impl MessageStore for SqliteVectorStore {
             sender_kind: MessageSenderKind::from_str(&sender_kind_str)?,
             text,
             kind,
-            metadata: serde_json::from_str(&metadata_str).unwrap_or(Value::Object(Default::default())),
+            metadata: serde_json::from_str(&metadata_str)
+                .unwrap_or(Value::Object(Default::default())),
             created_at,
             updated_at,
         }))
@@ -2782,8 +2903,17 @@ impl MessageStore for SqliteVectorStore {
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, channel, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at) =
-                row?;
+            let (
+                id,
+                channel,
+                sender,
+                sender_kind_str,
+                text,
+                kind,
+                metadata_str,
+                created_at,
+                updated_at,
+            ) = row?;
             out.push(MessageRecord {
                 id,
                 channel,
@@ -2824,8 +2954,17 @@ impl MessageStore for SqliteVectorStore {
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, channel, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at) =
-                row?;
+            let (
+                id,
+                channel,
+                sender,
+                sender_kind_str,
+                text,
+                kind,
+                metadata_str,
+                created_at,
+                updated_at,
+            ) = row?;
             out.push(MessageRecord {
                 id,
                 channel,
@@ -2849,7 +2988,17 @@ impl MessageStore for SqliteVectorStore {
             .context("sqlite connection has already been closed")?;
         let transaction = connection.transaction()?;
 
-        let rows: Vec<(String, String, String, String, String, String, String, i64, i64)> = {
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+        )> = {
             let mut stmt = transaction.prepare(
                 "SELECT id, channel, sender, sender_kind, text, kind, metadata, created_at, updated_at
                  FROM messages WHERE channel = ?1",
@@ -2882,7 +3031,9 @@ impl MessageStore for SqliteVectorStore {
         transaction.commit()?;
 
         let mut out = Vec::with_capacity(rows.len());
-        for (id, ch, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at) in rows {
+        for (id, ch, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at) in
+            rows
+        {
             out.push(MessageRecord {
                 id,
                 channel: ch,
@@ -2985,8 +3136,17 @@ impl MessageStore for SqliteVectorStore {
 
         let mut messages = Vec::new();
         for row in rows {
-            let (id, channel, sender, sender_kind_str, text, kind, metadata_str, created_at, updated_at) =
-                row?;
+            let (
+                id,
+                channel,
+                sender,
+                sender_kind_str,
+                text,
+                kind,
+                metadata_str,
+                created_at,
+                updated_at,
+            ) = row?;
             messages.push(MessageRecord {
                 id,
                 channel,
@@ -3031,10 +3191,7 @@ impl MessageStore for SqliteVectorStore {
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
@@ -3081,9 +3238,8 @@ fn list_items_internal(
     }
 
     if let Some(prefix) = request.path_prefix.as_ref().filter(|p| !p.is_empty()) {
-        where_clauses.push(
-            "(LOWER(path) = LOWER(?) OR LOWER(path) LIKE LOWER(?) || '/%')".to_string(),
-        );
+        where_clauses
+            .push("(LOWER(path) = LOWER(?) OR LOWER(path) LIKE LOWER(?) || '/%')".to_string());
         sql_params.push(Box::new(prefix.clone()));
         sql_params.push(Box::new(prefix.clone()));
     }
@@ -3395,7 +3551,9 @@ mod tests {
             )
             .unwrap();
 
-        let results = store.search(&[1.0, 0.0, 0.0], 5, Some("memory"), None).unwrap();
+        let results = store
+            .search(&[1.0, 0.0, 0.0], 5, Some("memory"), None)
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "doc-1");
@@ -3442,12 +3600,16 @@ mod tests {
             .unwrap();
 
         // Search for "todo"
-        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("todo")).unwrap();
+        let results = store
+            .search(&[1.0, 0.0, 0.0], 2, None, Some("todo"))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "todo-1");
 
         // Search for "note"
-        let results = store.search(&[1.0, 0.0, 0.0], 2, None, Some("note")).unwrap();
+        let results = store
+            .search(&[1.0, 0.0, 0.0], 2, None, Some("note"))
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "note-1");
 
@@ -3552,7 +3714,12 @@ mod tests {
 
         assert!(store.delete_item("doc-1").unwrap());
         assert!(store.get_item("doc-1").unwrap().is_none());
-        assert!(store.search(&[1.0, 0.0, 0.0], 5, None, None).unwrap().is_empty());
+        assert!(
+            store
+                .search(&[1.0, 0.0, 0.0], 5, None, None)
+                .unwrap()
+                .is_empty()
+        );
         assert!(!store.delete_item("doc-1").unwrap());
     }
 
@@ -3648,6 +3815,7 @@ mod tests {
                 from_item_id: "mem-1".to_owned(),
                 to_item_id: "know-1".to_owned(),
                 relation: Some(Cow::Borrowed("supports")),
+                sort_order: None,
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"user": "mats"}),
@@ -3738,6 +3906,7 @@ mod tests {
                 from_item_id: "a".to_owned(),
                 to_item_id: "c".to_owned(),
                 relation: Some(Cow::Borrowed("supports")),
+                sort_order: None,
                 weight: 1.0,
                 directed: true,
                 metadata: json!({"kind": "manual"}),
