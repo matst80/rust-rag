@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use super::{
     DuplicateEdgeGroup, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNodeDistance,
-    bool_to_sqlite, current_timestamp_millis, parse_json_column,
+    bool_to_sqlite, current_timestamp_millis, format_edge_sort_order, parse_json_column,
 };
 
 pub(super) fn list_duplicate_edges_internal(
@@ -28,10 +28,10 @@ pub(super) fn list_duplicate_edges_internal(
         let (from, to) = pair?;
         let mut edge_stmt = connection.prepare(
             "
-            SELECT id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+            SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at
             FROM graph_edges
             WHERE from_item_id = ?1 AND to_item_id = ?2
-            ORDER BY updated_at DESC
+            ORDER BY sort_order ASC, updated_at DESC, id ASC
             ",
         )?;
         let edges = edge_stmt.query_map(params![from, to], map_graph_edge_row)?;
@@ -64,6 +64,7 @@ pub(super) fn list_graph_edges_internal(
             to_item_id,
             edge_type,
             relation,
+            sort_order,
             weight,
             directed,
             metadata,
@@ -73,7 +74,7 @@ pub(super) fn list_graph_edges_internal(
         WHERE (?1 IS NULL OR from_item_id = ?1 OR to_item_id = ?1)
           AND (?2 IS NULL OR edge_type = ?2)
           AND (?3 IS NULL OR json_extract(metadata, '$.status') = ?3)
-        ORDER BY updated_at DESC, id ASC
+        ORDER BY sort_order ASC, updated_at DESC, id ASC
         ",
     )?;
     let rows = statement.query_map(params![item_id, edge_type, status], map_graph_edge_row)?;
@@ -210,14 +211,15 @@ pub(super) fn rebuild_similarity_graph_locked(
             transaction.execute(
                 "
                 INSERT INTO graph_edges (
-                    id, from_item_id, to_item_id, edge_type, relation, weight, directed, metadata, created_at, updated_at
+                    id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, directed, metadata, created_at, updated_at
                 )
-                VALUES (?1, ?2, ?3, 'similarity', NULL, ?4, 0, ?5, ?6, ?6)
+                VALUES (?1, ?2, ?3, 'similarity', NULL, ?4, ?5, 0, ?6, ?7, ?7)
                 ",
                 params![
                     format!("similarity:{from_item_id}:{to_item_id}"),
                     from_item_id,
                     to_item_id,
+                    format_edge_sort_order(inserted as i64 + 1),
                     weight,
                     serde_json::to_string(&metadata)?,
                     timestamp
@@ -250,11 +252,12 @@ pub(super) fn map_graph_edge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Gr
         to_item_id: row.get(2)?,
         edge_type,
         relation: row.get(4)?,
-        weight: row.get(5)?,
-        directed: row.get::<_, i64>(6)? != 0,
-        metadata: parse_json_column(row.get::<_, String>(7)?, 7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        sort_order: row.get(5)?,
+        weight: row.get(6)?,
+        directed: row.get::<_, i64>(7)? != 0,
+        metadata: parse_json_column(row.get::<_, String>(8)?, 8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 

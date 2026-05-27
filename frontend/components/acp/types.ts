@@ -5,6 +5,28 @@ export interface AcpEvent {
 	localSeq: number
 }
 
+export interface UserPromptHistory {
+	type: "user_prompt"
+	thread_id: number | null
+	acp_session_id: string | null
+	text: string
+}
+
+export interface AgentUpdateHistory {
+	type: "agent_update"
+	thread_id: number | null
+	acp_session_id: string
+	event: {
+		type: "update"
+		sessionUpdate: string | { type: string }
+		content?: any
+		message?: string
+		toolCallId?: string
+		fields?: any
+		entries?: any[]
+	}
+}
+
 export interface SessionInfo {
 	acp_session_id: string
 	project_path?: string // Legacy/Fallback
@@ -15,7 +37,7 @@ export interface SessionInfo {
 	agent_command: string
 	agent_name?: string | null
 	available_commands?: { name: string; description?: string; schema?: Record<string, unknown> }[]
-	history?: unknown[]
+	history?: (UserPromptHistory | AgentUpdateHistory | any)[]
 }
 
 export interface TerminalInfo {

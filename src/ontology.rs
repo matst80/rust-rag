@@ -3,12 +3,12 @@ use crate::{
     config::{OntologyConfig, OpenAiChatConfig},
     db::{GraphEdgeRecord, ItemRecord, ManualEdgeInput, VectorStore},
 };
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tracing::{error, info, warn};
 
 /// One-shot run report returned by [`run_once`] / [`run_for_item`].
@@ -101,7 +101,6 @@ fn committed_edge(item_id: &str, record: &GraphEdgeRecord) -> CommittedEdge {
         reasoning,
     }
 }
-
 
 fn get_ontology_system_prompt(predicates: &[crate::db::OntologyPredicateRecord]) -> String {
     // Flat bullet list keyed by name + description from the DB. Small models
@@ -277,10 +276,14 @@ pub async fn run_once(
         let store_clone = store.clone();
         let id = item.id.clone();
         let status_to_set = mark_status.to_string();
-        let _ =
-            tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
-                .await;
-        info!("ontology worker: marked item {} as {}", item.id, mark_status);
+        let _ = tokio::task::spawn_blocking(move || {
+            store_clone.mark_ontology_status(&id, &status_to_set)
+        })
+        .await;
+        info!(
+            "ontology worker: marked item {} as {}",
+            item.id, mark_status
+        );
     }
 
     Ok(report)
@@ -328,7 +331,10 @@ pub async fn run_for_item(
     let mark_status = match &process_result {
         Ok(()) => "done",
         Err(err) => {
-            error!("ontology worker: item {} extraction failed: {err:#}", item.id);
+            error!(
+                "ontology worker: item {} extraction failed: {err:#}",
+                item.id
+            );
             "failed"
         }
     };
@@ -336,8 +342,9 @@ pub async fn run_for_item(
     let store_clone = store.clone();
     let id = item.id.clone();
     let status_to_set = mark_status.to_string();
-    let _ = tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
-        .await;
+    let _ =
+        tokio::task::spawn_blocking(move || store_clone.mark_ontology_status(&id, &status_to_set))
+            .await;
 
     // Bubble the underlying error up so admin callers see the actual cause
     // (e.g. "LLM returned empty body") instead of a generic wrapper.
@@ -371,8 +378,11 @@ async fn process_item(
     let store_clone = store.clone();
     let known_pairs: std::collections::HashSet<String> =
         tokio::task::spawn_blocking(move || -> Result<std::collections::HashSet<String>> {
-            let edges = store_clone
-                .list_graph_edges(Some(&target_id_for_edges), Some(crate::db::GraphEdgeType::Manual), None)?;
+            let edges = store_clone.list_graph_edges(
+                Some(&target_id_for_edges),
+                Some(crate::db::GraphEdgeType::Manual),
+                None,
+            )?;
             let mut out = std::collections::HashSet::new();
             for e in edges {
                 if e.metadata.get("source").and_then(|v| v.as_str()) != Some("ontology_worker") {
@@ -448,7 +458,10 @@ async fn process_item(
     )
     .await;
 
-    let LlmCallResult { parsed, raw_content } = match call {
+    let LlmCallResult {
+        parsed,
+        raw_content,
+    } = match call {
         Ok(r) => r,
         Err(err) => {
             // Capture the failure in the debug trace so the UI can surface it
@@ -468,7 +481,11 @@ async fn process_item(
     };
 
     report.items_processed += 1;
-    let ParsedEdges { edges, proposed, drops } = parsed;
+    let ParsedEdges {
+        edges,
+        proposed,
+        drops,
+    } = parsed;
     let count = edges.len();
     for edge in edges {
         let store_clone = store.clone();
@@ -483,12 +500,17 @@ async fn process_item(
                     record.to_item_id,
                     record.weight
                 );
-                report.edges_committed.push(committed_edge(&item.id, &record));
+                report
+                    .edges_committed
+                    .push(committed_edge(&item.id, &record));
             }
         }
     }
     if count > 0 {
-        info!("ontology worker: item {} → {count} edge(s) committed", item.id);
+        info!(
+            "ontology worker: item {} → {count} edge(s) committed",
+            item.id
+        );
     } else {
         info!(
             item_id = %item.id,
@@ -536,7 +558,11 @@ async fn call_llm_for_edges(
 ) -> Result<LlmCallResult> {
     if neighbors.is_empty() {
         return Ok(LlmCallResult {
-            parsed: ParsedEdges { edges: vec![], proposed: 0, drops: FilterDrops::default() },
+            parsed: ParsedEdges {
+                edges: vec![],
+                proposed: 0,
+                drops: FilterDrops::default(),
+            },
             raw_content: String::new(),
         });
     }
@@ -619,10 +645,16 @@ async fn call_llm_for_edges(
             raw_content = %truncate(&content, 1000),
             "ontology worker: LLM content failed schema parse"
         );
-        anyhow!("LLM output failed schema parse ({e}); content preview: {}", truncate(&content, 200))
+        anyhow!(
+            "LLM output failed schema parse ({e}); content preview: {}",
+            truncate(&content, 200)
+        )
     })?;
 
-    Ok(LlmCallResult { parsed, raw_content: content })
+    Ok(LlmCallResult {
+        parsed,
+        raw_content: content,
+    })
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -668,9 +700,7 @@ fn parse_ontology_response(
             drops.bad_predicate += 1;
             continue;
         }
-        if !valid_ids.contains(e.from.as_str())
-            || !valid_ids.contains(e.to.as_str())
-        {
+        if !valid_ids.contains(e.from.as_str()) || !valid_ids.contains(e.to.as_str()) {
             drops.unknown_id += 1;
             continue;
         }
@@ -691,11 +721,16 @@ fn parse_ontology_response(
         // the HITL review UI. A 4B model rarely emits >=0.95 on its own, so in
         // practice the only auto-confirmed edges are the ones the model is
         // genuinely certain about. Adjust upward if false-positives slip through.
-        let status = if e.conf >= 0.95 { "confirmed" } else { "suggested" };
+        let status = if e.conf >= 0.95 {
+            "confirmed"
+        } else {
+            "suggested"
+        };
         edges.push(ManualEdgeInput {
             from_item_id: e.from,
             to_item_id: e.to,
             relation: Some(Cow::Owned(e.rel)),
+            sort_order: None,
             // Confidence becomes the edge weight — queryable and visible in the graph UI.
             weight: e.conf,
             directed: true,
@@ -728,7 +763,11 @@ fn parse_ontology_response(
     let edges: Vec<ManualEdgeInput> = best.into_values().collect();
     drops.duplicate_pair = total_before - edges.len();
 
-    Ok(ParsedEdges { edges, proposed, drops })
+    Ok(ParsedEdges {
+        edges,
+        proposed,
+        drops,
+    })
 }
 
 /// Strip optional markdown code fences so the JSON can be parsed even when a
@@ -777,35 +816,49 @@ mod tests {
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
         valid.insert("depends_on".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 2);
         assert_eq!(edges[0].relation.as_ref().map(|r| r.as_ref()), Some("is_a"));
         assert!((edges[0].weight - 0.95).abs() < 0.001);
         assert!(edges[0].directed);
         assert_eq!(edges[0].metadata["status"], "confirmed");
-        assert_eq!(edges[0].metadata["reasoning"], "HashMap is a data structure.");
+        assert_eq!(
+            edges[0].metadata["reasoning"],
+            "HashMap is a data structure."
+        );
         assert_eq!(edges[1].metadata["status"], "suggested");
-        assert_eq!(edges[1].metadata["reasoning"], "HashMap depends on hashing.");
+        assert_eq!(
+            edges[1].metadata["reasoning"],
+            "HashMap depends on hashing."
+        );
     }
 
     #[test]
     fn edge_below_confidence_threshold_is_dropped() {
         let neighbors = vec![hit("id-B", "something")];
-        let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.5}]}"#;
+        let content =
+            r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.5}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
         // threshold 0.7 — 0.5 should be dropped
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 
     #[test]
     fn edge_at_confidence_threshold_is_accepted() {
         let neighbors = vec![hit("id-B", "something")];
-        let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.7}]}"#;
+        let content =
+            r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B","confidence":0.7}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 1);
     }
 
@@ -816,7 +869,9 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-B"}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 
@@ -826,7 +881,9 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"related_to","to_id":"id-B","confidence":0.95}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 
@@ -837,7 +894,9 @@ mod tests {
         let mut valid = HashSet::new();
         valid.insert("contains".to_owned());
         valid.insert("implemented_by".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 2);
     }
 
@@ -847,7 +906,9 @@ mod tests {
         let content = r#"{"edges":[{"from_id":"id-A","predicate":"is_a","to_id":"id-PHANTOM","confidence":0.9}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 
@@ -858,7 +919,9 @@ mod tests {
             r#"{"edges":[{"from_id":"id-B","predicate":"is_a","to_id":"id-C","confidence":0.9}]}"#;
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 
@@ -868,7 +931,9 @@ mod tests {
         let content = "```json\n{\"edges\":[{\"from_id\":\"id-A\",\"predicate\":\"is_a\",\"to_id\":\"id-B\",\"confidence\":0.9}]}\n```";
         let mut valid = HashSet::new();
         valid.insert("is_a".to_owned());
-        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(content, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert_eq!(edges.len(), 1);
     }
 
@@ -876,7 +941,9 @@ mod tests {
     fn empty_edges_array_is_ok() {
         let neighbors = vec![hit("id-B", "unrelated")];
         let valid = HashSet::new();
-        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, &valid, 0.7).unwrap().edges;
+        let edges = parse_ontology_response(r#"{"edges":[]}"#, "id-A", &neighbors, &valid, 0.7)
+            .unwrap()
+            .edges;
         assert!(edges.is_empty());
     }
 }

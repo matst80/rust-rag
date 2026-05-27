@@ -696,7 +696,11 @@ async fn oauth_authorize_consent(
     if let Some(state_val) = params.state.as_deref() {
         q.append_pair("state", state_val);
     }
-    let separator = if params.redirect_uri.contains('?') { '&' } else { '?' };
+    let separator = if params.redirect_uri.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
     let location = format!("{}{}{}", params.redirect_uri, separator, q.finish());
     tracing::info!(
         client_id = %params.client_id,
@@ -754,9 +758,9 @@ fn validate_redirect_uri(uri: &str) -> Result<(), String> {
     let allowed_loopback = lower.starts_with("http://127.0.0.1")
         || lower.starts_with("http://localhost")
         || lower.starts_with("http://[::1]");
-    let custom_scheme = lower
-        .find("://")
-        .is_some_and(|idx| !lower[..idx].eq_ignore_ascii_case("http") && !lower[..idx].eq_ignore_ascii_case("https"));
+    let custom_scheme = lower.find("://").is_some_and(|idx| {
+        !lower[..idx].eq_ignore_ascii_case("http") && !lower[..idx].eq_ignore_ascii_case("https")
+    });
     if !(allowed_loopback || custom_scheme) {
         return Err("redirect_uri must be a loopback (http://127.0.0.1, http://localhost) or a custom scheme".to_owned());
     }
@@ -787,9 +791,13 @@ fn extract_session_subject(state: &AppState, headers: &HeaderMap) -> Option<Stri
         .next()?;
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
-    decode::<SessionClaims>(&token, &DecodingKey::from_secret(secret.as_bytes()), &validation)
-        .ok()
-        .map(|data| data.claims.sub)
+    decode::<SessionClaims>(
+        &token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .ok()
+    .map(|data| data.claims.sub)
 }
 
 async fn create_token(
@@ -1025,13 +1033,12 @@ async fn oauth_token_auth_code(state: AppState, form: OAuthTokenForm) -> Respons
 
     let auth_store = state.auth_store.clone();
     let lookup_code = code.clone();
-    let record = match tokio::task::spawn_blocking(move || auth_store.find_auth_code(&lookup_code))
-        .await
-    {
-        Ok(Ok(Some(r))) => r,
-        Ok(Ok(None)) => return token_error("invalid_grant", "code not found"),
-        _ => return token_error("server_error", "store lookup failed"),
-    };
+    let record =
+        match tokio::task::spawn_blocking(move || auth_store.find_auth_code(&lookup_code)).await {
+            Ok(Ok(Some(r))) => r,
+            Ok(Ok(None)) => return token_error("invalid_grant", "code not found"),
+            _ => return token_error("server_error", "store lookup failed"),
+        };
 
     if record.consumed_at.is_some() {
         return token_error("invalid_grant", "code already used");
@@ -1177,11 +1184,10 @@ fn verification_base_url(state: &AppState, headers: &HeaderMap) -> String {
 
 fn random_base64url(bytes: usize) -> Result<String, ApiError> {
     let mut buf = vec![0u8; bytes];
-    getrandom::fill(&mut buf)
-        .map_err(|error| {
-            tracing::error!(error = %error, "getrandom failed in random_base64url");
-            ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
-        })?;
+    getrandom::fill(&mut buf).map_err(|error| {
+        tracing::error!(error = %error, "getrandom failed in random_base64url");
+        ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
+    })?;
     Ok(URL_SAFE_NO_PAD.encode(&buf))
 }
 
@@ -1189,11 +1195,10 @@ fn random_user_code() -> Result<String, ApiError> {
     // Crockford-ish alphabet: no O/0/I/1/L to avoid transcription errors.
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut buf = [0u8; 8];
-    getrandom::fill(&mut buf)
-        .map_err(|error| {
-            tracing::error!(error = %error, "getrandom failed in random_user_code");
-            ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
-        })?;
+    getrandom::fill(&mut buf).map_err(|error| {
+        tracing::error!(error = %error, "getrandom failed in random_user_code");
+        ApiError::Internal(anyhow::anyhow!("getrandom failed: {error}"))
+    })?;
     let chars: Vec<char> = buf
         .iter()
         .map(|byte| ALPHABET[(*byte as usize) % ALPHABET.len()] as char)

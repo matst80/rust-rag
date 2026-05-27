@@ -21,6 +21,7 @@ use crate::{
         MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
     },
 };
+use chrono::{DateTime, Utc};
 use rmcp::{
     RoleServer, ServerHandler,
     handler::server::{
@@ -36,7 +37,6 @@ use rmcp::{
     },
 };
 use schemars::JsonSchema;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
@@ -479,10 +479,11 @@ Run this once at the start of a session before storing anything — it tells you
     )]
     async fn list_memory_conventions(&self) -> Result<CallToolResult, String> {
         let store = self.state.store.clone();
-        let entry = tokio::task::spawn_blocking(move || store.get_item(MEMORY_CONVENTIONS_ENTRY_ID))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+        let entry =
+            tokio::task::spawn_blocking(move || store.get_item(MEMORY_CONVENTIONS_ENTRY_ID))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
         let text = match entry {
             Some(record) => record.text,
             None => {
@@ -493,13 +494,15 @@ Run this once at the start of a session before storing anything — it tells you
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Persist knowledge, decisions, summaries, or cross-agent context. \
+    #[tool(
+        description = "Persist knowledge, decisions, summaries, or cross-agent context. \
 BEFORE STORING: if you have not yet, call `list_memory_conventions` (for taxonomy + required fields) and `list_schemas` (for typed-entry options) — most agents skip this and store mush. \
 SCHEMA-FIRST: if your content fits a registered schema (decision/fact/todo/incident/note/recipe/workout/page_component or any other in `list_schemas`), pass `type` + `data` for server-side JSON Schema validation and structured retrieval (`search_entries.type`, `list_items.type`). Use free-text only when no schema fits. \
 STABLE ID: pass a descriptive `id` like `rust_rag_auth_redesign_v2`. Reusing an existing `id` REPLACES the entry (upsert) — use this for evolving notes; bump a `_vN` suffix when the change is breaking enough that callers should distinguish. Omit `id` only for ephemeral or strictly append-only content. \
 SOURCE_ID: pick from the reserved buckets (`knowledge` / `memory` / `agent_notes`) or use `project:<slug>:knowledge` / `project:<slug>:todos`. Free-form values are allowed but won't compose with other agents' searches — see `list_memory_conventions` first. \
 METADATA: always include `author` and `tags`. For `*:todos` source_ids also include `status` and `priority`. \
-PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in the tree under its source_id; orthogonal to `type`.")]
+PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in the tree under its source_id; orthogonal to `type`."
+    )]
     async fn store_entry(
         &self,
         Parameters(request): Parameters<StoreRequest>,
@@ -538,7 +541,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         Ok(format_search_result(&response, &query))
     }
 
-    #[tool(description = "Dry-run LLM analysis of a candidate entry: embeds it, retrieves top-K semantically similar neighbors, then asks an OpenAI-compatible chat backend to classify the candidate vs each neighbor (agrees/refines/supersedes/contradicts/duplicates/unrelated) and extract cluster_hint, tags, title, summary, doc_type, freshness, quality, suggested_edges. Returns the analysis JSON without writing anything. Useful for the entry-view re-run button or for previewing what `store_entry` would auto-tag. Server must be configured with RAG_ANALYSIS_ENABLED + model.")]
+    #[tool(
+        description = "Dry-run LLM analysis of a candidate entry: embeds it, retrieves top-K semantically similar neighbors, then asks an OpenAI-compatible chat backend to classify the candidate vs each neighbor (agrees/refines/supersedes/contradicts/duplicates/unrelated) and extract cluster_hint, tags, title, summary, doc_type, freshness, quality, suggested_edges. Returns the analysis JSON without writing anything. Useful for the entry-view re-run button or for previewing what `store_entry` would auto-tag. Server must be configured with RAG_ANALYSIS_ENABLED + model."
+    )]
     async fn analyze_entry(
         &self,
         Parameters(params): Parameters<crate::api::AnalyzeEntryParams>,
@@ -567,7 +572,14 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             let item = store.get_item(&target_id)?;
             let analysis = store.get_item_analysis(&target_id).ok().flatten();
             let neighborhood = store.graph_neighborhood(&target_id, 1, 10, None).ok();
-            Ok::<(Option<ItemRecord>, Option<crate::db::ItemAnalysisRecord>, Option<GraphNeighborhood>), anyhow::Error>((item, analysis, neighborhood))
+            Ok::<
+                (
+                    Option<ItemRecord>,
+                    Option<crate::db::ItemAnalysisRecord>,
+                    Option<GraphNeighborhood>,
+                ),
+                anyhow::Error,
+            >((item, analysis, neighborhood))
         })
         .await
         .map_err(|error| error.to_string())?
@@ -604,12 +616,14 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                         match e.edge_type {
                             GraphEdgeType::Manual => {
                                 let status = e.metadata.get("status").and_then(|v| v.as_str());
-                                let confidence = e.metadata
+                                let confidence = e
+                                    .metadata
                                     .get("confidence")
                                     .and_then(|v| v.as_f64())
                                     .unwrap_or(1.0);
                                 // Include confirmed edges or manual overrides with decent confidence
-                                status == Some("confirmed") || (status.is_none() && confidence >= 0.7)
+                                status == Some("confirmed")
+                                    || (status.is_none() && confidence >= 0.7)
                             }
                             GraphEdgeType::Similarity => {
                                 // "really close" threshold (approx distance < 0.25)
@@ -658,7 +672,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         Ok(result)
     }
 
-    #[tool(description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id.")]
+    #[tool(
+        description = "List all `source_id` categories and their item counts. Reserved/canonical buckets and the `project:<slug>:*` pattern are documented in `list_memory_conventions` — call that first if you are about to invent a new source_id."
+    )]
     async fn list_categories(&self) -> Result<String, String> {
         let store = self.state.store.clone();
         let categories = tokio::task::spawn_blocking(move || store.list_categories())
@@ -668,7 +684,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         Ok(format_categories_markdown(&categories))
     }
 
-    #[tool(description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing.")]
+    #[tool(
+        description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing."
+    )]
     async fn list_items(
         &self,
         Parameters(query): Parameters<ListItemsQuery>,
@@ -703,7 +721,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         Ok(result)
     }
 
-    #[tool(description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched.")]
+    #[tool(
+        description = "Update an existing item by id. Pass `path` to set or clear the wiki path; omit to leave it untouched."
+    )]
     async fn update_item(
         &self,
         Parameters(params): Parameters<UpdateItemParams>,
@@ -743,7 +763,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             .map_err(stringify_api_error)?;
         let store = self.state.store.clone();
 
-        tokio::task::spawn_blocking(move || -> anyhow::Result<ItemRecord> {
+        let record = tokio::task::spawn_blocking(move || -> anyhow::Result<ItemRecord> {
             let existing = store
                 .get_item(&id)?
                 .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
@@ -769,8 +789,11 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         })
         .await
         .map_err(|error| error.to_string())?
-        .map(|record| Json(record.into()))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        crate::api::invalidate_cms_nodes(&self.state, [record.id.clone()])
+            .await
+            .map_err(stringify_api_error)?;
+        Ok(Json(record.into()))
     }
 
     #[tool(description = "Delete an item by id.")]
@@ -778,6 +801,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         &self,
         Parameters(IdParams { id }): Parameters<IdParams>,
     ) -> Result<Json<DeleteResponse>, String> {
+        crate::api::invalidate_cms_nodes(&self.state, [id.clone()])
+            .await
+            .map_err(stringify_api_error)?;
         let store = self.state.store.clone();
         let target_id = id.clone();
         let deleted = tokio::task::spawn_blocking(move || store.delete_item(&target_id))
@@ -973,7 +999,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         ))
     }
 
-    #[tool(description = "List all known channels with message counts and last activity timestamp.")]
+    #[tool(
+        description = "List all known channels with message counts and last activity timestamp."
+    )]
     async fn list_channels(&self) -> Result<String, String> {
         let messages = self.state.messages.clone();
         let channels = tokio::task::spawn_blocking(move || messages.list_channels())
@@ -1141,7 +1169,11 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     ) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            store.list_graph_edges(query.item_id.as_deref(), query.edge_type, query.status.as_deref())
+            store.list_graph_edges(
+                query.item_id.as_deref(),
+                query.edge_type,
+                query.status.as_deref(),
+            )
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1203,6 +1235,7 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             from_item_id: request.from_item_id,
             to_item_id: request.to_item_id,
             relation: request.relation.map(Cow::Owned),
+            sort_order: request.sort_order,
             weight: request.weight.unwrap_or(1.0),
             directed: request.directed.unwrap_or(false),
             metadata: request.metadata,
@@ -1211,6 +1244,12 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
+        crate::api::invalidate_cms_nodes(
+            &self.state,
+            [edge.from_item_id.clone(), edge.to_item_id.clone()],
+        )
+        .await
+        .map_err(stringify_api_error)?;
         Ok(Json(edge.into()))
     }
 
@@ -1220,6 +1259,14 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Parameters(IdParams { id }): Parameters<IdParams>,
     ) -> Result<Json<DeleteResponse>, String> {
         let store = self.state.store.clone();
+        let edge_before_delete = tokio::task::spawn_blocking({
+            let store = store.clone();
+            let id = id.clone();
+            move || store.get_graph_edge(&id)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
         let target_id = id.clone();
         let deleted = tokio::task::spawn_blocking(move || store.delete_graph_edge(&target_id))
             .await
@@ -1228,10 +1275,17 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         if !deleted {
             return Err(format!("graph edge {id} not found"));
         }
+        if let Some(edge) = edge_before_delete {
+            crate::api::invalidate_cms_nodes(&self.state, [edge.from_item_id, edge.to_item_id])
+                .await
+                .map_err(stringify_api_error)?;
+        }
         Ok(Json(DeleteResponse { id, deleted }))
     }
 
-    #[tool(description = "Update the metadata of an existing graph edge (e.g., to confirm a suggested edge by setting metadata.status = 'confirmed').")]
+    #[tool(
+        description = "Update the metadata of an existing graph edge (e.g., to confirm a suggested edge by setting metadata.status = 'confirmed')."
+    )]
     async fn update_graph_edge(
         &self,
         Parameters(params): Parameters<UpdateGraphEdgeParams>,
@@ -1240,14 +1294,25 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let id = params.id.clone();
         let relation = params.relation;
         let metadata = params.metadata;
-        let edge = tokio::task::spawn_blocking(move || store.update_graph_edge(&id, relation, metadata))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+        let sort_order = params.sort_order;
+        let edge = tokio::task::spawn_blocking(move || {
+            store.update_graph_edge(&id, relation, metadata, sort_order)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        crate::api::invalidate_cms_nodes(
+            &self.state,
+            [edge.from_item_id.clone(), edge.to_item_id.clone()],
+        )
+        .await
+        .map_err(stringify_api_error)?;
         Ok(Json(edge.into()))
     }
 
-    #[tool(description = "List graph edges awaiting review. Returns edges where status is 'suggested'.")]
+    #[tool(
+        description = "List graph edges awaiting review. Returns edges where status is 'suggested'."
+    )]
     async fn list_ontology_reviews(&self) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
@@ -1261,7 +1326,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "Accept a suggested graph edge. Optionally update its relation (predicate).")]
+    #[tool(
+        description = "Accept a suggested graph edge. Optionally update its relation (predicate)."
+    )]
     async fn accept_ontology_review(
         &self,
         Parameters(params): Parameters<AcceptOntologyReviewParams>,
@@ -1269,20 +1336,24 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let store = self.state.store.clone();
         let id = params.id.clone();
         let relation = params.relation;
-        
+
         let edge = tokio::task::spawn_blocking(move || {
-            let record = store.get_graph_edge(&id)?
+            let record = store
+                .get_graph_edge(&id)?
                 .ok_or_else(|| anyhow::anyhow!("edge {} not found", id))?;
-            
+
             let mut metadata = record.metadata.as_object().cloned().unwrap_or_default();
-            metadata.insert("status".to_string(), serde_json::Value::String("confirmed".to_string()));
-            
-            store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata))
+            metadata.insert(
+                "status".to_string(),
+                serde_json::Value::String("confirmed".to_string()),
+            );
+
+            store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata), None)
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        
+
         Ok(Json(edge.into()))
     }
 
@@ -1300,7 +1371,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(DeleteResponse { id, deleted }))
     }
 
-    #[tool(description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL.")]
+    #[tool(
+        description = "Attach a remote file (HTTP/HTTPS) to an existing entry. Server fetches the URL with SSRF guards (private-IP block, size + time caps, redirect re-check). Returns the new attachment id and a /assets/* URL."
+    )]
     async fn attach_url(
         &self,
         Parameters(request): Parameters<crate::api::attachments::AttachUrlRequest>,
@@ -1318,17 +1391,18 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
     ) -> Result<Json<crate::api::attachments::AttachmentsResponse>, String> {
         let store = self.state.store.clone();
         let target = id.clone();
-        let records =
-            tokio::task::spawn_blocking(move || store.list_attachments_for_item(&target))
-                .await
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
+        let records = tokio::task::spawn_blocking(move || store.list_attachments_for_item(&target))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
         Ok(Json(crate::api::attachments::AttachmentsResponse {
             attachments: records.into_iter().map(Into::into).collect(),
         }))
     }
 
-    #[tool(description = "Delete an attachment by id. Removes both the database row and the on-disk file.")]
+    #[tool(
+        description = "Delete an attachment by id. Removes both the database row and the on-disk file."
+    )]
     async fn delete_attachment(
         &self,
         Parameters(IdParams { id }): Parameters<IdParams>,
@@ -1339,7 +1413,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(DeleteResponse { id, deleted: true }))
     }
 
-    #[tool(description = "Browse entries hierarchically by wiki path. Returns direct child path segments under `prefix` (or top-level when omitted) plus any leaf entries whose path equals `prefix`. Always scoped by `source_id`.")]
+    #[tool(
+        description = "Browse entries hierarchically by wiki path. Returns direct child path segments under `prefix` (or top-level when omitted) plus any leaf entries whose path equals `prefix`. Always scoped by `source_id`."
+    )]
     async fn list_entry_tree(
         &self,
         Parameters(query): Parameters<crate::api::attachments::EntriesTreeQuery>,
@@ -1352,7 +1428,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
 
     // --- ACP delegation surface ---
 
-    #[tool(description = "List discovered ACP daemon instances (mDNS + HTTP-registered) and the currently selected one. Use the returned `name` with `acp_select_instance` to switch the WS target.")]
+    #[tool(
+        description = "List discovered ACP daemon instances (mDNS + HTTP-registered) and the currently selected one. Use the returned `name` with `acp_select_instance` to switch the WS target."
+    )]
     async fn acp_list_instances(&self) -> Result<Json<AcpInstancesResponse>, String> {
         let disc = self
             .state
@@ -1364,7 +1442,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(AcpInstancesResponse { instances, active }))
     }
 
-    #[tool(description = "Select an ACP daemon instance by name. The WS client reconnects to the new target. Returns the resolved instance.")]
+    #[tool(
+        description = "Select an ACP daemon instance by name. The WS client reconnects to the new target. Returns the resolved instance."
+    )]
     async fn acp_select_instance(
         &self,
         Parameters(AcpSelectInstanceParams { name }): Parameters<AcpSelectInstanceParams>,
@@ -1380,7 +1460,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .ok_or_else(|| format!("unknown acp instance: {name}"))
     }
 
-    #[tool(description = "Ask the target ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`. Pass `instance` to disambiguate when multiple are registered.")]
+    #[tool(
+        description = "Ask the target ACP daemon to emit a fresh ListSessions response over WS. Inspect with `acp_recent_events { kinds: [\"ListSessions\"] }`. Pass `instance` to disambiguate when multiple are registered."
+    )]
     async fn acp_list_sessions(
         &self,
         Parameters(params): Parameters<AcpInstanceParams>,
@@ -1388,17 +1470,26 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let h = require_acp(&self.state, params.instance.as_deref()).await?;
         h.command("list_sessions", serde_json::json!({}))
             .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "list_sessions".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "list_sessions".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Spawn a headless ACP session on the target daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt. Pass `instance` when multiple are registered.")]
+    #[tool(
+        description = "Spawn a headless ACP session on the target daemon. Returns immediately; the new session id arrives as a `SessionStarted` event. Use `acp_delegate_task` for one-shot spawn-and-prompt. Pass `instance` when multiple are registered."
+    )]
     async fn acp_spawn_session(
         &self,
         Parameters(params): Parameters<AcpSpawnParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let mut payload = serde_json::Map::new();
-        payload.insert("project_path".into(), serde_json::Value::String(params.project_path));
+        payload.insert(
+            "project_path".into(),
+            serde_json::Value::String(params.project_path),
+        );
         if let Some(cmd) = params.agent_command {
             payload.insert("agent_command".into(), serde_json::Value::String(cmd));
         }
@@ -1407,17 +1498,26 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }
         h.command("spawn_session", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "spawn_session".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "spawn_session".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`. Pass `instance` when multiple are registered.")]
+    #[tool(
+        description = "Send a prompt to an existing ACP session. Reply text streams back as `AssistantMessage` / `ToolCall` events; poll with `acp_recent_events { session_id }`. Pass `instance` when multiple are registered."
+    )]
     async fn acp_send_prompt(
         &self,
         Parameters(params): Parameters<AcpSendPromptParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state, params.instance.as_deref()).await?;
         let mut payload = serde_json::Map::new();
-        payload.insert("session_id".into(), serde_json::Value::String(params.session_id));
+        payload.insert(
+            "session_id".into(),
+            serde_json::Value::String(params.session_id),
+        );
         payload.insert("text".into(), serde_json::Value::String(params.text));
         if let Some(att) = params.attachments {
             payload.insert(
@@ -1427,7 +1527,11 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }
         h.command("send_prompt", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "send_prompt".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "send_prompt".into(),
+            context: None,
+        }))
     }
 
     #[tool(description = "Cancel the currently running prompt on an ACP session.")]
@@ -1436,12 +1540,21 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Parameters(params): Parameters<AcpSessionIdParams>,
     ) -> Result<Json<AcpCommandAck>, String> {
         let h = require_acp(&self.state, params.instance.as_deref()).await?;
-        h.command("cancel", serde_json::json!({ "session_id": params.session_id }))
-            .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "cancel".into(), context: None }))
+        h.command(
+            "cancel",
+            serde_json::json!({ "session_id": params.session_id }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "cancel".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback.")]
+    #[tool(
+        description = "Gracefully terminate an ACP session. Provide session_id (preferred) or thread_id fallback."
+    )]
     async fn acp_end_session(
         &self,
         Parameters(params): Parameters<AcpEndSessionParams>,
@@ -1459,7 +1572,11 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }
         h.command("end_session", serde_json::Value::Object(payload))
             .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "end_session".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "end_session".into(),
+            context: None,
+        }))
     }
 
     #[tool(description = "Update the session/topic name.")]
@@ -1473,10 +1590,16 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             serde_json::json!({ "session_id": params.session_id, "name": params.name }),
         )
         .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "rename_session".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "rename_session".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Removes a topic (and its session history) from the daemon's memory and disk.")]
+    #[tool(
+        description = "Removes a topic (and its session history) from the daemon's memory and disk."
+    )]
     async fn acp_remove_topic(
         &self,
         Parameters(params): Parameters<AcpRemoveTopicParams>,
@@ -1487,10 +1610,16 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             serde_json::json!({ "thread_id": params.thread_id }),
         )
         .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "remove_topic".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "remove_topic".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\").")]
+    #[tool(
+        description = "Switch a session between auto and manual tool-call approval (`mode`: \"auto\" | \"manual\")."
+    )]
     async fn acp_set_permission_mode(
         &self,
         Parameters(params): Parameters<AcpSetPermissionModeParams>,
@@ -1501,10 +1630,16 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             serde_json::json!({ "session_id": params.session_id, "mode": params.mode }),
         )
         .map_err(|e| e.to_string())?;
-        Ok(Json(AcpCommandAck { ok: true, sent: "set_permission_mode".into(), context: None }))
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "set_permission_mode".into(),
+            context: None,
+        }))
     }
 
-    #[tool(description = "Reply to an outstanding PermissionRequest. `decision` ∈ allow_once | allow_always | deny | deny_always.")]
+    #[tool(
+        description = "Reply to an outstanding PermissionRequest. `decision` ∈ allow_once | allow_always | deny | deny_always."
+    )]
     async fn acp_permission_respond(
         &self,
         Parameters(params): Parameters<AcpPermissionRespondParams>,
@@ -1523,7 +1658,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Buffers up to ~200 events per session.")]
+    #[tool(
+        description = "Read recent ACP WS events from the in-process ring buffer. Filter by session_id, since_local_seq, or kinds. Buffers up to ~200 events per session."
+    )]
     async fn acp_recent_events(
         &self,
         Parameters(params): Parameters<AcpRecentEventsParams>,
@@ -1551,7 +1688,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "Return the most recent Snapshot event (full session state) the WS client has seen, or null if none yet.")]
+    #[tool(
+        description = "Return the most recent Snapshot event (full session state) the WS client has seen, or null if none yet."
+    )]
     async fn acp_get_snapshot(
         &self,
         Parameters(params): Parameters<AcpInstanceParams>,
@@ -1562,7 +1701,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "One-shot delegation: spawn a headless ACP session in `project_path`, wait for SessionStarted (default 15s), bind a fresh Telegram forum topic named `name`, then send `text` as a prompt. `name` becomes metadata.title/metadata.name on spawn so the daemon can label the auto-created topic. Returns the new session_id, or `ok=false` with a hint if SessionStarted didn't arrive in time.")]
+    #[tool(
+        description = "One-shot delegation: spawn a headless ACP session in `project_path`, wait for SessionStarted (default 15s), bind a fresh Telegram forum topic named `name`, then send `text` as a prompt. `name` becomes metadata.title/metadata.name on spawn so the daemon can label the auto-created topic. Returns the new session_id, or `ok=false` with a hint if SessionStarted didn't arrive in time."
+    )]
     async fn acp_delegate_task(
         &self,
         Parameters(params): Parameters<AcpDelegateTaskParams>,
@@ -1598,8 +1739,8 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let wait = Duration::from_secs(params.wait_secs.unwrap_or(15).clamp(1, 120));
         let deadline = tokio::time::Instant::now() + wait;
 
-        let session_id = wait_for_event(&mut rx, deadline, |frame| parse_session_started(frame))
-            .await;
+        let session_id =
+            wait_for_event(&mut rx, deadline, |frame| parse_session_started(frame)).await;
 
         let Some(sid) = session_id else {
             return Ok(Json(AcpDelegateTaskResponse {
@@ -1657,7 +1798,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "List every registered typed-entry schema. Each row carries the type_name, the JSON Schema, optional title/description, and item_count (how many entries are currently typed). Use to discover what mini-app types are available before calling store_entry with a `type`.")]
+    #[tool(
+        description = "List every registered typed-entry schema. Each row carries the type_name, the JSON Schema, optional title/description, and item_count (how many entries are currently typed). Use to discover what mini-app types are available before calling store_entry with a `type`."
+    )]
     async fn list_schemas(&self) -> Result<Json<crate::api::schemas::SchemaListResponse>, String> {
         let store = self.state.store.clone();
         let pairs = tokio::task::spawn_blocking(
@@ -1683,7 +1826,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok(Json(crate::api::schemas::SchemaListResponse { schemas }))
     }
 
-    #[tool(description = "Fetch one typed-entry schema by `type_name`. Returns the JSON Schema plus metadata. Returns an error when the type is not registered.")]
+    #[tool(
+        description = "Fetch one typed-entry schema by `type_name`. Returns the JSON Schema plus metadata. Returns an error when the type is not registered."
+    )]
     async fn get_schema(
         &self,
         Parameters(params): Parameters<SchemaTypeParams>,
@@ -1709,13 +1854,14 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         )))
     }
 
-    #[tool(description = "Register or update a typed-entry schema. Supply `type_name`, the `json_schema` (Draft 2020-12 / Draft-07 compatible), and optional `title` / `description`. The schema itself is validated as a JSON Schema before storage. The compiled validator cache for that type is invalidated; subsequent store_entry / update_item calls revalidate against the new schema.")]
+    #[tool(
+        description = "Register or update a typed-entry schema. Supply `type_name`, the `json_schema` (Draft 2020-12 / Draft-07 compatible), and optional `title` / `description`. The schema itself is validated as a JSON Schema before storage. The compiled validator cache for that type is invalidated; subsequent store_entry / update_item calls revalidate against the new schema."
+    )]
     async fn upsert_schema(
         &self,
         Parameters(params): Parameters<UpsertSchemaParams>,
     ) -> Result<Json<crate::api::schemas::SchemaPayload>, String> {
-        crate::validation::validate_meta_schema(&params.json_schema)
-            .map_err(|e| e.to_string())?;
+        crate::validation::validate_meta_schema(&params.json_schema).map_err(|e| e.to_string())?;
         let record = crate::db::SchemaRecord {
             type_name: params.type_name.clone(),
             json_schema: params.json_schema,
@@ -1741,7 +1887,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         )))
     }
 
-    #[tool(description = "Delete a typed-entry schema. Refuses (returns an error) when items still reference the type, unless `force=true` — in which case those items have their `type` and `data` cleared. Returns deleted=true and items_unset count.")]
+    #[tool(
+        description = "Delete a typed-entry schema. Refuses (returns an error) when items still reference the type, unless `force=true` — in which case those items have their `type` and `data` cleared. Returns deleted=true and items_unset count."
+    )]
     async fn delete_schema(
         &self,
         Parameters(params): Parameters<DeleteSchemaParams>,
@@ -1764,7 +1912,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         }))
     }
 
-    #[tool(description = "Manually trigger a dreaming round to consolidate 'memory' entries. Moves durable facts to 'knowledge', merges duplicates, and prunes transient notes. Returns accepted status immediately; work continues in background.")]
+    #[tool(
+        description = "Manually trigger a dreaming round to consolidate 'memory' entries. Moves durable facts to 'knowledge', merges duplicates, and prunes transient notes. Returns accepted status immediately; work continues in background."
+    )]
     async fn dream(&self) -> Result<String, String> {
         if !self.state.analysis.is_configured() {
             return Err("dreaming requires analysis (LLM) to be configured".to_owned());
@@ -1778,7 +1928,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         Ok("Dreaming round started in background.".to_owned())
     }
 
-    #[tool(description = "Search the caller's Google Drive. Requires the user to have connected Google via /settings/integrations. Matches against file names and full-text contents (Drive's `fullText contains` operator). Returns up to `page_size` files (1-100, default 20), most-recently-modified first. Pass `mime_type` to constrain results — e.g. `application/vnd.google-apps.document` for Docs only.")]
+    #[tool(
+        description = "Search the caller's Google Drive. Requires the user to have connected Google via /settings/integrations. Matches against file names and full-text contents (Drive's `fullText contains` operator). Returns up to `page_size` files (1-100, default 20), most-recently-modified first. Pass `mime_type` to constrain results — e.g. `application/vnd.google-apps.document` for Docs only."
+    )]
     async fn drive_search(
         &self,
         Parameters(params): Parameters<DriveSearchParams>,
@@ -1799,7 +1951,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch a single Google Drive file by id. Google Docs are exported as Markdown, Sheets as TSV, Slides as plain text; other text-y MIME types are downloaded as-is. Binary types are rejected. Bodies are truncated to ~200KB; the response sets `truncated: true` when that limit is hit. Pair with `drive_search` to discover file ids.")]
+    #[tool(
+        description = "Fetch a single Google Drive file by id. Google Docs are exported as Markdown, Sheets as TSV, Slides as plain text; other text-y MIME types are downloaded as-is. Binary types are rejected. Bodies are truncated to ~200KB; the response sets `truncated: true` when that limit is hit. Pair with `drive_search` to discover file ids."
+    )]
     async fn drive_fetch(
         &self,
         Parameters(params): Parameters<DriveFetchParams>,
@@ -1815,7 +1969,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Search the caller's Gmail using the standard query operators (https://support.google.com/mail/answer/7190) — e.g. `from:alice@example.com newer_than:30d`, `subject:invoice has:attachment`, `label:starred`. Returns up to `page_size` (1-100, default 20) message summaries with pre-extracted From/To/Subject/Date headers + a snippet. Use `gmail_get_thread` with the `thread_id` from a result to read the full conversation.")]
+    #[tool(
+        description = "Search the caller's Gmail using the standard query operators (https://support.google.com/mail/answer/7190) — e.g. `from:alice@example.com newer_than:30d`, `subject:invoice has:attachment`, `label:starred`. Returns up to `page_size` (1-100, default 20) message summaries with pre-extracted From/To/Subject/Date headers + a snippet. Use `gmail_get_thread` with the `thread_id` from a result to read the full conversation."
+    )]
     async fn gmail_search(
         &self,
         Parameters(params): Parameters<GmailSearchParams>,
@@ -1836,7 +1992,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch every message in a Gmail thread by thread_id. Bodies are decoded from base64url; text/plain is preferred, text/html falls back to markdown via html2md, each body capped at ~100KB. The `body_source` field tells you which path was taken. Use `gmail_search` first to find thread_ids.")]
+    #[tool(
+        description = "Fetch every message in a Gmail thread by thread_id. Bodies are decoded from base64url; text/plain is preferred, text/html falls back to markdown via html2md, each body capped at ~100KB. The `body_source` field tells you which path was taken. Use `gmail_search` first to find thread_ids."
+    )]
     async fn gmail_get_thread(
         &self,
         Parameters(params): Parameters<GmailGetThreadParams>,
@@ -1852,7 +2010,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Send a Web Push notification to a user's registered devices. Defaults to the caller's subject if `subject` is omitted — that's the right shape for self-reminders. Pass `subject` explicitly to notify a different user (the call still needs the appropriate auth). Use `tag` to deduplicate noisy notifications (re-using a tag replaces the earlier one); `url` is the deep-link the SW opens on click. Returns per-subscription delivery stats, including how many dead subscriptions were pruned. Requires the user to have subscribed via /settings/integrations.")]
+    #[tool(
+        description = "Send a Web Push notification to a user's registered devices. Defaults to the caller's subject if `subject` is omitted — that's the right shape for self-reminders. Pass `subject` explicitly to notify a different user (the call still needs the appropriate auth). Use `tag` to deduplicate noisy notifications (re-using a tag replaces the earlier one); `url` is the deep-link the SW opens on click. Returns per-subscription delivery stats, including how many dead subscriptions were pruned. Requires the user to have subscribed via /settings/integrations."
+    )]
     async fn notify_user(
         &self,
         Parameters(params): Parameters<NotifyUserParams>,
@@ -1947,14 +2107,9 @@ content_hash matches the DB unless `force` is true. Returns ingest stats."
             force: params.force.unwrap_or(false),
             ..Default::default()
         };
-        let report = crate::code::ingest::ingest_repo(
-            &repo,
-            store.clone(),
-            embedder.clone(),
-            opts,
-        )
-        .await
-        .map_err(|e| format!("ingest failed: {e:#}"))?;
+        let report = crate::code::ingest::ingest_repo(&repo, store.clone(), embedder.clone(), opts)
+            .await
+            .map_err(|e| format!("ingest failed: {e:#}"))?;
         Ok(Json(CodeIngestResponse::from_report(&repo.name, report)))
     }
 
@@ -1968,7 +2123,10 @@ content_hash matches the DB unless `force` is true. Returns ingest stats."
         let repos = store.list_repos(false).await.map_err(|e| e.to_string())?;
         let mut out = Vec::with_capacity(repos.len());
         for r in repos {
-            let files = store.list_file_paths(&r.id).await.map_err(|e| e.to_string())?;
+            let files = store
+                .list_file_paths(&r.id)
+                .await
+                .map_err(|e| e.to_string())?;
             out.push(CodeRepoSummary {
                 name: r.name,
                 root_path: r.root_path,
@@ -1997,8 +2155,13 @@ Does not touch the filesystem."
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("repo not found: {}", params.name))?;
-        store.delete_repo(&repo.id).await.map_err(|e| e.to_string())?;
-        Ok(Json(CodeRemoveResponse { deleted: params.name }))
+        store
+            .delete_repo(&repo.id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(CodeRemoveResponse {
+            deleted: params.name,
+        }))
     }
 
     #[tool(
@@ -2088,9 +2251,10 @@ can browse without fetching every point."
         // whole cluster landscape.
         let summary = build_map_summary(&all);
 
-        let center = params.center_id.as_ref().and_then(|cid| {
-            all.iter().find(|p| &p.id == cid).map(|p| (p.x, p.y, p.z))
-        });
+        let center = params
+            .center_id
+            .as_ref()
+            .and_then(|cid| all.iter().find(|p| &p.id == cid).map(|p| (p.x, p.y, p.z)));
         if params.center_id.is_some() && center.is_none() {
             return Err(format!(
                 "center_id not found in map: {}",
@@ -2102,7 +2266,9 @@ can browse without fetching every point."
             params.ids.map(|v| v.into_iter().collect());
 
         let want_distance = center.is_some()
-            && (params.include_distance.unwrap_or(false) || params.radius.is_some() || params.center_id.is_some());
+            && (params.include_distance.unwrap_or(false)
+                || params.radius.is_some()
+                || params.center_id.is_some());
 
         let mut points: Vec<crate::projection::MapPoint> = all
             .into_iter()
@@ -2235,15 +2401,13 @@ is always excluded."
         }))
     }
 
-    #[tool(
-        description = "Move an item to a different cluster. Two ways: \
+    #[tool(description = "Move an item to a different cluster. Two ways: \
 (a) `anchor_id` — pin to the cluster of another item; survives rebuilds even \
 when numeric cluster ids shuffle (RECOMMENDED). \
 (b) `cluster` — numeric id; legacy, breaks if the algorithm renumbers \
 clusters. Pass `clear: true` to drop the override and revert to the \
 algorithm-assigned cluster on next rebuild. The change is reflected \
-immediately in `map_get`."
-    )]
+immediately in `map_get`.")]
     async fn map_reassign(
         &self,
         Parameters(params): Parameters<MapReassignParams>,
@@ -2356,18 +2520,21 @@ rebuild is running is a no-op."
 
 fn code_subsystem(
     state: &AppState,
-) -> Result<(Arc<crate::db::code_store::CodeStore>, Arc<crate::api::EmbedderHandle>), String> {
+) -> Result<
+    (
+        Arc<crate::db::code_store::CodeStore>,
+        Arc<crate::api::EmbedderHandle>,
+    ),
+    String,
+> {
     let store = state
         .code_store
         .clone()
         .ok_or_else(|| "code store not configured (requires Postgres)".to_string())?;
-    let embedder = state
-        .code_embedder
-        .clone()
-        .ok_or_else(|| {
-            "code embedder not configured (set RAG_CODE_EMBEDDER_PATH and RAG_CODE_TOKENIZER_PATH)"
-                .to_string()
-        })?;
+    let embedder = state.code_embedder.clone().ok_or_else(|| {
+        "code embedder not configured (set RAG_CODE_EMBEDDER_PATH and RAG_CODE_TOKENIZER_PATH)"
+            .to_string()
+    })?;
     Ok((store, embedder))
 }
 
@@ -2729,6 +2896,8 @@ pub struct UpdateGraphEdgeParams {
     pub id: String,
     #[serde(default)]
     pub relation: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<String>,
     #[schemars(schema_with = "metadata_schema")]
     pub metadata: serde_json::Value,
 }
@@ -2755,7 +2924,10 @@ async fn require_acp(
     if n == 0 {
         Err("no ACP instances registered; start a daemon or POST /api/acp/register".to_string())
     } else if instance.is_some() {
-        Err(format!("unknown ACP instance '{}'", instance.unwrap_or("?")))
+        Err(format!(
+            "unknown ACP instance '{}'",
+            instance.unwrap_or("?")
+        ))
     } else {
         Err(format!(
             "multiple ACP instances registered ({n}); specify `instance` (see /api/acp/instances)"
@@ -2833,7 +3005,9 @@ where
 
 /// Pull `(kind, payload_object)` out of a daemon frame. Tolerates both
 /// `{ "Variant": {...} }` and `{ "type"|"kind": "variant", ... }` shapes.
-fn extract_kind_payload(text: &str) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
+fn extract_kind_payload(
+    text: &str,
+) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let map = value.as_object()?;
     if map.len() == 1 {
@@ -2962,14 +3136,23 @@ fn write_result_entry(
         Some(r) => format!(" — relation: {r}"),
         None => String::new(),
     };
-    let path_str = hit.path.as_deref().map(|p| format!(" (path: {p})")).unwrap_or_default();
+    let path_str = hit
+        .path
+        .as_deref()
+        .map(|p| format!(" (path: {p})"))
+        .unwrap_or_default();
     let _ = writeln!(
         out,
         "\n### {index}. `{id}` — {relevance}% [{source}]{path_str}{suffix}",
         id = hit.id,
         source = hit.source_id,
     );
-    let _ = writeln!(out, "> Created: {} | Updated: {}", format_ms(hit.created_at), format_ms(hit.updated_at));
+    let _ = writeln!(
+        out,
+        "> Created: {} | Updated: {}",
+        format_ms(hit.created_at),
+        format_ms(hit.updated_at)
+    );
     let _ = writeln!(out, "\n{}", hit.text.trim());
 }
 
@@ -2991,8 +3174,10 @@ fn format_item_markdown(item: &AdminItemPayload) -> String {
     }
     let _ = writeln!(out, "- **Created**: {}", format_ms(item.created_at));
     let _ = writeln!(out, "- **Updated**: {}", format_ms(item.updated_at));
-    
-    let tags: Vec<&str> = item.metadata.get("tags")
+
+    let tags: Vec<&str> = item
+        .metadata
+        .get("tags")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
@@ -3002,7 +3187,11 @@ fn format_item_markdown(item: &AdminItemPayload) -> String {
 
     if let Some(data) = &item.data {
         let _ = writeln!(out, "\n## Data (JSON)");
-        let _ = writeln!(out, "```json\n{}\n```", serde_json::to_string_pretty(data).unwrap_or_default());
+        let _ = writeln!(
+            out,
+            "```json\n{}\n```",
+            serde_json::to_string_pretty(data).unwrap_or_default()
+        );
     }
 
     let _ = writeln!(out, "\n## Content\n\n{}", item.text.trim());
@@ -3010,19 +3199,34 @@ fn format_item_markdown(item: &AdminItemPayload) -> String {
     if let Some(analysis) = &item.analysis {
         let _ = writeln!(out, "\n## Intelligence Analysis");
         if let Some(model) = &item.analysis_model {
-             let _ = writeln!(out, "> Analyzed by `{}`", model);
+            let _ = writeln!(out, "> Analyzed by `{}`", model);
         }
-        let _ = writeln!(out, "\n```json\n{}\n```", serde_json::to_string_pretty(analysis).unwrap_or_default());
+        let _ = writeln!(
+            out,
+            "\n```json\n{}\n```",
+            serde_json::to_string_pretty(analysis).unwrap_or_default()
+        );
     }
 
     out
 }
 
-fn format_item_list_markdown(items: &[ItemRecord], total: i64, _limit: usize, offset: usize) -> String {
+fn format_item_list_markdown(
+    items: &[ItemRecord],
+    total: i64,
+    _limit: usize,
+    offset: usize,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Browse Entries (Total: {})", total);
-    let _ = writeln!(out, "> Showing results {}-{} of {}", offset + 1, offset + items.len(), total);
-    
+    let _ = writeln!(
+        out,
+        "> Showing results {}-{} of {}",
+        offset + 1,
+        offset + items.len(),
+        total
+    );
+
     if items.is_empty() {
         let _ = writeln!(out, "\nNo entries found.");
         return out;
@@ -3030,24 +3234,35 @@ fn format_item_list_markdown(items: &[ItemRecord], total: i64, _limit: usize, of
 
     let _ = writeln!(out, "\n| ID | Path | Type | Updated |");
     let _ = writeln!(out, "|----|------|------|---------|");
-    
+
     for item in items {
         let path = item.path.as_deref().unwrap_or("-");
         let type_name = item.type_name.as_deref().unwrap_or("-");
         let updated = format_ms(item.updated_at);
-        let _ = writeln!(out, "| `{}` | `{}` | `{}` | {} |", item.id, path, type_name, updated);
+        let _ = writeln!(
+            out,
+            "| `{}` | `{}` | `{}` | {} |",
+            item.id, path, type_name, updated
+        );
     }
 
-    let _ = writeln!(out, "\n*Use `get_entry(id)` to see full content and metadata for a specific item.*");
-    
+    let _ = writeln!(
+        out,
+        "\n*Use `get_entry(id)` to see full content and metadata for a specific item.*"
+    );
+
     out
 }
 
-fn format_messages_markdown(messages: &[MessagePayload], total: i64, channel: Option<&str>) -> String {
+fn format_messages_markdown(
+    messages: &[MessagePayload],
+    total: i64,
+    channel: Option<&str>,
+) -> String {
     let mut out = String::new();
     let chan_suffix = channel.map(|c| format!(" in `{}`", c)).unwrap_or_default();
     let _ = writeln!(out, "# Messages{} (Total: {})", chan_suffix, total);
-    
+
     if messages.is_empty() {
         let _ = writeln!(out, "\nNo messages found.");
         return out;
@@ -3059,14 +3274,14 @@ fn format_messages_markdown(messages: &[MessagePayload], total: i64, channel: Op
         let _ = writeln!(out, "**{}** [{:?}] ({})", m.sender, m.sender_kind, ts);
         let _ = writeln!(out, "\n{}", m.text.trim());
     }
-    
+
     out
 }
 
 fn format_channels_markdown(channels: &[crate::db::ChannelSummary]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Channels");
-    
+
     if channels.is_empty() {
         let _ = writeln!(out, "\nNo channels found.");
         return out;
@@ -3074,19 +3289,19 @@ fn format_channels_markdown(channels: &[crate::db::ChannelSummary]) -> String {
 
     let _ = writeln!(out, "\n| Channel | Messages | Last Activity |");
     let _ = writeln!(out, "|---------|----------|---------------|");
-    
+
     for c in channels {
         let last = format_ms(c.last_message_at);
         let _ = writeln!(out, "| `{}` | {} | {} |", c.channel, c.message_count, last);
     }
-    
+
     out
 }
 
 fn format_categories_markdown(categories: &[crate::db::CategorySummary]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Categories (Sources)");
-    
+
     if categories.is_empty() {
         let _ = writeln!(out, "\nNo categories found.");
         return out;
@@ -3094,11 +3309,11 @@ fn format_categories_markdown(categories: &[crate::db::CategorySummary]) -> Stri
 
     let _ = writeln!(out, "\n| Source ID | Item Count |");
     let _ = writeln!(out, "|-----------|------------|");
-    
+
     for c in categories {
         let _ = writeln!(out, "| `{}` | {} |", c.source_id, c.item_count);
     }
-    
+
     out
 }
 
@@ -3137,7 +3352,9 @@ mod tests {
             .unwrap_or_default();
 
         assert!(
-            !required.iter().any(|value| value.as_str() == Some("context")),
+            !required
+                .iter()
+                .any(|value| value.as_str() == Some("context")),
             "context should stay optional in the generated schema: {schema}"
         );
     }

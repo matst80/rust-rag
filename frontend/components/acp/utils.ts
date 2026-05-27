@@ -35,15 +35,7 @@ export function extractText(content: unknown): string {
 	if (!content) return ""
 	if (typeof content === "string") return content
 	if (Array.isArray(content)) {
-		return content
-			.map((c) => {
-				if (!c || typeof c !== "object") return ""
-				const o = c as { type?: string; text?: string; content?: unknown }
-				if (o.type === "text" && typeof o.text === "string") return o.text
-				if (o.type === "content" && o.content) return extractText(o.content)
-				return ""
-			})
-			.join("")
+		return content.map(extractText).join("")
 	}
 	if (typeof content === "object") {
 		const o = content as { type?: string; text?: string; content?: unknown }
@@ -62,23 +54,20 @@ export function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 	for (const ev of events) {
 		const k = ev.kind.toLowerCase()
 		const ts = ev.receivedAt
-		const payload = ev.payload as Record<string, unknown>
+		const payload = ev.payload as any
 
 		if (k === "user_prompt" || k === "userprompt") {
 			assistantBuf = null
 			thoughtBuf = null
-			const text = (typeof payload.text === "string" && payload.text) || extractText(payload.content)
+			const text = payload.text || extractText(payload.content)
 			blocks.push({ key: `u-${ev.localSeq}`, kind: "user", text, ts })
 			continue
 		}
 
 		if (k === "agent_update" || k === "agentupdate") {
-			const inner = (payload.event as Record<string, unknown>) ?? payload
-			const suRaw = inner.sessionUpdate
-			const su: Record<string, unknown> =
-				suRaw && typeof suRaw === "object"
-					? (suRaw as Record<string, unknown>)
-					: (inner as Record<string, unknown>)
+			const event = payload.event || payload
+			const suRaw = event.sessionUpdate
+			const su = (suRaw && typeof suRaw === "object") ? suRaw : event
 			const variant = typeof suRaw === "string" ? suRaw : (su.type as string) ?? ""
 
 			if (variant === "working" || variant === "idle" || variant === "ready" || variant === "finished") {
@@ -95,11 +84,7 @@ export function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 			}
 
 			if (variant === "error") {
-				const text =
-					(typeof su.content === "string" && su.content) ||
-					extractText(su.content) ||
-					(typeof su.message === "string" ? (su.message as string) : "") ||
-					"agent error"
+				const text = extractText(su.content) || su.message || "agent error"
 				blocks.push({ key: `e-${ev.localSeq}`, kind: "error", text, ts })
 				assistantBuf = null
 				thoughtBuf = null
@@ -133,22 +118,18 @@ export function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 			}
 
 			if (variant === "tool_call" || variant === "tool_call_update") {
-				const fields: Record<string, unknown> =
-					variant === "tool_call_update" && su.fields && typeof su.fields === "object"
-						? (su.fields as Record<string, unknown>)
-						: su
-				const toolId = (su.toolCallId as string) ?? (fields.toolCallId as string) ?? `unknown-${ev.localSeq}`
-				const title = (fields.title as string) ?? undefined
-				const status = (fields.status as string) ?? undefined
+				const fields = (variant === "tool_call_update" && su.fields) ? su.fields : su
+				const toolId = su.toolCallId || fields.toolCallId || `unknown-${ev.localSeq}`
+				const title = fields.title
+				const status = fields.status
 				const content = fields.content !== undefined ? extractText(fields.content) : undefined
-				const toolKind = (fields.kind as string) ?? undefined
+				const toolKind = fields.kind
 				const locations = Array.isArray(fields.locations)
-					? (fields.locations as unknown[])
+					? (fields.locations as any[])
 						.map((l) => {
 							if (typeof l === "string") return l
 							if (l && typeof l === "object") {
-								const o = l as { path?: string; line?: number }
-								return o.path ? (o.line ? `${o.path}:${o.line}` : o.path) : ""
+								return l.path ? (l.line ? `${l.path}:${l.line}` : l.path) : ""
 							}
 							return ""
 						})
@@ -184,11 +165,11 @@ export function buildBlocks(events: AcpEvent[], prevBlocks: Block[]): Block[] {
 			}
 
 			if (variant === "plan") {
-				const rawEntries = Array.isArray(su.entries) ? (su.entries as Record<string, unknown>[]) : []
-				const entries = rawEntries.map((e) => ({
-					title: (e.title as string) ?? (e.content as string) ?? "",
-					status: e.status as string | undefined,
-					depth: typeof e.depth === "number" ? (e.depth as number) : 0,
+				const rawEntries = Array.isArray(su.entries) ? su.entries : []
+				const entries = rawEntries.map((e: any) => ({
+					title: e.title ?? e.content ?? "",
+					status: e.status,
+					depth: typeof e.depth === "number" ? e.depth : 0,
 				}))
 				blocks.push({ key: `p-${ev.localSeq}`, kind: "plan", entries, ts })
 				assistantBuf = null

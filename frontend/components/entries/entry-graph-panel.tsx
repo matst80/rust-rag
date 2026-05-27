@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -35,6 +35,7 @@ import {
   useCreateEdge,
   useDeleteEdge,
 } from "@/lib/api";
+import type { Edge } from "@/lib/api";
 import { useSWRConfig } from "swr";
 import { toast } from "sonner";
 
@@ -59,7 +60,22 @@ const CANONICAL_PREDICATES = [
 
 interface EntryGraphPanelProps {
   id: string;
-  edges: any[] | undefined;
+  edges: Edge[] | undefined;
+}
+
+const EDGE_SORT_STEP = 1024n;
+
+function parseSortOrder(value: string | undefined): bigint {
+  if (!value) return 0n;
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
+  }
+}
+
+function displaySortOrder(value: string | undefined): string {
+  return parseSortOrder(value).toString();
 }
 
 export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
@@ -71,6 +87,17 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddingEdge, setIsAddingEdge] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
+  const [selectedSortOrder, setSelectedSortOrder] = useState("1024");
+
+  const nextSortOrder = useMemo(() => {
+    const maxSortOrder = (edges ?? [])
+      .filter((edge) => edge.edge_type === "manual" && edge.source_id === id)
+      .reduce((currentMax, edge) => {
+        const value = parseSortOrder(edge.sort_order);
+        return value > currentMax ? value : currentMax;
+      }, 0n);
+    return (maxSortOrder + EDGE_SORT_STEP).toString();
+  }, [edges, id]);
 
   const { data: searchResults } = useSearch(
     searchQuery,
@@ -89,6 +116,7 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
         source_id: id,
         target_id: targetId,
         relationship,
+        sort_order: selectedSortOrder,
         directed: true,
         weight: 1.0,
       });
@@ -96,6 +124,7 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
       setIsAddingEdge(false);
       setSelectedTarget(null);
       setSearchQuery("");
+      setSelectedSortOrder(nextSortOrder);
       toast.success("Connection added");
     } catch {
       toast.error("Failed to add connection");
@@ -112,10 +141,29 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
     }
   };
 
-  const handleUpdateEdgeType = async (edgeId: string, newRelation: string) => {
+  const handleUpdateEdgeType = async (edge: Edge, newRelation: string) => {
     try {
       const { api } = await import("@/lib/api/client");
-      await api.edges.update(edgeId, { metadata: { relation: newRelation } });
+      await api.edges.update(edge.id, {
+        relation: newRelation,
+        sort_order: edge.sort_order,
+        metadata: edge.metadata ?? {},
+      });
+      mutate(["edges", id]);
+      toast.success("Connection updated");
+    } catch {
+      toast.error("Failed to update connection");
+    }
+  };
+
+  const handleUpdateEdgeSort = async (edge: Edge, nextValue: string) => {
+    try {
+      const { api } = await import("@/lib/api/client");
+      await api.edges.update(edge.id, {
+        relation: edge.relationship,
+        sort_order: nextValue,
+        metadata: edge.metadata ?? {},
+      });
       mutate(["edges", id]);
       toast.success("Connection updated");
     } catch {
@@ -134,7 +182,10 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
         </div>
         <div className="flex items-center gap-4">
           <button
-            onClick={() => setIsAddingEdge(true)}
+            onClick={() => {
+              setSelectedSortOrder(nextSortOrder);
+              setIsAddingEdge(true);
+            }}
             className="font-mono text-[10px] font-black uppercase tracking-[1px] text-primary hover:text-primary/80 transition-colors flex items-center gap-1"
           >
             <Plus className="size-3" />
@@ -242,7 +293,18 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
                     </div>
                   </div>
 
-                  <div className="space-y-3">
+                    <div className="space-y-3">
+                    <div className="space-y-2">
+                      <span className="font-mono text-[10px] font-black uppercase tracking-widest text-muted-foreground">
+                        Sort Order
+                      </span>
+                      <input
+                        className="w-full rounded-xl border border-border bg-card px-3 py-2 font-mono text-xs"
+                        value={selectedSortOrder}
+                        onChange={(e) => setSelectedSortOrder(e.target.value)}
+                        placeholder="1024"
+                      />
+                    </div>
                     <span className="font-mono text-[10px] font-black uppercase tracking-widest text-muted-foreground">
                       Select Relationship
                     </span>
@@ -303,7 +365,7 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
                   return -1;
                 if (a.edge_type !== "manual" && b.edge_type === "manual")
                   return 1;
-                return 0;
+                return a.sort_order.localeCompare(b.sort_order);
               })
               .map((edge) => {
                 const targetId =
@@ -355,10 +417,7 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
                                         <CommandItem
                                           key={p.value}
                                           onSelect={() =>
-                                            handleUpdateEdgeType(
-                                              edge.id,
-                                              p.value,
-                                            )
+                                            handleUpdateEdgeType(edge, p.value)
                                           }
                                           className="rounded-lg m-1 p-2 cursor-pointer transition-all hover:bg-primary/10"
                                         >
@@ -403,6 +462,30 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
                         >
                           {targetId}
                         </Link>
+                        {isManual && (
+                          <div className="flex items-center gap-2 pt-1">
+                            <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/50">
+                              Sort
+                            </span>
+                            <input
+                              className="h-7 w-28 rounded-md border border-border bg-background px-2 font-mono text-[10px]"
+                              defaultValue={displaySortOrder(edge.sort_order)}
+                              onBlur={(e) => {
+                                const nextValue = e.currentTarget.value.trim();
+                                if (
+                                  nextValue &&
+                                  nextValue !== displaySortOrder(edge.sort_order)
+                                ) {
+                                  handleUpdateEdgeSort(edge, nextValue);
+                                } else {
+                                  e.currentTarget.value = displaySortOrder(
+                                    edge.sort_order,
+                                  );
+                                }
+                              }}
+                            />
+                          </div>
+                        )}
                       </div>
 
                       {isManual && (

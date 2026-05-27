@@ -289,8 +289,9 @@ pub struct AppConfig {
     pub host: IpAddr,
     pub port: u16,
     pub db_path: String,
-    /// Optional Postgres URL. When set, the server connects (and runs
-    /// migrations) at startup. Active store remains SQLite during cutover.
+    /// Optional Postgres URL. When set, Postgres becomes the authoritative
+    /// store for the routed data domains and pending embedded migrations run at
+    /// startup.
     pub database_url: Option<String>,
     pub upload_path: String,
     pub model_path: PathBuf,

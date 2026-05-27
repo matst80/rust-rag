@@ -1,12 +1,14 @@
 //! URL ingestion with optional CDP and LLM cleaning.
 
+use crate::api::{
+    ApiError, AppState, SessionSubject, StoreRequest, StoreResponse, store_entry_core,
+};
 use axum::{Extension, Json, extract::State, http::StatusCode};
+use chromiumoxide::browser::Browser;
+use futures_util::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use crate::api::{ApiError, AppState, SessionSubject, StoreRequest, StoreResponse, store_entry_core};
-use chromiumoxide::browser::Browser;
-use futures_util::StreamExt;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct IngestUrlRequest {
@@ -55,12 +57,16 @@ pub async fn ingest_url(
             }
         }
     };
-    tracing::debug!(content_len = html_or_md.content.len(), is_markdown = html_or_md.is_markdown, "fetched content");
-    
+    tracing::debug!(
+        content_len = html_or_md.content.len(),
+        is_markdown = html_or_md.is_markdown,
+        "fetched content"
+    );
+
     // 2. HTML Cleaning and Markdown Conversion
     let is_markdown = html_or_md.is_markdown;
     let content = html_or_md.content;
-    
+
     let md = if is_markdown {
         tracing::debug!("content is already markdown, skipping cleaning");
         content
@@ -112,28 +118,50 @@ pub(crate) struct FetchResult {
     pub is_markdown: bool,
 }
 
-pub(crate) async fn fetch_with_reqwest(state: &AppState, url: &str) -> Result<FetchResult, ApiError> {
-    let resp = state.http_client.get(url)
-        .header("Accept", "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8")
-        .send().await
+pub(crate) async fn fetch_with_reqwest(
+    state: &AppState,
+    url: &str,
+) -> Result<FetchResult, ApiError> {
+    let resp = state
+        .http_client
+        .get(url)
+        .header(
+            "Accept",
+            "text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, */*;q=0.8",
+        )
+        .send()
+        .await
         .map_err(|e| ApiError::BadRequest(format!("fetch failed: {e}")))?;
-    
+
     if !resp.status().is_success() {
-        return Err(ApiError::BadRequest(format!("remote returned {}", resp.status())));
+        return Err(ApiError::BadRequest(format!(
+            "remote returned {}",
+            resp.status()
+        )));
     }
 
-    let is_markdown = resp.headers()
+    let is_markdown = resp
+        .headers()
         .get("content-type")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.contains("text/markdown"))
         .unwrap_or(false);
-    
-    let content = resp.text().await.map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to read response text: {e}")))?;
-    Ok(FetchResult { content, is_markdown })
+
+    let content = resp
+        .text()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to read response text: {e}")))?;
+    Ok(FetchResult {
+        content,
+        is_markdown,
+    })
 }
 
 pub(crate) async fn fetch_with_cdp(state: &AppState, url: &str) -> Result<FetchResult, ApiError> {
-    let mut cdp_url = state.openai_chat.cdp_url.as_ref()
+    let mut cdp_url = state
+        .openai_chat
+        .cdp_url
+        .as_ref()
         .ok_or_else(|| ApiError::BadRequest("RAG_CDP_URL not configured".to_owned()))?
         .clone();
 
@@ -141,51 +169,74 @@ pub(crate) async fn fetch_with_cdp(state: &AppState, url: &str) -> Result<FetchR
     if cdp_url.starts_with("http") {
         tracing::debug!(cdp_url = %cdp_url, "discovering WebSocket URL from base HTTP URL");
         let version_url = format!("{}/json/version", cdp_url.trim_end_matches('/'));
-        let resp = state.http_client.get(&version_url).send().await
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP discovery failed (request): {e}")))?;
-        
+        let resp = state
+            .http_client
+            .get(&version_url)
+            .send()
+            .await
+            .map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!("CDP discovery failed (request): {e}"))
+            })?;
+
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(ApiError::Internal(anyhow::anyhow!("CDP discovery failed (status {}): {}. Body: {}", status, version_url, body)));
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "CDP discovery failed (status {}): {}. Body: {}",
+                status,
+                version_url,
+                body
+            )));
         }
 
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP discovery failed (JSON): {e}")))?;
-        
+
         if let Some(ws_url) = body["webSocketDebuggerUrl"].as_str() {
             tracing::debug!(discovered_url = %ws_url, "found WebSocket debugger URL");
             cdp_url = ws_url.to_owned();
         } else {
-            return Err(ApiError::Internal(anyhow::anyhow!("CDP discovery failed: webSocketDebuggerUrl not found in {}", version_url)));
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "CDP discovery failed: webSocketDebuggerUrl not found in {}",
+                version_url
+            )));
         }
     }
 
     tracing::debug!(cdp_url = %cdp_url, "connecting to remote CDP");
-    
+
     // Connect to remote CDP
-    let (mut browser, mut handler) = Browser::connect(cdp_url).await
+    let (mut browser, mut handler) = Browser::connect(cdp_url)
+        .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP connect failed: {e}")))?;
 
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
+    tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page(url).await
+    let page = browser
+        .new_page(url)
+        .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP new_page failed: {e}")))?;
 
     tracing::debug!("waiting for navigation");
-    page.wait_for_navigation().await
+    page.wait_for_navigation()
+        .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP navigation failed: {e}")))?;
 
-    let content = page.content().await
+    let content = page
+        .content()
+        .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("CDP get_content failed: {e}")))?;
 
     // Try to close gracefully
     let _ = browser.close().await;
 
     // CDP always returns serialized HTML from the DOM
-    Ok(FetchResult { content, is_markdown: false })
+    Ok(FetchResult {
+        content,
+        is_markdown: false,
+    })
 }
 
 /// Strip boilerplate (nav, footer, etc) and noise (script, style) from HTML.
@@ -193,7 +244,7 @@ fn smart_clean_html(html: &str) -> String {
     use scraper::{Html, Selector};
 
     let document = Html::parse_document(html);
-    
+
     // Find the most likely content root
     let root_selectors = ["main", "article", "body"];
     let mut best_root = None;
@@ -218,13 +269,13 @@ fn smart_clean_html(html: &str) -> String {
 
 fn walk_and_filter(node: &scraper::ElementRef, output: &mut String) {
     let name = node.value().name();
-    
+
     // Tags to drop entirely (including subtree)
     let blacklist = [
-        "script", "style", "header", "nav", "footer", "aside", 
-        "iframe", "noscript", "svg", "form", "button", "canvas"
+        "script", "style", "header", "nav", "footer", "aside", "iframe", "noscript", "svg", "form",
+        "button", "canvas",
     ];
-    
+
     if blacklist.contains(&name) {
         return;
     }
@@ -272,7 +323,7 @@ async fn clean_with_llm(state: &AppState, md: &str) -> Result<String, ApiError> 
     let cfg = &state.openai_chat;
     let base_url = cfg.base_url.as_deref().unwrap();
     let model = cfg.default_model.as_deref().unwrap_or("gpt-4o");
-    
+
     let payload = json!({
         "model": model,
         "temperature": 0.0,
@@ -282,19 +333,32 @@ async fn clean_with_llm(state: &AppState, md: &str) -> Result<String, ApiError> 
         ],
     });
 
-    let mut req = state.http_client.post(format!("{base_url}/chat/completions")).json(&payload);
+    let mut req = state
+        .http_client
+        .post(format!("{base_url}/chat/completions"))
+        .json(&payload);
     if let Some(key) = cfg.api_key.as_deref() {
         req = req.bearer_auth(key);
     }
 
-    let resp = req.send().await.map_err(|e| ApiError::Internal(anyhow::anyhow!("LLM request failed: {e}")))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("LLM request failed: {e}")))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(ApiError::Internal(anyhow::anyhow!("LLM returned {}: {}", status, body)));
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "LLM returned {}: {}",
+            status,
+            body
+        )));
     }
 
-    let body: Value = resp.json().await.map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to parse LLM response: {e}")))?;
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to parse LLM response: {e}")))?;
     let content = body["choices"][0]["message"]["content"]
         .as_str()
         .map(ToOwned::to_owned)

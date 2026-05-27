@@ -6,8 +6,8 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{interval, Duration};
-use tracing::{error, info, warn, debug};
+use tokio::time::{Duration, interval};
+use tracing::{debug, error, info, warn};
 
 const DREAMING_SYSTEM_PROMPT: &str = r#"You are the Memory Consolidation Engine for a RAG system.
 Your task is to review entries in the 'memory' (short-term) source and decide which should be promoted to 'knowledge' (long-term), merged with others, or pruned.
@@ -101,7 +101,11 @@ pub async fn process_dreaming_round(state: &AppState) -> Result<()> {
         return Ok(());
     }
 
-    info!("dreaming: processing {} item(s) from '{}'", items.len(), cfg.source_id);
+    info!(
+        "dreaming: processing {} item(s) from '{}'",
+        items.len(),
+        cfg.source_id
+    );
 
     for item in items {
         if let Err(e) = process_item_dreaming(state, item).await {
@@ -113,18 +117,26 @@ pub async fn process_dreaming_round(state: &AppState) -> Result<()> {
 }
 
 async fn process_item_dreaming(state: &AppState, item: ItemRecord) -> Result<()> {
-    let embedder = state.embedder.get_ready().map_err(|e| anyhow!(e.to_string()))?;
+    let embedder = state
+        .embedder
+        .get_ready()
+        .map_err(|e| anyhow!(e.to_string()))?;
     let embedding = embedder.embed(&item.text)?;
-    
+
     // Find neighbors in both memory and knowledge to see if we should merge or promote
     let neighbors = state.store.search(&embedding, 5, None, None)?;
     let filtered_neighbors: Vec<_> = neighbors.into_iter().filter(|h| h.id != item.id).collect();
 
     let user_prompt = build_dreaming_prompt(&item, &filtered_neighbors);
     let llm_output = call_llm(state, DREAMING_SYSTEM_PROMPT, &user_prompt).await?;
-    
-    let response: DreamingResponse = serde_json::from_str(extract_json(&llm_output))
-        .map_err(|e| anyhow!("failed to parse dreaming response: {e}. Output was: {}", llm_output))?;
+
+    let response: DreamingResponse =
+        serde_json::from_str(extract_json(&llm_output)).map_err(|e| {
+            anyhow!(
+                "failed to parse dreaming response: {e}. Output was: {}",
+                llm_output
+            )
+        })?;
 
     for action in response.actions {
         apply_dreaming_action(state, action).await?;
@@ -137,12 +149,17 @@ fn build_dreaming_prompt(item: &ItemRecord, neighbors: &[SearchHit]) -> String {
     let mut out = String::new();
     out.push_str("ITEM TO REVIEW:\n");
     out.push_str(&format!("id: {}\ntext: {}\n\n", item.id, item.text));
-    
+
     if !neighbors.is_empty() {
         out.push_str("POTENTIAL NEIGHBORS (for merging/context):\n");
         for n in neighbors {
-            out.push_str(&format!("- id: {} (src: {}) dist: {:.3}\n  text: {}\n", 
-                n.id, n.source_id, n.distance, n.text.chars().take(200).collect::<String>()));
+            out.push_str(&format!(
+                "- id: {} (src: {}) dist: {:.3}\n  text: {}\n",
+                n.id,
+                n.source_id,
+                n.distance,
+                n.text.chars().take(200).collect::<String>()
+            ));
         }
     }
 
@@ -151,41 +168,62 @@ fn build_dreaming_prompt(item: &ItemRecord, neighbors: &[SearchHit]) -> String {
 }
 
 async fn apply_dreaming_action(state: &AppState, action: DreamingAction) -> Result<()> {
-    let item = state.store.get_item(&action.item_id)?
-        .ok_or_else(|| anyhow!("item {} not found during action application", action.item_id))?;
+    let item = state.store.get_item(&action.item_id)?.ok_or_else(|| {
+        anyhow!(
+            "item {} not found during action application",
+            action.item_id
+        )
+    })?;
 
     match action.action.as_str() {
         "promote" => {
-            info!("dreaming: promoting {} to knowledge: {}", action.item_id, action.reason);
+            info!(
+                "dreaming: promoting {} to knowledge: {}",
+                action.item_id, action.reason
+            );
             let mut metadata = item.metadata.clone();
             metadata["original_source"] = json!(item.source_id);
             metadata["dreamt_at"] = json!(chrono::Utc::now().to_rfc3339());
             metadata["dream_reason"] = json!(action.reason);
-            
-            let embedder = state.embedder.get_ready().map_err(|e| anyhow!(e.to_string()))?;
+
+            let embedder = state
+                .embedder
+                .get_ready()
+                .map_err(|e| anyhow!(e.to_string()))?;
             let embedding = embedder.embed(&item.text)?;
 
-            state.store.upsert_item(ItemRecord {
-                source_id: state.dreaming.target_source_id.clone(),
-                metadata,
-                updated_at: Utc::now().timestamp_millis(),
-                ..item
-            }, &embedding)?;
+            state.store.upsert_item(
+                ItemRecord {
+                    source_id: state.dreaming.target_source_id.clone(),
+                    metadata,
+                    updated_at: Utc::now().timestamp_millis(),
+                    ..item
+                },
+                &embedding,
+            )?;
         }
         "merge" => {
             if let Some(target_id) = action.target_id {
-                info!("dreaming: merging {} into {}: {}", action.item_id, target_id, action.reason);
+                info!(
+                    "dreaming: merging {} into {}: {}",
+                    action.item_id, target_id, action.reason
+                );
                 if let Some(consolidated) = action.consolidated_text {
-                    let mut target = state.store.get_item(&target_id)?
+                    let mut target = state
+                        .store
+                        .get_item(&target_id)?
                         .ok_or_else(|| anyhow!("merge target {} not found", target_id))?;
-                    
+
                     target.text = consolidated;
                     target.metadata["merged_from"] = json!(vec![action.item_id.clone()]);
-                    
+
                     // We need to re-embed the consolidated text
-                    let embedder = state.embedder.get_ready().map_err(|e| anyhow!(e.to_string()))?;
+                    let embedder = state
+                        .embedder
+                        .get_ready()
+                        .map_err(|e| anyhow!(e.to_string()))?;
                     let embedding = embedder.embed(&target.text)?;
-                    
+
                     state.store.upsert_item(target, &embedding)?;
                     state.store.delete_item(&action.item_id)?;
                 }
@@ -196,10 +234,16 @@ async fn apply_dreaming_action(state: &AppState, action: DreamingAction) -> Resu
             state.store.delete_item(&action.item_id)?;
         }
         "keep" => {
-            debug!("dreaming: keeping {} in memory: {}", action.item_id, action.reason);
+            debug!(
+                "dreaming: keeping {} in memory: {}",
+                action.item_id, action.reason
+            );
             // Optionally update metadata to mark it as reviewed
         }
-        _ => warn!("dreaming: unknown action '{}' for item {}", action.action, action.item_id),
+        _ => warn!(
+            "dreaming: unknown action '{}' for item {}",
+            action.action, action.item_id
+        ),
     }
 
     Ok(())
@@ -225,7 +269,7 @@ mod tests {
     fn test_extract_json() {
         let content = "```json\n{\"actions\": []}\n```";
         assert_eq!(extract_json(content), "{\"actions\": []}");
-        
+
         let content = "{\"actions\": []}";
         assert_eq!(extract_json(content), "{\"actions\": []}");
     }

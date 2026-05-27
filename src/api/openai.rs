@@ -1,9 +1,9 @@
 use super::{
     AdminItemPayload, AdminItemsResponse, ApiError, AppState, CategoriesResponse,
     GraphNeighborhoodResponse, GraphStatusResponse, SearchResultPayload, current_timestamp_millis,
+    ingest_url::{fetch_with_cdp, fetch_with_reqwest},
     map_graph_error, resolve_store_id, validate_graph_depth, validate_graph_limit,
     validate_metadata, validate_non_empty, validate_source_id,
-    ingest_url::{fetch_with_cdp, fetch_with_reqwest},
 };
 use crate::db::{ItemRecord, ListItemsRequest, SortOrder};
 use anyhow::{Context, anyhow};
@@ -259,6 +259,7 @@ struct CreateGraphEdgeArguments {
     from_item_id: String,
     to_item_id: String,
     relation: Option<String>,
+    sort_order: Option<String>,
     weight: Option<f32>,
     directed: Option<bool>,
     metadata: Value,
@@ -321,15 +322,20 @@ pub(super) async fn chat_completions(
         .filter(|message| message.role != "system")
         .cloned()
         .collect();
-    
+
     // Strip trailing empty assistant message which is often used as a placeholder
     // by frontends but is incompatible with modern thinking/reasoning modes (like Claude 3.7).
     if let Some(last) = messages.last() {
-        let is_empty = last.role == "assistant" &&
-            last.content.as_ref().map_or(true, |v| v.is_null() || v.as_str().map_or(false, |s| s.is_empty())) &&
-            last.reasoning_content.as_ref().map_or(true, |s| s.is_empty()) &&
-            last.tool_calls.as_ref().map_or(true, |v| v.is_empty());
-        
+        let is_empty = last.role == "assistant"
+            && last.content.as_ref().map_or(true, |v| {
+                v.is_null() || v.as_str().map_or(false, |s| s.is_empty())
+            })
+            && last
+                .reasoning_content
+                .as_ref()
+                .map_or(true, |s| s.is_empty())
+            && last.tool_calls.as_ref().map_or(true, |v| v.is_empty());
+
         if is_empty {
             messages.pop();
         }
@@ -763,6 +769,7 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
                         "from_item_id": { "type": "string" },
                         "to_item_id": { "type": "string" },
                         "relation": { "type": "string" },
+                        "sort_order": { "type": "string", "description": "Lexicographically sortable rank key for sibling ordering. Numeric strings are normalized server-side." },
                         "weight": { "type": "number", "default": 1.0 },
                         "directed": { "type": "boolean", "default": false },
                         "metadata": { "type": "object" }
@@ -1161,9 +1168,7 @@ async fn split_entry_tool(
         .await
         .map_err(ApiError::TaskJoin)?
         .map_err(ApiError::Internal)?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("parent {} not found", arguments.parent_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("parent {} not found", arguments.parent_id)))?;
 
     let parent_path = parent.path.clone();
     let target_source = arguments
@@ -1353,6 +1358,7 @@ async fn create_graph_edge_tool(
         from_item_id: arguments.from_item_id,
         to_item_id: arguments.to_item_id,
         relation: arguments.relation.map(Cow::Owned),
+        sort_order: arguments.sort_order,
         weight: arguments.weight.unwrap_or(1.0),
         directed: arguments.directed.unwrap_or(false),
         metadata: arguments.metadata,
@@ -1688,7 +1694,6 @@ impl ToolCallAccumulator {
     }
 }
 
-
 fn encode_data_event(data: &str) -> Bytes {
     Bytes::from(format!("data: {data}\n\n"))
 }
@@ -1781,7 +1786,12 @@ mod tests {
         assert_eq!(payload["model"], Value::String("gpt-test".to_owned()));
         assert_eq!(payload["stream"], Value::Bool(true));
         assert_eq!(payload["tools"].as_array().map(Vec::len), Some(15));
-        assert_eq!(payload.get("tool_choice").map(|v| v.clone()), Some(serde_json::json!({ "type": "function", "function": { "name": "client__open_modal" } })));
+        assert_eq!(
+            payload.get("tool_choice").map(|v| v.clone()),
+            Some(
+                serde_json::json!({ "type": "function", "function": { "name": "client__open_modal" } })
+            )
+        );
     }
 
     #[test]

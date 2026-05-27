@@ -29,11 +29,10 @@ pub struct VapidPublicKeyResponse {
 pub async fn vapid_public_key(
     State(state): State<AppState>,
 ) -> Result<Json<VapidPublicKeyResponse>, ApiError> {
-    let key = state
-        .web_push
-        .public_key
-        .clone()
-        .ok_or_else(|| ApiError::ServiceUnavailable("VAPID_PUBLIC_KEY not configured".into()))?;
+    let key =
+        state.web_push.public_key.clone().ok_or_else(|| {
+            ApiError::ServiceUnavailable("VAPID_PUBLIC_KEY not configured".into())
+        })?;
     Ok(Json(VapidPublicKeyResponse { public_key: key }))
 }
 

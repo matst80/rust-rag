@@ -115,4 +115,3 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushSubscriptionRecord> 
         last_used_at: row.get(7)?,
     })
 }
-

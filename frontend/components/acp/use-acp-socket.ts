@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 import { 
     ConnectionState, 
     AcpEvent, 
@@ -178,8 +179,20 @@ export function useAcpSocket() {
 				const terminalList = (payload as any).terminals as TerminalInfo[] ?? []
 				
 				const sessMap: Record<string, SessionInfo> = {}
-				for (const s of list) sessMap[s.acp_session_id] = s
+				const eventMap: Record<string, AcpEvent[]> = {}
+				for (const s of list) {
+					sessMap[s.acp_session_id] = s
+					if (Array.isArray(s.history)) {
+						eventMap[s.acp_session_id] = s.history.map((h: any, idx) => ({
+							kind: h.type || h.kind || "unknown",
+							payload: h,
+							receivedAt: Date.now(),
+							localSeq: idx + 1,
+						}))
+					}
+				}
 				setSessions(sessMap)
+				setEventsBySession((prev) => ({ ...prev, ...eventMap }))
 
 				const termMap: Record<string, TerminalInfo> = {}
 				const sessionTerms: Record<string, string[]> = {}
@@ -308,6 +321,25 @@ export function useAcpSocket() {
 						const next = { ...prev }
 						delete next[rid]
 						return next
+					})
+				}
+			}
+
+			if (k === "clipboard_updated" || k === "clipboardupdated") {
+				const content = payload["content"] as string
+				const source = payload["source"] as string
+				const truncated = payload["truncated"] as boolean
+
+				if (content) {
+					toast.info("Clipboard Updated", {
+						description: truncated ? `${content.slice(0, 100)}... (truncated)` : content.slice(0, 200),
+						duration: 10000,
+						action: {
+							label: "Copy",
+							onClick: () => {
+								navigator.clipboard.writeText(content)
+							}
+						}
 					})
 				}
 			}
