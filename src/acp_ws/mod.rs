@@ -14,7 +14,12 @@
 //! Wire surface frozen as Telegram-ACP WS protocol v1.3.0. See RAG entry
 //! `telegram_acp_ws_protocol_v1` for canonical doc.
 
-use std::collections::{HashMap, VecDeque};
+pub mod session;
+pub mod terminal;
+pub mod buffer;
+pub mod state;
+
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,28 +33,7 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tracing::{debug, info, warn};
 
 pub use crate::config::AcpWsConfig;
-
-fn is_snapshot(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("Snapshot")
-        || kind.eq_ignore_ascii_case("snapshot")
-        || kind == "state_snapshot"
-        || kind == "commands_snapshot"
-}
-fn is_permission_request(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("PermissionRequest") || kind == "permission_request"
-}
-fn is_session_ended(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("SessionEnded") || kind == "session_ended"
-}
-fn is_session_started(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("SessionStarted") || kind == "session_started"
-}
-fn is_session_renamed(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("SessionRenamed") || kind == "session_renamed"
-}
-fn is_topic_removed(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("TopicRemoved") || kind == "topic_removed"
-}
+use state::AcpState;
 
 /// One event captured from the WS stream.
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
@@ -67,37 +51,6 @@ pub struct AcpEvent {
     pub payload: Value,
     /// Receive time (ms since epoch).
     pub received_at: i64,
-}
-
-#[derive(Debug, Default)]
-struct SessionBuffer {
-    events: VecDeque<AcpEvent>,
-}
-
-#[derive(Debug, Default)]
-struct InnerState {
-    next_seq: u64,
-    /// Ring buffer per session id. Events without a session id go in the empty-string bucket.
-    buffers: HashMap<String, SessionBuffer>,
-    /// Last snapshot decoded into struct form (for MCP `acp_get_snapshot`).
-    latest_snapshot: Option<AcpEvent>,
-    /// Verbatim text of the most recent snapshot frame, replayed verbatim
-    /// to new subscribers when present.
-    latest_snapshot_text: Option<String>,
-    /// Live session id → most recently observed SessionInfo (from Snapshot
-    /// or SessionStarted payloads). Late-joining browsers get a synthesized
-    /// snapshot built from this map when the daemon hasn't recently emitted
-    /// one — closes the "new browser sees 0 sessions even though daemon has
-    /// N" window.
-    live_sessions: HashMap<String, Value>,
-    /// Projects list from the last Snapshot. Carried alongside `live_sessions`
-    /// so synthesized snapshots look identical to daemon-emitted ones.
-    live_projects: Vec<Value>,
-    /// Outstanding PermissionRequest events keyed by request_id.
-    pending_permissions: HashMap<String, AcpEvent>,
-    /// Connection status for diagnostics.
-    connected: bool,
-    last_error: Option<String>,
 }
 
 /// Public status row for one instance.
@@ -118,7 +71,7 @@ pub struct InstanceStatus {
 pub struct AcpWsHandle {
     instance_id: String,
     url: String,
-    inner: Arc<Mutex<InnerState>>,
+    inner: Arc<Mutex<AcpState>>,
     outbound: mpsc::UnboundedSender<Value>,
     cap_per_session: usize,
     /// Wakes anyone watching for new events (MCP `wait_for_event`).
@@ -168,14 +121,14 @@ impl AcpWsHandle {
 
     pub async fn status(&self) -> InstanceStatus {
         let g = self.inner.lock().await;
-        let buffered_events: usize = g.buffers.values().map(|b| b.events.len()).sum();
-        let live_sessions = g.live_sessions.values().cloned().collect();
+        let buffered_events: usize = g.buffer_manager.buffers.values().map(|b| b.events.len()).sum();
+        let live_sessions = g.session_manager.live_sessions.values().cloned().collect();
         InstanceStatus {
             instance_id: self.instance_id.clone(),
             url: self.url.clone(),
             connected: g.connected,
             last_error: g.last_error.clone(),
-            session_count: g.live_sessions.len(),
+            session_count: g.session_manager.live_sessions.len(),
             pending_permissions: g.pending_permissions.len(),
             buffered_events,
             live_sessions,
@@ -193,12 +146,12 @@ impl AcpWsHandle {
         let limit = limit.unwrap_or(50).min(500);
         let mut out: Vec<AcpEvent> = match session_id {
             Some(sid) => g
-                .buffers
+                .buffer_manager.buffers
                 .get(sid)
                 .map(|b| b.events.iter().cloned().collect())
                 .unwrap_or_default(),
             None => g
-                .buffers
+                .buffer_manager.buffers
                 .values()
                 .flat_map(|b| b.events.iter().cloned())
                 .collect(),
@@ -236,16 +189,7 @@ impl AcpWsHandle {
     /// synthesized form merges those deltas in and stays current.
     pub async fn subscriber_snapshot(&self) -> Option<String> {
         let g = self.inner.lock().await;
-        if !g.live_sessions.is_empty() || !g.live_projects.is_empty() {
-            let sessions: Vec<Value> = g.live_sessions.values().cloned().collect();
-            let payload = json!({
-                "type": "state_snapshot",
-                "sessions": sessions,
-                "projects": g.live_projects,
-            });
-            return Some(payload.to_string());
-        }
-        g.latest_snapshot_text.clone()
+        g.subscriber_snapshot()
     }
 
     /// Subscribe to the raw daemon-frame fanout. Each receiver gets every
@@ -383,134 +327,148 @@ fn spawn_worker(
     initial_backoff: u64,
     max_backoff: u64,
 ) -> Arc<AcpWsHandle> {
-    let inner = Arc::new(Mutex::new(InnerState::default()));
-    let (tx, rx) = mpsc::unbounded_channel::<Value>();
-    let notify = Arc::new(Notify::new());
-    let (events_tx, _) = broadcast::channel::<String>(256);
+    let inner = Arc::new(Mutex::new(AcpState::new(cap_per_session)));
+    let event_notify = Arc::new(Notify::new());
     let shutdown = Arc::new(Notify::new());
+    let (events_tx, _) = broadcast::channel::<String>(256);
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
     let handle = Arc::new(AcpWsHandle {
         instance_id: instance_id.clone(),
         url: url.clone(),
         inner: inner.clone(),
-        outbound: tx,
+        outbound: outbound_tx,
         cap_per_session,
-        event_notify: notify.clone(),
+        event_notify: event_notify.clone(),
         events_tx: events_tx.clone(),
         shutdown: shutdown.clone(),
     });
 
-    tokio::spawn(run_loop(
-        instance_id,
-        url,
-        token,
-        cap_per_session,
-        initial_backoff,
-        max_backoff,
-        inner,
-        rx,
-        notify,
-        events_tx,
-        shutdown,
-    ));
+    let loop_id = instance_id.clone();
+    tokio::spawn(async move {
+        worker_loop(
+            loop_id,
+            url,
+            token,
+            inner,
+            events_tx,
+            event_notify,
+            outbound_rx,
+            shutdown,
+            cap_per_session,
+            initial_backoff,
+            max_backoff,
+        )
+        .await;
+    });
+
     handle
 }
 
-async fn run_loop(
+async fn worker_loop(
     instance_id: String,
     url: String,
     token: Option<String>,
-    cap_per_session: usize,
+    inner: Arc<Mutex<AcpState>>,
+    events_tx: broadcast::Sender<String>,
+    event_notify: Arc<Notify>,
+    mut outbound_rx: mpsc::UnboundedReceiver<Value>,
+    shutdown: Arc<Notify>,
+    cap: usize,
     initial_backoff: u64,
     max_backoff: u64,
-    inner: Arc<Mutex<InnerState>>,
-    mut outbound_rx: mpsc::UnboundedReceiver<Value>,
-    notify: Arc<Notify>,
-    events_tx: broadcast::Sender<String>,
-    shutdown: Arc<Notify>,
 ) {
     let mut backoff = initial_backoff;
 
     loop {
-        if url.is_empty() {
-            info!(instance_id = %instance_id, "acp_ws: empty url, exiting worker");
-            return;
-        }
         info!(instance_id = %instance_id, url = %url, "acp_ws: connecting");
 
+        if url.trim().is_empty() {
+            warn!(instance_id = %instance_id, "acp_ws: empty url, aborting connect loop");
+            return;
+        }
+
+        let connect_fut = connect(&url, token.as_deref());
         tokio::select! {
-            biased;
             _ = shutdown.notified() => {
-                info!(instance_id = %instance_id, "acp_ws: shutdown before connect");
+                info!(instance_id = %instance_id, "acp_ws: shut down during connect");
                 return;
             }
-            connect_res = connect(&url, token.as_deref()) => {
-                match connect_res {
+            conn_res = connect_fut => {
+                match conn_res {
                     Ok(ws) => {
+                        info!(instance_id = %instance_id, "acp_ws: connected");
                         {
                             let mut g = inner.lock().await;
                             g.connected = true;
                             g.last_error = None;
                         }
                         backoff = initial_backoff;
-                        info!(instance_id = %instance_id, "acp_ws: connected");
 
                         let (mut sink, mut stream) = ws.split();
 
-                        // Ask the daemon to emit a snapshot so the in-process
-                        // state catches up before any subscribers attach.
-                        let frame = json!({ "type": "list_sessions" }).to_string();
-                        if let Err(err) = sink.send(Message::Text(frame.into())).await {
-                            warn!(instance_id = %instance_id, "acp_ws: failed to request list_sessions on connect: {err}");
-                        } else {
-                            debug!(instance_id = %instance_id, "acp_ws: requested list_sessions on connect");
+                        // Request an initial state snapshot explicitly (fix regression)
+                        let req = json!({ "type": "list_sessions" });
+                        if let Err(err) = sink.send(Message::Text(req.to_string().into())).await {
+                            warn!(instance_id = %instance_id, "acp_ws: initial list_sessions failed: {err}");
                         }
 
                         loop {
                             tokio::select! {
                                 _ = shutdown.notified() => {
-                                    info!(instance_id = %instance_id, "acp_ws: shutdown signalled; closing");
+                                    info!(instance_id = %instance_id, "acp_ws: shut down requested");
                                     let _ = sink.send(Message::Close(None)).await;
                                     return;
                                 }
-                                Some(value) = outbound_rx.recv() => {
-                                    let text = match serde_json::to_string(&value) {
-                                        Ok(t) => t,
-                                        Err(err) => {
-                                            warn!(instance_id = %instance_id, "acp_ws: failed to serialize outbound: {err}");
-                                            continue;
+                                out_msg = outbound_rx.recv() => {
+                                    match out_msg {
+                                        Some(val) => {
+                                            let txt = val.to_string();
+                                            if let Err(err) = sink.send(Message::Text(txt.into())).await {
+                                                warn!(instance_id = %instance_id, "acp_ws: send error: {err}");
+                                                break;
+                                            }
                                         }
-                                    };
-                                    if let Err(err) = sink.send(Message::Text(text.into())).await {
-                                        warn!(instance_id = %instance_id, "acp_ws: send error, reconnecting: {err}");
-                                        break;
+                                        None => {
+                                            let _ = sink.send(Message::Close(None)).await;
+                                            break;
+                                        } // Handle dropped, shut down worker
                                     }
                                 }
-                                Some(msg) = stream.next() => {
-                                    match msg {
-                                        Ok(Message::Text(text)) => {
-                                            let _ = events_tx.send(text.to_string());
-                                            handle_incoming(&inner, cap_per_session, &text).await;
-                                            notify.notify_waiters();
+                                in_msg = stream.next() => {
+                                    match in_msg {
+                                        Some(msg) => {
+                                            match msg {
+                                                Ok(Message::Text(text)) => {
+                                                    // 1. Process event and maintain state
+                                                    handle_incoming(&inner, cap, text.as_str()).await;
+
+                                                    // 2. Wake MCP pollers
+                                                    event_notify.notify_waiters();
+
+                                                    // 3. Fan out unmodified frame to browsers
+                                                    let _ = events_tx.send(text.to_string());
+                                                }
+                                                Ok(Message::Binary(_)) => {
+                                                    debug!(instance_id = %instance_id, "acp_ws: ignoring binary frame");
+                                                }
+                                                Ok(Message::Ping(payload)) => {
+                                                    let _ = sink.send(Message::Pong(payload)).await;
+                                                }
+                                                Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+                                                Ok(Message::Close(reason)) => {
+                                                    info!(instance_id = %instance_id, "acp_ws: server closed: {reason:?}");
+                                                    break;
+                                                }
+                                                Err(err) => {
+                                                    warn!(instance_id = %instance_id, "acp_ws: read error: {err}");
+                                                    break;
+                                                }
+                                            }
                                         }
-                                        Ok(Message::Binary(_)) => {
-                                            debug!(instance_id = %instance_id, "acp_ws: ignoring binary frame");
-                                        }
-                                        Ok(Message::Ping(payload)) => {
-                                            let _ = sink.send(Message::Pong(payload)).await;
-                                        }
-                                        Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
-                                        Ok(Message::Close(reason)) => {
-                                            info!(instance_id = %instance_id, "acp_ws: server closed: {reason:?}");
-                                            break;
-                                        }
-                                        Err(err) => {
-                                            warn!(instance_id = %instance_id, "acp_ws: read error: {err}");
-                                            break;
-                                        }
+                                        None => break,
                                     }
                                 }
-                                else => break,
                             }
                         }
                     }
@@ -560,7 +518,7 @@ async fn connect(
     Ok(ws)
 }
 
-async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str) {
+async fn handle_incoming(inner: &Arc<Mutex<AcpState>>, _cap: usize, text: &str) {
     let value: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(err) => {
@@ -591,150 +549,7 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         .unwrap_or(0);
 
     let mut g = inner.lock().await;
-    g.next_seq += 1;
-    let seq = g.next_seq;
-
-    let event = AcpEvent {
-        local_seq: seq,
-        event_id,
-        kind: kind.clone(),
-        session_id: session_id.clone(),
-        payload: payload.clone(),
-        received_at: now_ms,
-    };
-
-    if is_snapshot(&kind) {
-        g.latest_snapshot = Some(event.clone());
-        g.latest_snapshot_text = Some(text.to_string());
-        // Rebuild live session/project maps from the authoritative snapshot.
-        if let Some(arr) = payload.get("sessions").and_then(Value::as_array) {
-            g.live_sessions.clear();
-            for s in arr {
-                let sid = s
-                    .get("acp_session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if let Some(sid) = sid {
-                    g.live_sessions.insert(sid.clone(), s.clone());
-
-                    // Populate ring buffer from snapshot history
-                    if let Some(hist) = s.get("history").and_then(Value::as_array) {
-                        let mut synthesized = Vec::with_capacity(hist.len());
-                        for h in hist {
-                            g.next_seq += 1;
-                            let seq = g.next_seq;
-                            let h_kind = h.get("type").and_then(Value::as_str).unwrap_or("unknown").to_string();
-                            synthesized.push(AcpEvent {
-                                local_seq: seq,
-                                event_id: h.get("event_id").and_then(Value::as_u64),
-                                kind: h_kind,
-                                session_id: Some(sid.clone()),
-                                payload: h.clone(),
-                                received_at: now_ms,
-                            });
-                        }
-
-                        let buf = g.buffers.entry(sid.clone()).or_default();
-                        buf.events.clear();
-                        for ev in synthesized {
-                            buf.events.push_back(ev);
-                        }
-                        while buf.events.len() > cap {
-                            buf.events.pop_front();
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(arr) = payload.get("projects").and_then(Value::as_array) {
-            g.live_projects = arr.clone();
-        }
-    }
-
-    if (is_session_started(&kind) || is_session_renamed(&kind))
-        && let Some(sid) = &session_id
-    {
-        // Capture as much SessionInfo as the event carries. Daemon emits a
-        // partial — frontend treats missing fields as defaults. If a fuller
-        // Snapshot arrives later it overwrites this entry.
-        g.live_sessions
-            .entry(sid.clone())
-            .and_modify(|v| {
-                if let Value::Object(existing) = v
-                    && let Value::Object(incoming) = &payload
-                {
-                    for (k, val) in incoming {
-                        existing.insert(k.clone(), val.clone());
-                    }
-                }
-            })
-            .or_insert_with(|| payload.clone());
-    }
-
-    if is_permission_request(&kind)
-        && let Some(req_id) = payload.get("request_id").and_then(Value::as_str)
-    {
-        g.pending_permissions
-            .insert(req_id.to_owned(), event.clone());
-    }
-
-    if is_session_ended(&kind) {
-        if let Some(sid) = &session_id {
-            g.live_sessions.remove(sid);
-            g.pending_permissions
-                .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
-        }
-    }
-
-    if is_topic_removed(&kind) {
-        if let Some(sid) = &session_id {
-            g.live_sessions.remove(sid);
-            g.buffers.remove(sid);
-            g.pending_permissions
-                .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
-        } else if let Some(tid) = payload.get("thread_id").and_then(Value::as_i64) {
-            let mut to_remove = Vec::new();
-            for (sid, info) in &g.live_sessions {
-                if info.get("thread_id").and_then(Value::as_i64) == Some(tid) {
-                    to_remove.push(sid.clone());
-                }
-            }
-            for sid in to_remove {
-                g.live_sessions.remove(&sid);
-                g.buffers.remove(&sid);
-                g.pending_permissions
-                    .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
-            }
-        }
-    }
-
-    // Append to live history for subscriber_snapshot replay
-    if let Some(sid) = &session_id {
-        if let Some(s) = g.live_sessions.get_mut(sid) {
-            if let Value::Object(map) = s {
-                let history = map.entry("history".to_string()).or_insert_with(|| Value::Array(Vec::new()));
-                if let Value::Array(arr) = history {
-                    // Convert our envelope back to the daemon's internal event shape if possible
-                    // but for now just push the payload. The daemon's history is a list of SessionEvent.
-                    let mut item = payload.clone();
-                    if let Value::Object(item_map) = &mut item {
-                        item_map.insert("type".to_string(), Value::String(kind.clone()));
-                    }
-                    arr.push(item);
-                    while arr.len() > cap {
-                        arr.remove(0);
-                    }
-                }
-            }
-        }
-    }
-
-    let bucket = session_id.unwrap_or_default();
-    let buf = g.buffers.entry(bucket).or_default();
-    buf.events.push_back(event);
-    while buf.events.len() > cap {
-        buf.events.pop_front();
-    }
+    g.handle_event(&kind, session_id.as_ref(), &payload, text, event_id, now_ms);
 }
 
 /// Resolves both `{ "PermissionRequest": { ... } }` shape and tagged `{ "kind": "...", ... }` shape.
