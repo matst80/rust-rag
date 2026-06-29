@@ -15,7 +15,7 @@
 //! Re-runnable: ON CONFLICT updates documents in place; chunks for the
 //! same (document_id, position) are replaced.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use rust_rag::{
@@ -23,9 +23,9 @@ use rust_rag::{
     db::postgres,
     embedding::{Embedder, EmbeddingService, Pooling},
 };
-use tokenizers::Tokenizer;
 use serde_json::Value;
 use std::{env, path::PathBuf, sync::Arc, time::Instant};
+use tokenizers::Tokenizer;
 use tracing::{info, warn};
 
 struct ItemRow {
@@ -40,16 +40,14 @@ struct ItemRow {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     let sqlite_path = env::args()
         .nth(1)
         .ok_or_else(|| anyhow!("usage: migrate_sqlite_to_pg <path-to-rag.db>"))?;
-    let database_url = env::var("RAG_DATABASE_URL")
-        .context("RAG_DATABASE_URL must be set")?;
+    let database_url = env::var("RAG_DATABASE_URL").context("RAG_DATABASE_URL must be set")?;
     let model_path: PathBuf = env::var_os("RAG_MODEL_PATH")
         .map(PathBuf::from)
         .context("RAG_MODEL_PATH must be set")?;
@@ -71,7 +69,10 @@ async fn main() -> Result<()> {
         // still defaults to mean for backward-compat with the bge-small store.
         .unwrap_or(Pooling::Cls);
 
-    info!("loading embedder from {} (pooling={pooling:?})", model_path.display());
+    info!(
+        "loading embedder from {} (pooling={pooling:?})",
+        model_path.display()
+    );
     let embedder: Arc<dyn EmbeddingService> = Arc::new(
         Embedder::from_paths(
             &model_path,
@@ -108,9 +109,7 @@ async fn main() -> Result<()> {
     let chunker_tokenizer = Tokenizer::from_file(&tokenizer_path)
         .map_err(|e| anyhow!("loading tokenizer for chunker: {e}"))?;
     let chunker = MarkdownChunker::new(chunker_tokenizer, chunk_max_tokens, chunk_overlap_tokens)?;
-    info!(
-        "chunker ready (max={chunk_max_tokens} tokens, overlap={chunk_overlap_tokens} tokens)"
-    );
+    info!("chunker ready (max={chunk_max_tokens} tokens, overlap={chunk_overlap_tokens} tokens)");
 
     info!("connecting to postgres");
     let pool = postgres::connect(&database_url, 4).await?;
@@ -128,8 +127,7 @@ async fn main() -> Result<()> {
         }
 
         let created_at: DateTime<Utc> =
-            DateTime::<Utc>::from_timestamp_millis(row.created_at_ms)
-                .unwrap_or_else(Utc::now);
+            DateTime::<Utc>::from_timestamp_millis(row.created_at_ms).unwrap_or_else(Utc::now);
 
         let author = row
             .metadata
@@ -181,11 +179,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("inserting document {}", row.id))?;
 
-        tx.execute(
-            "DELETE FROM chunks WHERE document_id = $1",
-            &[&row.id],
-        )
-        .await?;
+        tx.execute("DELETE FROM chunks WHERE document_id = $1", &[&row.id])
+            .await?;
 
         for chunk in &chunks {
             let embedding = embedder.embed(&chunk.content)?;
@@ -345,10 +340,7 @@ fn read_mcp_tokens(path: &str) -> Result<Vec<McpTokenRow>> {
     Ok(rows)
 }
 
-async fn copy_mcp_tokens(
-    pool: &deadpool_postgres::Pool,
-    tokens: &[McpTokenRow],
-) -> Result<usize> {
+async fn copy_mcp_tokens(pool: &deadpool_postgres::Pool, tokens: &[McpTokenRow]) -> Result<usize> {
     let mut inserted = 0_usize;
     let client = pool.get().await?;
     for t in tokens {
@@ -448,10 +440,7 @@ async fn copy_device_auths(
     Ok(inserted)
 }
 
-async fn copy_messages(
-    pool: &deadpool_postgres::Pool,
-    messages: &[MessageRow],
-) -> Result<usize> {
+async fn copy_messages(pool: &deadpool_postgres::Pool, messages: &[MessageRow]) -> Result<usize> {
     let mut inserted = 0_usize;
     let client = pool.get().await?;
     for m in messages {

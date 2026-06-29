@@ -412,9 +412,7 @@ impl InferenceBackend for OrtBackend {
 
         // Pull dense by name when present, fall back to first output for the
         // legacy single-output dense-only export.
-        let dense_output = outputs
-            .get("last_hidden_state")
-            .unwrap_or(&outputs[0]);
+        let dense_output = outputs.get("last_hidden_state").unwrap_or(&outputs[0]);
         let dense = dense_output
             .try_extract_array::<f32>()
             .map_err(ort_error)?
@@ -434,7 +432,10 @@ impl InferenceBackend for OrtBackend {
             None
         };
 
-        Ok(RunOutput { dense, sparse_logits })
+        Ok(RunOutput {
+            dense,
+            sparse_logits,
+        })
     }
 
     fn has_sparse(&self) -> bool {
@@ -490,7 +491,11 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
         .with_conv_max_workspace(false)
         .build();
 
-    let cuda = if strict { cuda.error_on_failure() } else { cuda };
+    let cuda = if strict {
+        cuda.error_on_failure()
+    } else {
+        cuda
+    };
 
     println!(
         "embedder: registering CUDA EP (device={device_id}, mem_limit={mem_limit_mb}MiB, strict={strict}) with CPU fallback"
@@ -521,7 +526,9 @@ fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {
     {
         if let Some(path) = ort_dylib_path {
             // SAFETY: writing the env var before `ort::init()` reads it.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", path); }
+            unsafe {
+                std::env::set_var("ORT_DYLIB_PATH", path);
+            }
         }
         let resolved = std::env::var("ORT_DYLIB_PATH").unwrap_or_default();
         println!("embedder: load-dynamic ORT_DYLIB_PATH={resolved}");
@@ -543,9 +550,7 @@ fn initialize_ort(ort_dylib_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn cls_pool_and_normalize(
-    hidden_state: ndarray::ArrayView2<'_, f32>,
-) -> Result<Vec<f32>> {
+fn cls_pool_and_normalize(hidden_state: ndarray::ArrayView2<'_, f32>) -> Result<Vec<f32>> {
     if hidden_state.nrows() == 0 {
         anyhow::bail!("hidden state had zero rows; cannot read CLS token");
     }
@@ -721,9 +726,7 @@ mod tests {
         //
         // Expected: 5 -> max(0.5, 0.7) = 0.7, 99 -> 0.2; specials (0,1,2)
         // dropped, padding (pos 4) dropped via attention mask.
-        let logits = ndarray::arr2(&[
-            [0.9_f32], [0.5], [0.2], [0.7], [0.0], [0.6],
-        ]);
+        let logits = ndarray::arr2(&[[0.9_f32], [0.5], [0.2], [0.7], [0.0], [0.6]]);
         let input_ids = vec![0_i64, 5, 99, 5, 1, 2];
         let mask = vec![1_i64, 1, 1, 1, 0, 1];
 

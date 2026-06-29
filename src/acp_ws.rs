@@ -623,7 +623,11 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
                         for h in hist {
                             g.next_seq += 1;
                             let seq = g.next_seq;
-                            let h_kind = h.get("type").and_then(Value::as_str).unwrap_or("unknown").to_string();
+                            let h_kind = h
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown")
+                                .to_string();
                             synthesized.push(AcpEvent {
                                 local_seq: seq,
                                 event_id: h.get("event_id").and_then(Value::as_u64),
@@ -712,7 +716,9 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
     if let Some(sid) = &session_id {
         if let Some(s) = g.live_sessions.get_mut(sid) {
             if let Value::Object(map) = s {
-                let history = map.entry("history".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+                let history = map
+                    .entry("history".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
                 if let Value::Array(arr) = history {
                     // Convert our envelope back to the daemon's internal event shape if possible
                     // but for now just push the payload. The daemon's history is a list of SessionEvent.

@@ -141,7 +141,12 @@ pub struct MultimodalConfig {
 
 impl Default for MultimodalConfig {
     fn default() -> Self {
-        Self { base_url: None, api_key: None, model: None, timeout_secs: 120 }
+        Self {
+            base_url: None,
+            api_key: None,
+            model: None,
+            timeout_secs: 120,
+        }
     }
 }
 
@@ -268,6 +273,7 @@ pub struct DreamingConfig {
     pub enabled: bool,
     pub interval_secs: u64,
     pub batch_size: usize,
+    pub concurrency: usize,
     pub source_id: String,
     pub target_source_id: String,
 }
@@ -278,6 +284,7 @@ impl Default for DreamingConfig {
             enabled: false,
             interval_secs: 3600,
             batch_size: 5,
+            concurrency: 1,
             source_id: "memory".to_owned(),
             target_source_id: "knowledge".to_owned(),
         }
@@ -458,14 +465,15 @@ impl AppConfig {
             chunking: {
                 let chunk_max_chars: usize = parse_env("RAG_CHUNK_MAX_CHARS", "1536")?;
                 let chunk_overlap_chars: usize = parse_env("RAG_CHUNK_OVERLAP_CHARS", "200")?;
-                ChunkingConfig { chunk_max_chars, chunk_overlap_chars }
+                ChunkingConfig {
+                    chunk_max_chars,
+                    chunk_overlap_chars,
+                }
             },
             manager: ManagerConfig {
                 enabled: parse_env("RAG_MANAGER_ENABLED", "false")?,
-                channel: env::var("RAG_MANAGER_CHANNEL")
-                    .unwrap_or_else(|_| "manager".to_owned()),
-                mention: env::var("RAG_MANAGER_MENTION")
-                    .unwrap_or_else(|_| "@manager".to_owned()),
+                channel: env::var("RAG_MANAGER_CHANNEL").unwrap_or_else(|_| "manager".to_owned()),
+                mention: env::var("RAG_MANAGER_MENTION").unwrap_or_else(|_| "@manager".to_owned()),
                 interval_secs: parse_env("RAG_MANAGER_INTERVAL_SECS", "300")?,
                 base_url: non_empty_var("RAG_MANAGER_API_BASE_URL")
                     .map(|v| v.trim_end_matches('/').to_owned()),
@@ -517,6 +525,7 @@ impl AppConfig {
                 enabled: parse_env("RAG_DREAMING_ENABLED", "false")?,
                 interval_secs: parse_env("RAG_DREAMING_INTERVAL_SECS", "3600")?,
                 batch_size: parse_env("RAG_DREAMING_BATCH_SIZE", "5")?,
+                concurrency: parse_env("RAG_DREAMING_CONCURRENCY", "1")?,
                 source_id: env::var("RAG_DREAMING_SOURCE_ID")
                     .unwrap_or_else(|_| "memory".to_owned()),
                 target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
@@ -536,8 +545,9 @@ impl AppConfig {
                 subject: non_empty_var("VAPID_SUBJECT"),
             },
             whisper: WhisperConfig {
-                ws_url: env::var("RAG_WHISPER_WS_URL")
-                    .unwrap_or_else(|_| "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned()),
+                ws_url: env::var("RAG_WHISPER_WS_URL").unwrap_or_else(|_| {
+                    "ws://whisper-slask-service.llm.svc.cluster.local/ws".to_owned()
+                }),
             },
         })
     }

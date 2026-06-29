@@ -92,10 +92,8 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let key = EncryptionKey::from_secret_str(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        )
-        .unwrap();
+        let key =
+            EncryptionKey::from_secret_str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         let pt = b"hello google oauth refresh token";
         let ct = key.encrypt(pt).unwrap();
         let back = key.decrypt(&ct).unwrap();
@@ -109,10 +107,8 @@ mod tests {
 
     #[test]
     fn rejects_tampered_ciphertext() {
-        let key = EncryptionKey::from_secret_str(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        )
-        .unwrap();
+        let key =
+            EncryptionKey::from_secret_str("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
         let mut ct = key.encrypt(b"abc").unwrap();
         ct.push('x');
         assert!(key.decrypt(&ct).is_err());

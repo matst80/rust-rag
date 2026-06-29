@@ -1,8 +1,8 @@
+use ignore::WalkBuilder;
 use rust_rag::code::chunker::analyze_file;
-use rust_rag::code::lang::{detect_lang, Lang};
+use rust_rag::code::lang::{Lang, detect_lang};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use ignore::WalkBuilder;
 
 fn main() -> anyhow::Result<()> {
     let root = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
@@ -34,7 +34,11 @@ fn main() -> anyhow::Result<()> {
         {
             continue;
         }
-        let Some(rel) = p.strip_prefix(&root).ok().map(|r| r.to_string_lossy().to_string()) else {
+        let Some(rel) = p
+            .strip_prefix(&root)
+            .ok()
+            .map(|r| r.to_string_lossy().to_string())
+        else {
             continue;
         };
         let lang = detect_lang(Path::new(&rel));
@@ -70,7 +74,10 @@ fn main() -> anyhow::Result<()> {
 
     println!("files scanned: {files}");
     println!("chunks total : {chunks_total}");
-    println!("avg/file     : {:.1}", chunks_total as f64 / files.max(1) as f64);
+    println!(
+        "avg/file     : {:.1}",
+        chunks_total as f64 / files.max(1) as f64
+    );
     println!("--- size buckets ---");
     for (k, v) in &size_buckets {
         println!("  {k:>8}: {v}");

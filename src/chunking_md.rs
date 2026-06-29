@@ -89,7 +89,11 @@ fn collect_headings(text: &str) -> Vec<Heading> {
                 if let Some((offset, level, title)) = current.take() {
                     let title = title.trim().to_owned();
                     if !title.is_empty() {
-                        out.push(Heading { byte_offset: offset, level, title });
+                        out.push(Heading {
+                            byte_offset: offset,
+                            level,
+                            title,
+                        });
                     }
                 }
             }
@@ -152,7 +156,12 @@ mod tests {
                     alpha beta gamma delta epsilon zeta eta theta iota kappa";
         let chunks = chunker.chunks(text);
         assert!(chunks.len() >= 3, "got {} chunks", chunks.len());
-        assert!(chunks.iter().enumerate().all(|(i, c)| c.position == i as i32));
+        assert!(
+            chunks
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.position == i as i32)
+        );
     }
 
     #[test]
