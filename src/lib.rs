@@ -3,7 +3,6 @@ pub mod acp_ws;
 pub mod api;
 pub mod chunking_md;
 pub mod cms;
-pub mod code;
 pub mod config;
 pub mod crypto;
 pub mod db;

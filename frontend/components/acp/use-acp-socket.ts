@@ -32,6 +32,8 @@ export function useAcpSocket() {
 	const [drafts, setDrafts] = useState<Record<string, string>>({})
 	const [sidebarOpen, setSidebarOpen] = useState(true)
 	const [isDesktop, setIsDesktop] = useState(false)
+	const [filePreview, setFilePreview] = useState<{ path: string; content: string; startLine: number; totalLines: number } | null>(null)
+	const [suggestions, setSuggestions] = useState<{ query: string; directories?: string[]; files?: string[] } | null>(null)
 
 	const wsRef = useRef<WebSocket | null>(null)
 	const reconnectAttemptRef = useRef(0)
@@ -325,6 +327,26 @@ export function useAcpSocket() {
 				}
 			}
 
+			if (k === "directory_suggestions" || k === "directorysuggestions") {
+				const query = payload["query"] as string
+				const dirs = (payload["directories"] as any[])?.map(d => d.path)
+				setSuggestions(prev => ({ ...prev, query, directories: dirs }))
+			}
+
+			if (k === "find_files_result" || k === "findfilesresult") {
+				const query = payload["query"] as string
+				const files = payload["files"] as string[]
+				setSuggestions(prev => ({ ...prev, query, files }))
+			}
+
+			if (k === "read_file_result" || k === "readfileresult") {
+				const path = payload["path"] as string
+				const content = payload["content"] as string
+				const startLine = (payload["start_line"] as number) || 1
+				const totalLines = (payload["total_lines"] as number) || 0
+				setFilePreview({ path, content, startLine, totalLines })
+			}
+
 			if (k === "clipboard_updated" || k === "clipboardupdated") {
 				const content = payload["content"] as string
 				const source = payload["source"] as string
@@ -404,6 +426,18 @@ export function useAcpSocket() {
 		}
 	}, [])
 
+	const listDirectories = useCallback((sid: string | null, query: string) => {
+		send({ type: "list_directories", session_id: sid, query })
+	}, [send])
+
+	const findFiles = useCallback((sid: string | null, query: string) => {
+		send({ type: "find_files", session_id: sid, query })
+	}, [send])
+
+	const readFile = useCallback((sid: string | null, path: string, startLine?: number, lineCount?: number) => {
+		send({ type: "read_file", session_id: sid, path, start_line: startLine, line_count: lineCount })
+	}, [send])
+
 	useEffect(() => {
 		const isD = window.innerWidth >= 768
 		setIsDesktop(isD)
@@ -471,5 +505,11 @@ export function useAcpSocket() {
 		sidebarOpen,
 		setSidebarOpen,
 		isDesktop,
+		filePreview,
+		setFilePreview,
+		suggestions,
+		listDirectories,
+		findFiles,
+		readFile,
 	}
 }

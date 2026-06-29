@@ -7,10 +7,12 @@ import { timeOf } from "./utils"
 
 export const BlockView = memo(function BlockView({ 
     block, 
-    sessionAgent 
+    sessionAgent,
+    onReadFile
 }: { 
     block: Block; 
-    sessionAgent?: string 
+    sessionAgent?: string;
+    onReadFile?: (path: string) => void;
 }) {
 	if (block.kind === "user") {
 		return (
@@ -97,8 +99,19 @@ export const BlockView = memo(function BlockView({
 					</span>
 				</div>
 				{block.locations && block.locations.length > 0 && (
-					<div className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
-						{block.locations.join(" · ")}
+					<div className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-[10px] text-muted-foreground font-mono">
+						{block.locations.map((loc, i) => {
+							const path = loc.split(":")[0];
+							return (
+								<button
+									key={i}
+									onClick={() => onReadFile?.(path)}
+									className="hover:text-primary hover:underline transition-colors text-left"
+								>
+									{loc}
+								</button>
+							);
+						})}
 					</div>
 				)}
 				{block.content && (

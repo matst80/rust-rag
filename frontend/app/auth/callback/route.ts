@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server"
 import { NextResponse } from "next/server"
 import { getAuthConfig } from "@/lib/auth/config"
-import { setSessionCookie } from "@/lib/auth/session"
+import { setRefreshCookie, setSessionCookie } from "@/lib/auth/session"
 import { exchangeCodeForToken, getDiscoveryDocument, verifyIdToken } from "@/lib/auth/zitadel"
 
 export const runtime = "nodejs"
@@ -52,16 +52,22 @@ export async function GET(request: NextRequest) {
 
 		const response = NextResponse.redirect(new URL(returnTo, config.appBaseUrl))
 
-		await setSessionCookie(
-			response,
-			{
-				sub: user.sub,
-				name: user.name,
-				email: user.email,
-				preferred_username: user.preferred_username,
-			},
-			config.sessionMaxAgeSeconds
-		)
+		const userSession = {
+			sub: user.sub,
+			name: user.name,
+			email: user.email,
+			preferred_username: user.preferred_username,
+		}
+
+		await setSessionCookie(response, userSession, config.sessionMaxAgeSeconds)
+
+		if (tokenResponse.refresh_token) {
+			await setRefreshCookie(
+				response,
+				{ refresh_token: tokenResponse.refresh_token, user: userSession },
+				config.refreshMaxAgeSeconds
+			)
+		}
 
 		clearTemporaryCookies(response)
 

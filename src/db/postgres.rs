@@ -184,10 +184,6 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../migrations/0014_push_subscriptions.sql"),
     ),
     (
-        "0015_code_ingestion",
-        include_str!("../../migrations/0015_code_ingestion.sql"),
-    ),
-    (
         "0016_graph_edge_sort_order",
         include_str!("../../migrations/0016_graph_edge_sort_order.sql"),
     ),

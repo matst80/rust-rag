@@ -1,6 +1,6 @@
 "use client";
 
-import { Menu, Bot, Terminal as TerminalIcon, Link2, Plus, Trash2, X } from "lucide-react";
+import { Menu, Bot, Terminal as TerminalIcon, Link2, Plus, Trash2, X, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface AgentChatHeaderProps {
@@ -12,6 +12,7 @@ interface AgentChatHeaderProps {
   isTelegramBound?: boolean;
   viewMode: "chat" | "terminal";
   setViewMode: (mode: "chat" | "terminal") => void;
+  onSearch?: () => void;
   onCreateTerminal?: () => void;
   onTerminate?: () => void;
   isStandalone?: boolean;
@@ -26,6 +27,7 @@ export function AgentChatHeader({
   isTelegramBound,
   viewMode,
   setViewMode,
+  onSearch,
   onCreateTerminal,
   onTerminate,
   isStandalone = false,
@@ -62,6 +64,17 @@ export function AgentChatHeader({
         )}
       </div>
       <div className="flex items-center gap-1">
+        {onSearch && (
+          <button
+            type="button"
+            onClick={onSearch}
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            title="Search Files (Ctrl+P)"
+          >
+            <Search className="size-4" />
+          </button>
+        )}
+
         {!isStandalone && onBindTelegram && (
           <button
             type="button"

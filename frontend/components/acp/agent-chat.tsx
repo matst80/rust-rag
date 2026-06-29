@@ -17,6 +17,8 @@ import { ChatMessages } from "./chat-messages";
 import { AgentChatPrompt } from "./agent-chat-prompt";
 import { AgentTerminal } from "./agent-terminal";
 import { PendingPermissions } from "./pending-permissions";
+import { FilePreview } from "./file-preview";
+import { QuickSearch } from "./quick-search";
 
 export function AgentChat() {
   const {
@@ -42,12 +44,31 @@ export function AgentChat() {
     setDraft,
     sidebarOpen,
     setSidebarOpen,
+    filePreview,
+    setFilePreview,
+    readFile,
+    listDirectories,
+    findFiles,
+    suggestions,
   } = useAcpSocket();
 
   const [terminalFullScreen, setTerminalFullScreen] = useState<
     Record<string, boolean>
   >({});
   const [activeStandaloneTerminalId, setActiveStandaloneTerminalId] = useState<string | null>(null);
+
+  const [isFileSearchOpen, setIsFileSearchOpen] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "p") {
+        e.preventDefault();
+        setIsFileSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const active = activeSessionId ? sessions[activeSessionId] : null;
   const draft = activeSessionId ? (drafts[activeSessionId] ?? "") : "";
@@ -306,67 +327,91 @@ export function AgentChat() {
               isTelegramBound={active?.thread_id != null && active.thread_id > 0}
               viewMode={(viewMode[activeSessionId!] as "chat" | "terminal") ?? "chat"}
               setViewMode={(mode) => setViewMode({ ...viewMode, [activeSessionId!]: mode })}
+              onSearch={() => setIsFileSearchOpen(true)}
               onCreateTerminal={() => activeSessionId && createTerminal(activeSessionId)}
               onTerminate={terminateSession}
             />
 
             {/* CONTENT AREA */}
             <ResizablePanelGroup
-              direction="vertical"
+              direction="horizontal"
               className="flex-1 min-h-0"
             >
-              {/* CHAT THREAD (Top section) */}
-              <ResizablePanel
-                defaultSize={60}
-                minSize={20}
-                className={cn(
-                  "flex flex-col",
-                  activeSessionId &&
-                    terminalFullScreen[activeSessionId] &&
-                    "hidden",
-                )}
-              >
-                <ChatMessages
-                  blocks={blocks}
-                  agentCommand={active?.agent_command}
-                />
-              </ResizablePanel>
-
-              {/* TERMINAL HANDLE */}
-              {activeSessionId &&
-                viewMode[activeSessionId] === "terminal" &&
-                activeTerminalId[activeSessionId] &&
-                !terminalFullScreen[activeSessionId] && (
-                  <ResizableHandle withHandle />
-                )}
-
-              {/* TERMINAL SECTION (Resizable Middle section) */}
-              {activeSessionId &&
-                viewMode[activeSessionId] === "terminal" &&
-                activeTerminalId[activeSessionId] && (
+              <ResizablePanel defaultSize={filePreview ? 60 : 100} minSize={30}>
+                <ResizablePanelGroup
+                  direction="vertical"
+                  className="h-full"
+                >
+                  {/* CHAT THREAD (Top section) */}
                   <ResizablePanel
-                    defaultSize={terminalFullScreen[activeSessionId] ? 100 : 40}
-                    minSize={10}
-                    className="flex flex-col"
+                    defaultSize={60}
+                    minSize={20}
+                    className={cn(
+                      "flex flex-col",
+                      activeSessionId &&
+                      terminalFullScreen[activeSessionId] &&
+                      "hidden",
+                    )}
                   >
-                    <AgentTerminal
-                      terminalId={activeTerminalId[activeSessionId]!}
-                      isFullScreen={terminalFullScreen[activeSessionId]}
-                      onToggleFullScreen={() => setTerminalFullScreen({
-                        ...terminalFullScreen,
-                        [activeSessionId]: !terminalFullScreen[activeSessionId],
-                      })}
-                      onClose={() => closeTerminal(activeTerminalId[activeSessionId]!)}
-                      onInput={(data) => onTerminalInput(activeTerminalId[activeSessionId]!, data)}
-                      onResize={(cols, rows) => onTerminalResize(activeTerminalId[activeSessionId]!, cols, rows)}
-                      onAttach={(cols, rows) => onTerminalAttach(activeTerminalId[activeSessionId]!, cols, rows)}
-                      sessionTerminals={sessionTerminals[activeSessionId]}
-                      activeTerminalId={activeTerminalId[activeSessionId]}
-                      onSelectTerminal={(tid) => setActiveTerminalId({ ...activeTerminalId, [activeSessionId]: tid })}
-                      onShowChat={() => setViewMode({ ...viewMode, [activeSessionId]: "chat" })}
+                    <ChatMessages
+                      blocks={blocks}
+                      agentCommand={active?.agent_command}
+                      onReadFile={(path) => readFile(activeSessionId, path)}
                     />
                   </ResizablePanel>
-                )}
+
+                  {/* TERMINAL HANDLE */}
+                  {activeSessionId &&
+                    viewMode[activeSessionId] === "terminal" &&
+                    activeTerminalId[activeSessionId] &&
+                    !terminalFullScreen[activeSessionId] && (
+                      <ResizableHandle withHandle />
+                    )}
+
+                  {/* TERMINAL SECTION (Resizable Middle section) */}
+                  {activeSessionId &&
+                    viewMode[activeSessionId] === "terminal" &&
+                    activeTerminalId[activeSessionId] && (
+                      <ResizablePanel
+                        defaultSize={terminalFullScreen[activeSessionId] ? 100 : 40}
+                        minSize={10}
+                        className="flex flex-col"
+                      >
+                        <AgentTerminal
+                          terminalId={activeTerminalId[activeSessionId]!}
+                          isFullScreen={terminalFullScreen[activeSessionId]}
+                          onToggleFullScreen={() => setTerminalFullScreen({
+                            ...terminalFullScreen,
+                            [activeSessionId]: !terminalFullScreen[activeSessionId],
+                          })}
+                          onClose={() => closeTerminal(activeTerminalId[activeSessionId]!)}
+                          onInput={(data) => onTerminalInput(activeTerminalId[activeSessionId]!, data)}
+                          onResize={(cols, rows) => onTerminalResize(activeTerminalId[activeSessionId]!, cols, rows)}
+                          onAttach={(cols, rows) => onTerminalAttach(activeTerminalId[activeSessionId]!, cols, rows)}
+                          sessionTerminals={sessionTerminals[activeSessionId]}
+                          activeTerminalId={activeTerminalId[activeSessionId]}
+                          onSelectTerminal={(tid) => setActiveTerminalId({ ...activeTerminalId, [activeSessionId]: tid })}
+                          onShowChat={() => setViewMode({ ...viewMode, [activeSessionId]: "chat" })}
+                        />
+                      </ResizablePanel>
+                    )}
+                </ResizablePanelGroup>
+              </ResizablePanel>
+
+              {filePreview && (
+                <>
+                  <ResizableHandle withHandle />
+                  <ResizablePanel defaultSize={40} minSize={20}>
+                    <FilePreview
+                      path={filePreview.path}
+                      content={filePreview.content}
+                      startLine={filePreview.startLine}
+                      totalLines={filePreview.totalLines}
+                      onClose={() => setFilePreview(null)}
+                    />
+                  </ResizablePanel>
+                </>
+              )}
             </ResizablePanelGroup>
 
             <PendingPermissions pendingPermissions={pendingForActive} />
@@ -380,15 +425,49 @@ export function AgentChat() {
               connStatus={conn.status}
               availableCommands={availableCommands}
               placeholder={`Message ${active?.name || (activeSessionId ? activeSessionId.slice(0, 8) : "")}…`}
+              listDirectories={(q) => listDirectories(activeSessionId, q)}
+              findFiles={(q) => findFiles(activeSessionId, q)}
+              suggestions={suggestions}
             />
           </div>
         )}
       </section>
 
+      {isFileSearchOpen && (
+        <QuickSearch
+          onSearch={(q) => {
+            if (q.endsWith("/")) {
+              listDirectories(activeSessionId, q);
+            } else {
+              findFiles(activeSessionId, q);
+            }
+          }}
+          suggestions={suggestions}
+          onSelect={(path, type) => {
+            if (type === "file") {
+              readFile(activeSessionId, path);
+            } else {
+              // For directories, we could spawn a terminal or just update the search
+              // Let's just spawn a terminal if user selects a dir for now
+              send({
+                type: "create_terminal",
+                cwd: path,
+                cols: 120,
+                rows: 24,
+              });
+            }
+            setIsFileSearchOpen(false);
+          }}
+          onClose={() => setIsFileSearchOpen(false)}
+        />
+      )}
+
       {isSpawnDialogOpen && (
         <SpawnDialog
           projects={projects}
           defaultTerminalOnly={spawnDialogTerminalOnly}
+          onSearchDirectories={(q) => listDirectories(null, q)}
+          suggestions={suggestions}
           onSpawn={(path, cmd) => {
             if (cmd) {
               send({

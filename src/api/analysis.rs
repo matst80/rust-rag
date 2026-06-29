@@ -24,39 +24,61 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
-const SYSTEM_PROMPT: &str = r#"You analyze a NEW knowledge-base entry against existing NEIGHBOR entries and output a single JSON object.
-
-RELATIONS (always: NEW relates to NEIGHBOR):
-- agrees: NEW states same fact as neighbor, no new info
-- refines: NEW adds detail to a fact in neighbor; both still true
-- supersedes: neighbor is outdated/obsolete; NEW is the new truth
-- contradicts: facts conflict; cannot both be true (and neighbor is not just stale)
-- duplicates: essentially the same entry
-- unrelated: different topics
-
-Heuristics:
-- If NEW just ADDS DETAIL but neighbor is still true → refines (NOT supersedes).
-- If neighbor has freshness=stale or historical and NEW conflicts → supersedes.
-- If neighbor is current and NEW conflicts → contradicts.
-
-Examples:
-NEW: 'service uses Postgres 15'
-- NEIGHBOR 'service uses Postgres' → refines
-- NEIGHBOR 'service uses MySQL' (current) → contradicts
-- NEIGHBOR 'service uses Postgres 14' (stale) → supersedes
-
-Output JSON ONLY, no prose, matching this shape:
+/// Pass 1: summary metadata only. Input is the new entry text — no
+/// neighbors, no graph context. Cheap, parallel.
+const SUMMARY_PROMPT: &str = r#"You classify and summarize a knowledge-base entry. Output JSON only:
 {
-  "verdicts": [{"target_id": "<id>", "relation": "agrees|contradicts|supersedes|refines|duplicates|unrelated", "confidence": 0.0, "reason": "..."}],
-  "suggested_edges": [{"target_id": "<id>", "rel": "related|refines|supersedes|contradicts", "weight": 0.0}],
-  "cluster_hint": "kebab-case-slug",
-  "tags": ["..."],
   "title": "one line",
   "summary": "1-2 sentences",
+  "tags": ["lowercase-kebab", ...],
+  "cluster_hint": "kebab-case-slug",
   "doc_type": "decision|architecture|todo|note|incident|reference",
   "freshness": "current|stale|historical",
   "quality": {"score": 0.0, "issues": ["..."]}
-}"#;
+}
+No prose, no commentary."#;
+
+/// Pass 2: near-duplicate / replacement check. Neighbors are tight matches
+/// (low distance). Each carries `created` and `updated` timestamps so the
+/// model can reason about which entry is newer when facts conflict. Output
+/// is focused on agrees/refines/supersedes/contradicts/duplicates.
+const CLOSE_PROMPT: &str = r#"You compare a NEW knowledge-base entry against tightly-similar NEIGHBOR entries. The entries are already known to be on the same topic; decide the precise relation for each.
+
+RELATIONS (NEW vs NEIGHBOR):
+- agrees: same fact, no new info
+- refines: NEW adds detail; neighbor still true
+- supersedes: neighbor outdated/obsolete; NEW is the new truth
+- contradicts: facts conflict; cannot both be true (and neighbor is not just stale)
+- duplicates: essentially the same entry
+
+DATE HEURISTICS (each neighbor has created/updated; NEW is brand new = now):
+- If neighbor is OLDER and facts conflict → likely supersedes.
+- If neighbor was UPDATED RECENTLY and facts conflict → likely contradicts.
+- If neighbor has freshness=stale/historical and facts conflict → supersedes.
+- A small detail added on top of an older fact → refines, not supersedes.
+
+Output JSON only:
+{
+  "verdicts": [{"target_id": "<id>", "relation": "agrees|refines|supersedes|contradicts|duplicates", "confidence": 0.0, "reason": "..."}],
+  "suggested_edges": [{"target_id": "<id>", "rel": "refines|supersedes|contradicts|related", "weight": 0.0}]
+}
+Use the exact id strings from the neighbor list. Skip neighbors that turn out unrelated — do not emit a verdict for them."#;
+
+/// Pass 3: loose-similarity discovery. Neighbors are in the outer band —
+/// embedding said "kinda similar" but not duplicate-close. Goal: surface
+/// non-obvious connections (shared concept, cross-reference, prerequisite)
+/// that pure similarity would miss.
+const LOOSE_PROMPT: &str = r#"You scan a NEW knowledge-base entry against loosely-similar NEIGHBOR entries. Most will be unrelated. Find the FEW that have a real conceptual link the embedding alone would miss (shared system, prerequisite, cross-reference, same incident).
+
+Output JSON only:
+{
+  "suggested_edges": [{"target_id": "<id>", "rel": "related|refines", "weight": 0.0}]
+}
+Rules:
+- Only emit an edge when the link is real. Empty list is the correct answer when nothing connects.
+- Do not emit supersedes/contradicts here — distance is too high for those.
+- weight in [0,1]: how confident the link is.
+Use exact id strings from the neighbor list."#;
 
 /// Output of a single analysis pass. All fields tolerant: missing → default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -177,7 +199,11 @@ pub async fn analyze_endpoint(
     Ok(Json(analysis))
 }
 
-/// Public entry point: embed, fetch neighbors, prompt the LLM, parse.
+/// Public entry point: embed, fetch neighbors, run three LLM passes in
+/// parallel (summary / close-similar / loose-similar) and merge into one
+/// [`StoreAnalysis`]. Each pass hits a (possibly different) backend URL
+/// from `analysis.base_urls` via round-robin, so multiple slower LLM
+/// instances can share the load.
 #[tracing::instrument(
     name = "analysis.run",
     skip(state, text),
@@ -185,6 +211,8 @@ pub async fn analyze_endpoint(
         text_len = text.len(),
         source_id = source_id.unwrap_or("*"),
         neighbors_found = tracing::field::Empty,
+        close_count = tracing::field::Empty,
+        loose_count = tracing::field::Empty,
         llm_ms = tracing::field::Empty,
         verdicts = tracing::field::Empty,
         tags = tracing::field::Empty,
@@ -200,15 +228,71 @@ pub async fn run_analysis(
     let neighbors = fetch_neighbors(state, text, source_id, exclude_id).await?;
     span.record("neighbors_found", neighbors.len());
 
-    let user_prompt = build_user_prompt(text, &neighbors);
+    let close_threshold = state.analysis.close_threshold;
+    let (close, loose): (Vec<_>, Vec<_>) = neighbors
+        .into_iter()
+        .partition(|h| h.distance <= close_threshold);
+    span.record("close_count", close.len());
+    span.record("loose_count", loose.len());
+
     let started = std::time::Instant::now();
-    let raw = call_llm(state, SYSTEM_PROMPT, &user_prompt).await?;
+
+    let summary_prompt = build_summary_prompt(text);
+    let close_prompt_opt = if close.is_empty() {
+        None
+    } else {
+        Some(build_close_prompt(text, &close))
+    };
+    let loose_prompt_opt = if loose.is_empty() {
+        None
+    } else {
+        Some(build_loose_prompt(text, &loose))
+    };
+
+    let summary_fut = call_llm(state, SUMMARY_PROMPT, &summary_prompt);
+    let close_fut = async {
+        match close_prompt_opt.as_deref() {
+            Some(p) => call_llm(state, CLOSE_PROMPT, p).await.map(Some),
+            None => Ok(None),
+        }
+    };
+    let loose_fut = async {
+        match loose_prompt_opt.as_deref() {
+            Some(p) => call_llm(state, LOOSE_PROMPT, p).await.map(Some),
+            None => Ok(None),
+        }
+    };
+
+    let (summary_raw, close_raw, loose_raw) = tokio::try_join!(summary_fut, close_fut, loose_fut)?;
     span.record("llm_ms", started.elapsed().as_millis() as i64);
 
-    let parsed = parse_analysis(&raw);
-    span.record("verdicts", parsed.verdicts.len());
-    span.record("tags", parsed.tags.len());
-    Ok(parsed)
+    let mut merged = parse_analysis(&summary_raw);
+    // The summary call doesn't emit verdicts/edges; clear any stray ones a
+    // chatty model returned so we don't double-count downstream.
+    merged.verdicts.clear();
+    merged.suggested_edges.clear();
+
+    let mut raw_parts = vec![format!("SUMMARY:\n{summary_raw}")];
+
+    if let Some(raw) = close_raw {
+        let close_parsed = parse_analysis(&raw);
+        merged.verdicts.extend(close_parsed.verdicts);
+        merged.suggested_edges.extend(close_parsed.suggested_edges);
+        raw_parts.push(format!("CLOSE:\n{raw}"));
+    }
+    if let Some(raw) = loose_raw {
+        let loose_parsed = parse_analysis(&raw);
+        // Loose pass: edges only. Drop any verdicts the model snuck in;
+        // distance is too high to trust supersedes/contradicts here.
+        merged.suggested_edges.extend(loose_parsed.suggested_edges);
+        raw_parts.push(format!("LOOSE:\n{raw}"));
+    }
+
+    merged.raw = Some(raw_parts.join("\n\n---\n\n"));
+
+    span.record("verdicts", merged.verdicts.len());
+    span.record("tags", merged.tags.len());
+    Ok(merged)
 }
 
 #[tracing::instrument(name = "analysis.fetch_neighbors", skip(state, text))]
@@ -252,34 +336,90 @@ async fn fetch_neighbors(
     Ok(hits)
 }
 
-fn build_user_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
+fn build_summary_prompt(new_text: &str) -> String {
+    let mut out = String::with_capacity(new_text.len() + 64);
+    out.push_str("ENTRY:\n");
+    out.push_str(new_text.trim());
+    out.push_str("\n\nReturn JSON only matching the schema.");
+    out
+}
+
+fn build_close_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut out = String::new();
+    out.push_str("NEW ENTRY (just authored, treat as 'now'):\n");
+    out.push_str(new_text.trim());
+    out.push_str("\n\nTIGHTLY-SIMILAR NEIGHBORS:\n");
+    for (i, hit) in neighbors.iter().enumerate() {
+        let preview: String = hit
+            .text
+            .chars()
+            .take(500)
+            .collect::<String>()
+            .replace('\n', " ");
+        let freshness = hit
+            .metadata
+            .get("freshness")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        out.push_str(&format!(
+            "[{}] id={} src={} freshness={} dist={:.3} created={} updated={}\n{}\n\n",
+            i,
+            hit.id,
+            hit.source_id,
+            freshness,
+            hit.distance,
+            format_age(hit.created_at, now_ms),
+            format_age(hit.updated_at, now_ms),
+            preview
+        ));
+    }
+    out.push_str("Return JSON only. Use exact ids (no brackets). Skip unrelated neighbors entirely.");
+    out
+}
+
+fn build_loose_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
     let mut out = String::new();
     out.push_str("NEW ENTRY:\n");
     out.push_str(new_text.trim());
-    out.push_str("\n\nNEIGHBORS:\n");
-    if neighbors.is_empty() {
-        out.push_str("(no semantically similar neighbors found)\n");
-    } else {
-        for (i, hit) in neighbors.iter().enumerate() {
-            let preview: String = hit
-                .text
-                .chars()
-                .take(400)
-                .collect::<String>()
-                .replace('\n', " ");
-            let freshness = hit
-                .metadata
-                .get("freshness")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            out.push_str(&format!(
-                "[{}] id={} src={} freshness={} dist={:.3}\n{}\n\n",
-                i, hit.id, hit.source_id, freshness, hit.distance, preview
-            ));
-        }
+    out.push_str("\n\nLOOSELY-SIMILAR NEIGHBORS (embedding distance is moderate; many will be unrelated):\n");
+    for (i, hit) in neighbors.iter().enumerate() {
+        let preview: String = hit
+            .text
+            .chars()
+            .take(300)
+            .collect::<String>()
+            .replace('\n', " ");
+        out.push_str(&format!(
+            "[{}] id={} src={} dist={:.3}\n{}\n\n",
+            i, hit.id, hit.source_id, hit.distance, preview
+        ));
     }
-    out.push_str("Return JSON only matching the schema. Use the exact id strings from above (without brackets).");
+    out.push_str("Return JSON only. Empty suggested_edges is the right answer when nothing connects.");
     out
+}
+
+/// Render a stored epoch-millis timestamp as a human-friendly relative age
+/// (e.g. `3d ago`, `2h ago`). The LLM reads this; absolute ms would just
+/// be noise. Returns `"unknown"` for zero/missing timestamps.
+fn format_age(ts_ms: i64, now_ms: i64) -> String {
+    if ts_ms <= 0 {
+        return "unknown".to_owned();
+    }
+    let delta_ms = (now_ms - ts_ms).max(0);
+    let secs = delta_ms / 1000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 /// Settings for one `chat/completions` call, independent of `AppState`.
@@ -439,8 +579,7 @@ pub(crate) async fn call_llm(
 ) -> Result<String> {
     let cfg = &state.analysis;
     let base_url = cfg
-        .base_url
-        .as_deref()
+        .pick_base_url()
         .ok_or_else(|| anyhow!("analysis base_url missing"))?;
     let model = cfg
         .model

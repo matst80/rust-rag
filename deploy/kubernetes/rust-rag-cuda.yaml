@@ -105,9 +105,10 @@ data:
   RAG_ANALYSIS_ENABLED: "true"
   RAG_ANALYSIS_BASE_URL: "http://10.10.11.135:8082/v1"
   RAG_ANALYSIS_MODEL: "unsloth/Qwen3.5-4B-GGUF"
-  RAG_ANALYSIS_TIMEOUT_SECS: "30"
-  RAG_ANALYSIS_MAX_NEIGHBORS: "8"
-  RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.65"
+  RAG_ANALYSIS_TIMEOUT_SECS: "60"
+  RAG_ANALYSIS_MAX_NEIGHBORS: "4"
+  RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.6"
+  RAG_CODE_ENABLED: "false"
   ## Ontology worker — pulls items with `ontology_status=pending`, embeds
   ## them, asks the analysis LLM (preferred) or the chat LLM to extract
   ## typed edges against neighbors, and writes them to the graph table.

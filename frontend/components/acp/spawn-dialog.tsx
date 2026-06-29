@@ -8,6 +8,8 @@ interface SpawnDialogProps {
 	onSpawn: (projectPath: string, agentCommand: string) => void
 	onCancel: () => void
 	defaultTerminalOnly?: boolean
+	onSearchDirectories?: (query: string) => void
+	suggestions?: { query: string; directories?: string[] } | null
 }
 
 export const SpawnDialog = memo(function SpawnDialog({
@@ -15,6 +17,8 @@ export const SpawnDialog = memo(function SpawnDialog({
 	onSpawn,
 	onCancel,
 	defaultTerminalOnly = false,
+	onSearchDirectories,
+	suggestions,
 }: SpawnDialogProps) {
 	const [projectPath, setProjectPath] = useState("")
 	const [agentCommand, setAgentCommand] = useState("")
@@ -22,11 +26,27 @@ export const SpawnDialog = memo(function SpawnDialog({
 	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
 	const [projectPickerHighlight, setProjectPickerHighlight] = useState(0)
 
+	useEffect(() => {
+		if (projectPath.length > 1 && onSearchDirectories) {
+			onSearchDirectories(projectPath)
+		}
+	}, [projectPath, onSearchDirectories])
+
 	const filtered = projects.filter((p) =>
 		p.path.toLowerCase().includes(projectPath.toLowerCase()) ||
 		p.name.toLowerCase().includes(projectPath.toLowerCase())
 	)
-	const max = filtered.length
+
+	const remoteSuggestions = (suggestions?.query === projectPath ? suggestions.directories : []) || []
+	
+	const items = [
+		...filtered.map(p => ({ path: p.path, name: p.name, type: "project" })),
+		...remoteSuggestions
+			.filter(path => !projects.some(p => p.path === path))
+			.map(path => ({ path, name: path.split("/").pop() || path, type: "remote" }))
+	]
+
+	const max = items.length
 
 	return (
 		<div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
@@ -60,7 +80,7 @@ export const SpawnDialog = memo(function SpawnDialog({
 							setProjectPickerHighlight(0)
 						}}
 						onFocus={() => {
-							if (projects.length > 0) setProjectPickerOpen(true)
+							setProjectPickerOpen(true)
 						}}
 						onBlur={() => {
 							window.setTimeout(() => setProjectPickerOpen(false), 120)
@@ -74,7 +94,7 @@ export const SpawnDialog = memo(function SpawnDialog({
 								e.preventDefault()
 								setProjectPickerHighlight((i) => (i - 1 + max) % max)
 							} else if (e.key === "Enter") {
-								const pick = filtered[projectPickerHighlight]
+								const pick = items[projectPickerHighlight]
 								if (pick) {
 									e.preventDefault()
 									setProjectPath(pick.path)
@@ -84,13 +104,13 @@ export const SpawnDialog = memo(function SpawnDialog({
 								setProjectPickerOpen(false)
 							}
 						}}
-						placeholder="/abs/path or filter projects…"
+						placeholder="/abs/path or search directories…"
 						className="w-full font-mono text-xs bg-background border border-border px-2 py-2 outline-none focus:border-primary/50 transition-colors"
 						autoComplete="off"
 					/>
-					{projectPickerOpen && filtered.length > 0 && (
+					{projectPickerOpen && items.length > 0 && (
 						<ul className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto border border-border bg-background shadow-lg no-scrollbar">
-							{filtered.map((p, i) => (
+							{items.map((p, i) => (
 								<li
 									key={p.path}
 									onMouseDown={(e) => {
@@ -106,7 +126,12 @@ export const SpawnDialog = memo(function SpawnDialog({
 											: "hover:bg-muted/40",
 									)}
 								>
-									<div className="truncate font-medium">{p.name}</div>
+									<div className="flex items-center justify-between">
+										<div className="truncate font-medium">{p.name}</div>
+										{p.type === "remote" && (
+											<div className="text-[8px] uppercase tracking-tighter opacity-40">remote</div>
+										)}
+									</div>
 									<div className="truncate text-[10px] text-muted-foreground">
 										{p.path}
 									</div>

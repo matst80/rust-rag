@@ -11,6 +11,7 @@ export interface DiscoveryDocument {
 export interface ZitadelTokenResponse {
 	access_token: string
 	id_token: string
+	refresh_token?: string
 	token_type: string
 	expires_in: number
 	scope: string
@@ -62,6 +63,39 @@ export async function exchangeCodeForToken(
 	if (!response.ok) {
 		const error = await response.text()
 		throw new Error(`token exchange failed: ${error}`)
+	}
+
+	return response.json()
+}
+
+export async function refreshAccessToken(
+	refreshToken: string,
+	clientId: string,
+	clientSecret: string,
+	tokenEndpoint: string,
+	scope?: string
+): Promise<ZitadelTokenResponse> {
+	const params = new URLSearchParams({
+		grant_type: "refresh_token",
+		refresh_token: refreshToken,
+		client_id: clientId,
+		client_secret: clientSecret,
+	})
+	if (scope) {
+		params.set("scope", scope)
+	}
+
+	const response = await fetch(tokenEndpoint, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/x-www-form-urlencoded",
+		},
+		body: params.toString(),
+	})
+
+	if (!response.ok) {
+		const error = await response.text()
+		throw new Error(`token refresh failed: ${error}`)
 	}
 
 	return response.json()

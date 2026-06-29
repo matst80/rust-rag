@@ -1,6 +1,4 @@
 mod auth;
-pub mod code;
-pub mod code_store;
 mod graph;
 mod oauth_creds;
 pub mod postgres;

@@ -8,9 +8,10 @@ const NEAR_BOTTOM_PX = 80;
 interface ChatMessagesProps {
   blocks: any[];
   agentCommand?: string;
+  onReadFile?: (path: string) => void;
 }
 
-export function ChatMessages({ blocks, agentCommand }: ChatMessagesProps) {
+export function ChatMessages({ blocks, agentCommand, onReadFile }: ChatMessagesProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const wasNearBottomRef = useRef(true);
@@ -44,6 +45,7 @@ export function ChatMessages({ blocks, agentCommand }: ChatMessagesProps) {
           key={b.key}
           block={b}
           sessionAgent={agentCommand}
+          onReadFile={onReadFile}
         />
       ))}
       <div ref={messagesEndRef} />

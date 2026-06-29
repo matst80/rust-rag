@@ -5,6 +5,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,13 +237,26 @@ pub const fn default_manager_system_prompt() -> &'static str {
 #[derive(Debug, Clone)]
 pub struct AnalysisConfig {
     pub enabled: bool,
+    /// First configured base URL. Kept for backward compat with callers that
+    /// read a single endpoint (projection, ingest_url, main). Multi-URL
+    /// load balancing happens via `base_urls` + `pick_base_url`.
     pub base_url: Option<String>,
+    /// All configured base URLs (comma-separated `RAG_ANALYSIS_BASE_URL`).
+    /// Empty when nothing is configured.
+    pub base_urls: Vec<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub timeout_secs: u64,
     pub max_neighbors: usize,
+    /// Outer band: keep neighbors with `distance <= neighbor_threshold`.
     pub neighbor_threshold: f32,
+    /// Inner band: neighbors with `distance <= close_threshold` are treated
+    /// as near-duplicate candidates (refines/supersedes/contradicts). The
+    /// remainder (close_threshold < distance <= neighbor_threshold) feeds
+    /// the discovery pass for non-obvious links.
+    pub close_threshold: f32,
     pub cross_source: bool,
+    rr_counter: Arc<AtomicUsize>,
 }
 
 impl Default for AnalysisConfig {
@@ -247,19 +264,32 @@ impl Default for AnalysisConfig {
         Self {
             enabled: false,
             base_url: None,
+            base_urls: Vec::new(),
             api_key: None,
             model: None,
-            timeout_secs: 30,
-            max_neighbors: 8,
-            neighbor_threshold: 0.65,
+            timeout_secs: 60,
+            max_neighbors: 4,
+            neighbor_threshold: 0.6,
+            close_threshold: 0.35,
             cross_source: true,
+            rr_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 impl AnalysisConfig {
     pub fn is_configured(&self) -> bool {
-        self.enabled && self.base_url.is_some() && self.model.is_some()
+        self.enabled && !self.base_urls.is_empty() && self.model.is_some()
+    }
+
+    /// Round-robin one of the configured base URLs. Returns the single
+    /// `base_url` field if `base_urls` is empty (defensive).
+    pub fn pick_base_url(&self) -> Option<&str> {
+        if self.base_urls.is_empty() {
+            return self.base_url.as_deref();
+        }
+        let i = self.rr_counter.fetch_add(1, Ordering::Relaxed) % self.base_urls.len();
+        Some(self.base_urls[i].as_str())
     }
 }
 
@@ -490,19 +520,34 @@ impl AppConfig {
                 reconnect_initial_secs: parse_env("RAG_ACP_WS_RECONNECT_INITIAL_SECS", "1")?,
                 reconnect_max_secs: parse_env("RAG_ACP_WS_RECONNECT_MAX_SECS", "30")?,
             },
-            analysis: AnalysisConfig {
-                enabled: parse_env("RAG_ANALYSIS_ENABLED", "false")?,
-                base_url: non_empty_var("RAG_ANALYSIS_BASE_URL")
-                    .or_else(|| non_empty_var("RAG_OPENAI_API_BASE_URL"))
-                    .map(|v| v.trim_end_matches('/').to_owned()),
-                api_key: non_empty_var("RAG_ANALYSIS_API_KEY")
-                    .or_else(|| non_empty_var("RAG_OPENAI_API_KEY")),
-                model: non_empty_var("RAG_ANALYSIS_MODEL")
-                    .or_else(|| non_empty_var("RAG_OPENAI_MODEL")),
-                timeout_secs: parse_env("RAG_ANALYSIS_TIMEOUT_SECS", "30")?,
-                max_neighbors: parse_env("RAG_ANALYSIS_MAX_NEIGHBORS", "8")?,
-                neighbor_threshold: parse_env("RAG_ANALYSIS_NEIGHBOR_THRESHOLD", "0.65")?,
-                cross_source: parse_env("RAG_ANALYSIS_CROSS_SOURCE", "true")?,
+            analysis: {
+                let raw = non_empty_var("RAG_ANALYSIS_BASE_URL")
+                    .or_else(|| non_empty_var("RAG_OPENAI_API_BASE_URL"));
+                let base_urls: Vec<String> = raw
+                    .as_deref()
+                    .map(|s| {
+                        s.split(',')
+                            .map(|p| p.trim().trim_end_matches('/'))
+                            .filter(|p| !p.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                AnalysisConfig {
+                    enabled: parse_env("RAG_ANALYSIS_ENABLED", "false")?,
+                    base_url: base_urls.first().cloned(),
+                    base_urls,
+                    api_key: non_empty_var("RAG_ANALYSIS_API_KEY")
+                        .or_else(|| non_empty_var("RAG_OPENAI_API_KEY")),
+                    model: non_empty_var("RAG_ANALYSIS_MODEL")
+                        .or_else(|| non_empty_var("RAG_OPENAI_MODEL")),
+                    timeout_secs: parse_env("RAG_ANALYSIS_TIMEOUT_SECS", "60")?,
+                    max_neighbors: parse_env("RAG_ANALYSIS_MAX_NEIGHBORS", "4")?,
+                    neighbor_threshold: parse_env("RAG_ANALYSIS_NEIGHBOR_THRESHOLD", "0.6")?,
+                    close_threshold: parse_env("RAG_ANALYSIS_CLOSE_THRESHOLD", "0.35")?,
+                    cross_source: parse_env("RAG_ANALYSIS_CROSS_SOURCE", "true")?,
+                    rr_counter: Arc::new(AtomicUsize::new(0)),
+                }
             },
             ontology: OntologyConfig {
                 enabled: parse_env("RAG_ONTOLOGY_ENABLED", "false")?,

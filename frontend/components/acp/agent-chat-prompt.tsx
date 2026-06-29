@@ -14,6 +14,9 @@ interface AgentChatPromptProps {
   connStatus: string;
   availableCommands: any[];
   placeholder?: string;
+  listDirectories: (query: string) => void;
+  findFiles: (query: string) => void;
+  suggestions: { query: string; directories?: string[]; files?: string[] } | null;
 }
 
 export function AgentChatPrompt({
@@ -25,48 +28,74 @@ export function AgentChatPrompt({
   connStatus,
   availableCommands,
   placeholder,
+  listDirectories,
+  findFiles,
+  suggestions,
 }: AgentChatPromptProps) {
   const {
     acOpen,
     setAcOpen,
     acIndex,
-    filteredCommands,
+    items,
     acListRef,
     handleKeyDown,
   } = useAutocomplete({
     draft,
     availableCommands,
-    onSelect: (cmdName) => {
-      setDraft(`/${cmdName} `);
+    onSelect: (val) => {
+      if (val.startsWith("/") && !val.includes(" ")) {
+        setDraft(`${val} `);
+      } else {
+        setDraft(val);
+      }
       setAcOpen(false);
     },
+    listDirectories,
+    findFiles,
+    suggestions,
   });
 
   return (
     <div className="shrink-0 flex flex-col border-t border-border bg-background relative">
       {/* Autocomplete Menu */}
-      {acOpen && filteredCommands.length > 0 && (
-        <div className="absolute bottom-full left-0 w-64 bg-popover border border-border rounded-t-lg shadow-xl mb-1 z-50 overflow-hidden">
-          <div className="p-2 border-b border-border bg-muted/30">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Available Commands</span>
+      {acOpen && items.length > 0 && (
+        <div className="absolute bottom-full left-0 w-80 bg-popover border border-border rounded-t-lg shadow-xl mb-1 z-50 overflow-hidden">
+          <div className="p-2 border-b border-border bg-muted/30 flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              {items[0].type === "command" ? "Available Commands" : "Path Suggestions"}
+            </span>
           </div>
-          <ul ref={acListRef} className="max-h-48 overflow-y-auto py-1">
-            {filteredCommands.map((cmd, i) => (
-              <li key={cmd.name}>
+          <ul ref={acListRef} className="max-h-64 overflow-y-auto py-1">
+            {items.map((item, i) => (
+              <li key={i}>
                 <button
                   onClick={() => {
-                    setDraft(`/${cmd.name} `);
+                    if (item.type === "command") {
+                      setDraft(`/${item.name} `);
+                    } else {
+                      const words = draft.split(/\s+/);
+                      words[words.length - 1] = item.name;
+                      setDraft(words.join(" "));
+                    }
                     setAcOpen(false);
                   }}
                   className={cn(
-                    "w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center justify-between",
+                    "w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center justify-between gap-2",
                     i === acIndex ? "bg-primary text-primary-foreground" : "hover:bg-muted"
                   )}
                 >
-                  <span className="font-mono">/{cmd.name}</span>
-                  <span className={cn("text-[9px] opacity-60 italic", i === acIndex ? "text-primary-foreground" : "")}>
-                    {cmd.description?.slice(0, 30)}...
+                  <span className="font-mono truncate">
+                    {item.type === "command" ? `/${item.name}` : item.name}
                   </span>
+                  {item.type === "command" ? (
+                    <span className={cn("text-[9px] opacity-60 italic shrink-0", i === acIndex ? "text-primary-foreground" : "")}>
+                      {(item as any).description?.slice(0, 30)}
+                    </span>
+                  ) : (
+                    <span className={cn("text-[9px] opacity-60 uppercase tracking-tighter shrink-0", i === acIndex ? "text-primary-foreground" : "")}>
+                      {item.type}
+                    </span>
+                  )}
                 </button>
               </li>
             ))}

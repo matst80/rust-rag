@@ -10,10 +10,12 @@ export interface AuthConfig {
 	scopes: string
 	sessionSecret: string
 	sessionMaxAgeSeconds: number
+	refreshMaxAgeSeconds: number
 }
 
-const DEFAULT_SCOPES = "openid profile email"
-const DEFAULT_SESSION_MAX_AGE_SECS = 8 * 60 * 60
+const DEFAULT_SCOPES = "openid profile email offline_access"
+const DEFAULT_SESSION_MAX_AGE_SECS = 60 * 60
+const DEFAULT_REFRESH_MAX_AGE_SECS = 30 * 24 * 60 * 60
 
 function requiredEnv(name: string): string {
 	const value = process.env[name]?.trim()
@@ -36,6 +38,10 @@ export function getAuthConfig(): AuthConfig {
 		process.env.AUTH_SESSION_MAX_AGE_SECS ?? `${DEFAULT_SESSION_MAX_AGE_SECS}`,
 		10
 	)
+	const refreshMaxAgeSeconds = Number.parseInt(
+		process.env.AUTH_REFRESH_MAX_AGE_SECS ?? `${DEFAULT_REFRESH_MAX_AGE_SECS}`,
+		10
+	)
 
 	return {
 		authEnabled,
@@ -52,5 +58,9 @@ export function getAuthConfig(): AuthConfig {
 			Number.isFinite(sessionMaxAgeSeconds) && sessionMaxAgeSeconds > 0
 				? sessionMaxAgeSeconds
 				: DEFAULT_SESSION_MAX_AGE_SECS,
+		refreshMaxAgeSeconds:
+			Number.isFinite(refreshMaxAgeSeconds) && refreshMaxAgeSeconds > 0
+				? refreshMaxAgeSeconds
+				: DEFAULT_REFRESH_MAX_AGE_SECS,
 	}
 }

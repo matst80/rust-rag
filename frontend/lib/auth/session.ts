@@ -1,9 +1,10 @@
-import { jwtVerify, SignJWT } from "jose"
+import { EncryptJWT, jwtDecrypt, jwtVerify, SignJWT } from "jose"
 import { cookies } from "next/headers"
 import type { NextRequest, NextResponse } from "next/server"
 import { getAuthConfig } from "@/lib/auth/config"
 
 export const SESSION_COOKIE_NAME = "rag_session"
+export const REFRESH_COOKIE_NAME = "rag_refresh"
 
 export interface UserSession {
 	sub: string
@@ -12,9 +13,21 @@ export interface UserSession {
 	preferred_username?: string
 }
 
+export interface RefreshPayload {
+	refresh_token: string
+	user: UserSession
+}
+
 function getSessionSecret() {
 	const config = getAuthConfig()
 	return new TextEncoder().encode(config.sessionSecret)
+}
+
+async function getRefreshKey(): Promise<Uint8Array> {
+	const config = getAuthConfig()
+	const data = new TextEncoder().encode(config.sessionSecret)
+	const hash = await crypto.subtle.digest("SHA-256", data)
+	return new Uint8Array(hash)
 }
 
 function isSecureCookie() {
@@ -78,6 +91,66 @@ export async function setSessionCookie(response: NextResponse, user: UserSession
 export function clearSessionCookie(response: NextResponse) {
 	response.cookies.set({
 		name: SESSION_COOKIE_NAME,
+		value: "",
+		httpOnly: true,
+		sameSite: "lax",
+		secure: isSecureCookie(),
+		path: "/",
+		maxAge: 0,
+	})
+}
+
+export async function createRefreshToken(payload: RefreshPayload, maxAge: number): Promise<string> {
+	const key = await getRefreshKey()
+	return new EncryptJWT({ ...payload })
+		.setProtectedHeader({ alg: "dir", enc: "A256GCM" })
+		.setIssuedAt()
+		.setExpirationTime(Math.floor(Date.now() / 1000) + maxAge)
+		.encrypt(key)
+}
+
+export async function readRefreshCookie(value: string | undefined): Promise<RefreshPayload | null> {
+	if (!value) {
+		return null
+	}
+	try {
+		const key = await getRefreshKey()
+		const { payload } = await jwtDecrypt(value, key)
+		const data = payload as unknown as RefreshPayload
+		if (!data.refresh_token || !data.user?.sub) {
+			return null
+		}
+		return data
+	} catch (error) {
+		console.error("refresh cookie decrypt failed", error)
+		return null
+	}
+}
+
+export async function readRefreshFromRequest(request: NextRequest): Promise<RefreshPayload | null> {
+	return readRefreshCookie(request.cookies.get(REFRESH_COOKIE_NAME)?.value)
+}
+
+export async function setRefreshCookie(
+	response: NextResponse,
+	payload: RefreshPayload,
+	maxAge: number
+) {
+	const token = await createRefreshToken(payload, maxAge)
+	response.cookies.set({
+		name: REFRESH_COOKIE_NAME,
+		value: token,
+		httpOnly: true,
+		sameSite: "lax",
+		secure: isSecureCookie(),
+		path: "/",
+		maxAge,
+	})
+}
+
+export function clearRefreshCookie(response: NextResponse) {
+	response.cookies.set({
+		name: REFRESH_COOKIE_NAME,
 		value: "",
 		httpOnly: true,
 		sameSite: "lax",
