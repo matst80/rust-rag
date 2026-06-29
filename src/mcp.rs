@@ -38,6 +38,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
 const SERVER_NAME: &str = "rust-rag";
@@ -335,6 +336,14 @@ pub struct AcpSpawnParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpTerminalIdParams {
+    pub terminal_id: String,
+    /// Target ACP instance id. Omit when only one is registered.
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AcpSendPromptParams {
     pub session_id: String,
     pub text: String,
@@ -387,6 +396,8 @@ pub struct AcpRecentEventsParams {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
     pub since_local_seq: Option<u64>,
     #[serde(default)]
     pub kinds: Option<Vec<String>>,
@@ -400,6 +411,73 @@ pub struct AcpRecentEventsParams {
 pub struct AcpInstanceParams {
     #[serde(default)]
     pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpCreateTerminalParams {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub cwd: String,
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+    /// Seconds to wait for `terminal_created`. Default 10.
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpCreateTerminalResponse {
+    pub ok: bool,
+    pub terminal_id: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpTerminalInputParams {
+    pub terminal_id: String,
+    pub data: String,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpTerminalResizeParams {
+    pub terminal_id: String,
+    pub cols: u16,
+    pub rows: u16,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpAttachTerminalParams {
+    pub terminal_id: String,
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AcpReadTerminalParams {
+    pub terminal_id: String,
+    /// 1-500, default 100.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub instance: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct AcpReadTerminalResponse {
+    pub terminal_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -1692,6 +1770,7 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let events = h
             .recent_events(
                 params.session_id.as_deref(),
+                params.terminal_id.as_deref(),
                 params.since_local_seq,
                 params.kinds.as_deref(),
                 params.limit,
@@ -1721,6 +1800,183 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let h = require_acp(&self.state, params.instance.as_deref()).await?;
         Ok(Json(AcpSnapshotResponse {
             snapshot: h.latest_snapshot().await,
+        }))
+    }
+
+    #[tool(
+        description = "Create a new terminal in an ACP session. Returns the terminal_id on success. \
+Wait for the terminal_created event before returning (default 10s timeout)."
+    )]
+    async fn acp_create_terminal(
+        &self,
+        Parameters(params): Parameters<AcpCreateTerminalParams>,
+    ) -> Result<Json<AcpCreateTerminalResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let mut rx = h.subscribe();
+
+        let mut payload = serde_json::Map::new();
+        if let Some(sid) = params.session_id {
+            payload.insert("session_id".into(), serde_json::Value::String(sid));
+        }
+        payload.insert("cwd".into(), serde_json::Value::String(params.cwd));
+        if let Some(cols) = params.cols {
+            payload.insert("cols".into(), serde_json::Value::Number(cols.into()));
+        }
+        if let Some(rows) = params.rows {
+            payload.insert("rows".into(), serde_json::Value::Number(rows.into()));
+        }
+
+        h.command("create_terminal", serde_json::Value::Object(payload))
+            .map_err(|e| e.to_string())?;
+
+        let wait = Duration::from_secs(params.wait_secs.unwrap_or(10).clamp(1, 60));
+        let deadline = tokio::time::Instant::now() + wait;
+
+        let terminal_id =
+            wait_for_event(&mut rx, deadline, |frame| parse_terminal_created(frame)).await;
+
+        let Some(tid) = terminal_id else {
+            return Ok(Json(AcpCreateTerminalResponse {
+                ok: false,
+                terminal_id: None,
+                note: Some("terminal_created event not observed within wait window".into()),
+            }));
+        };
+
+        Ok(Json(AcpCreateTerminalResponse {
+            ok: true,
+            terminal_id: Some(tid),
+            note: None,
+        }))
+    }
+
+    #[tool(description = "Gracefully close an ACP terminal.")]
+    async fn acp_close_terminal(
+        &self,
+        Parameters(params): Parameters<AcpTerminalIdParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "close_terminal",
+            serde_json::json!({ "terminal_id": params.terminal_id }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "close_terminal".into(),
+            context: Some(serde_json::json!({ "terminal_id": params.terminal_id })),
+        }))
+    }
+
+    #[tool(description = "Send input to an ACP terminal. `data` is a plain string that will be base64-encoded before sending.")]
+    async fn acp_terminal_input(
+        &self,
+        Parameters(params): Parameters<AcpTerminalInputParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let b64_data = BASE64.encode(params.data);
+        h.command(
+            "terminal_input",
+            serde_json::json!({
+                "terminal_id": params.terminal_id,
+                "data": b64_data,
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "terminal_input".into(),
+            context: Some(serde_json::json!({ "terminal_id": params.terminal_id })),
+        }))
+    }
+
+    #[tool(
+        description = "Read recent output from an ACP terminal. Aggregates `terminal_output` and `terminal_snapshot` events, decodes base64 data, and returns a plain text block."
+    )]
+    async fn acp_read_terminal(
+        &self,
+        Parameters(params): Parameters<AcpReadTerminalParams>,
+    ) -> Result<Json<AcpReadTerminalResponse>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let limit = params.limit.unwrap_or(100).clamp(1, 500);
+        let events = h
+            .recent_events(
+                None,
+                Some(&params.terminal_id),
+                None,
+                Some(&["terminal_output".into(), "terminal_snapshot".into()]),
+                Some(limit),
+            )
+            .await;
+
+        let mut combined = String::new();
+        for ev in events {
+            if let Some(b64) = ev.payload.get("data").and_then(|v| v.as_str()) {
+                if let Ok(bytes) = BASE64.decode(b64) {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if ev.kind == "terminal_snapshot" {
+                        combined = text.into_owned();
+                    } else {
+                        combined.push_str(&text);
+                    }
+                }
+            }
+        }
+
+        Ok(Json(AcpReadTerminalResponse {
+            terminal_id: params.terminal_id,
+            text: combined,
+        }))
+    }
+
+    #[tool(
+        description = "Attach to an existing ACP terminal. The daemon will emit a `terminal_snapshot` and subsequent `terminal_output` events."
+    )]
+    async fn acp_attach_terminal(
+        &self,
+        Parameters(params): Parameters<AcpAttachTerminalParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "terminal_id".into(),
+            serde_json::Value::String(params.terminal_id.clone()),
+        );
+        if let Some(cols) = params.cols {
+            payload.insert("cols".into(), serde_json::Value::Number(cols.into()));
+        }
+        if let Some(rows) = params.rows {
+            payload.insert("rows".into(), serde_json::Value::Number(rows.into()));
+        }
+
+        h.command("attach_terminal", serde_json::Value::Object(payload))
+            .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "attach_terminal".into(),
+            context: Some(serde_json::json!({ "terminal_id": params.terminal_id })),
+        }))
+    }
+
+    #[tool(description = "Resize an existing ACP terminal.")]
+    async fn acp_terminal_resize(
+        &self,
+        Parameters(params): Parameters<AcpTerminalResizeParams>,
+    ) -> Result<Json<AcpCommandAck>, String> {
+        let h = require_acp(&self.state, params.instance.as_deref()).await?;
+        h.command(
+            "terminal_resize",
+            serde_json::json!({
+                "terminal_id": params.terminal_id,
+                "cols": params.cols,
+                "rows": params.rows,
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Json(AcpCommandAck {
+            ok: true,
+            sent: "terminal_resize".into(),
+            context: Some(serde_json::json!({ "terminal_id": params.terminal_id })),
         }))
     }
 
@@ -2805,6 +3061,22 @@ fn parse_session_started(text: &str) -> Option<String> {
     payload
         .get("acp_session_id")
         .or_else(|| payload.get("session_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+fn parse_terminal_created(text: &str) -> Option<String> {
+    let (kind, payload) = extract_kind_payload(text)?;
+    if !kind_eq(&kind, "terminal_created", "TerminalCreated") {
+        return None;
+    }
+    payload
+        .get("terminal_id")
+        .or_else(|| {
+            payload
+                .get("terminal")
+                .and_then(|t| t.get("terminal_id"))
+        })
         .and_then(|v| v.as_str())
         .map(str::to_owned)
 }

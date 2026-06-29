@@ -133,7 +133,7 @@ impl Embedder<OrtBackend> {
         // Snapshot the raw tokenizer (no truncation/padding) for token counting.
         let count_tokenizer = tokenizer.clone();
         tokenizer.with_padding(Some(PaddingParams {
-            strategy: PaddingStrategy::Fixed(512),
+            strategy: PaddingStrategy::BatchLongest,
             ..Default::default()
         }));
         tokenizer
