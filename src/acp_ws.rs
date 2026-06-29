@@ -185,6 +185,7 @@ impl AcpWsHandle {
     pub async fn recent_events(
         &self,
         session_id: Option<&str>,
+        terminal_id: Option<&str>,
         since_local_seq: Option<u64>,
         kinds: Option<&[String]>,
         limit: Option<usize>,
@@ -204,6 +205,22 @@ impl AcpWsHandle {
                 .collect(),
         };
         out.retain(|ev| {
+            if let Some(tid) = terminal_id {
+                let ev_tid = ev
+                    .payload
+                    .get("terminal_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        ev.payload
+                            .get("terminal")
+                            .and_then(|t| t.get("terminal_id"))
+                            .and_then(|v| v.as_str())
+                    });
+                if ev_tid != Some(tid) {
+                    return false;
+                }
+            }
+
             since_local_seq.map(|s| ev.local_seq > s).unwrap_or(true)
                 && kinds
                     .map(|ks| ks.iter().any(|k| k == &ev.kind))

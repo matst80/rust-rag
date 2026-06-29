@@ -1254,6 +1254,8 @@ struct AcpRecentEventsArgs {
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
+    terminal_id: Option<String>,
+    #[serde(default)]
     since_local_seq: Option<u64>,
     #[serde(default)]
     kinds: Option<Vec<String>>,
@@ -1273,6 +1275,7 @@ async fn tool_acp_recent_events(state: &AppState, args: &str) -> Result<String> 
     let events = handle
         .recent_events(
             parsed.session_id.as_deref(),
+            parsed.terminal_id.as_deref(),
             parsed.since_local_seq,
             parsed.kinds.as_deref(),
             parsed.limit,
