@@ -18,9 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::warn;
-use web_push::{
-    ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder,
-};
+use web_push::{ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder};
 
 use crate::api::AppState;
 use crate::config::WebPushConfig;
@@ -87,11 +85,10 @@ pub async fn send(
 
     let subject_owned = subject.to_owned();
     let store_clone = store.clone();
-    let subs = tokio::task::spawn_blocking(move || {
-        store_clone.list_push_subscriptions(&subject_owned)
-    })
-    .await
-    .context("join")??;
+    let subs =
+        tokio::task::spawn_blocking(move || store_clone.list_push_subscriptions(&subject_owned))
+            .await
+            .context("join")??;
 
     let mut result = SendResult {
         subject: subject.to_owned(),
@@ -102,7 +99,10 @@ pub async fn send(
     };
 
     let body_json = serde_json::to_vec(payload).context("serialize payload")?;
-    let private_key = cfg.private_key.as_deref().expect("checked by is_configured");
+    let private_key = cfg
+        .private_key
+        .as_deref()
+        .expect("checked by is_configured");
     let vapid_subject = cfg.subject.as_deref().expect("checked by is_configured");
 
     for sub in subs {

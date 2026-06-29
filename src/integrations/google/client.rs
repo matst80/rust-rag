@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use crate::api::AppState;
 use crate::crypto::EncryptionKey;
-use crate::db::{
-    OAuthCredentialsRecord, OAuthCredsStore, UpsertOAuthCredentials,
-};
+use crate::db::{OAuthCredentialsRecord, OAuthCredsStore, UpsertOAuthCredentials};
 
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 /// Refresh access tokens this many seconds before their stated expiry so a
@@ -53,7 +51,9 @@ impl GoogleClient {
         let store = state
             .oauth_creds
             .clone()
-            .ok_or(GoogleClientError::NotConfigured("oauth_creds store not wired"))?;
+            .ok_or(GoogleClientError::NotConfigured(
+                "oauth_creds store not wired",
+            ))?;
         let enc_key = state
             .oauth_token_key
             .clone()
@@ -86,9 +86,7 @@ impl GoogleClient {
 
         let access_token = if needs_refresh {
             let refresh_token = refresh_token.ok_or_else(|| {
-                GoogleClientError::Refresh(
-                    "no refresh_token stored — user must re-consent".into(),
-                )
+                GoogleClientError::Refresh("no refresh_token stored — user must re-consent".into())
             })?;
             refresh_and_persist(state, &enc_key, store.clone(), &record, &refresh_token).await?
         } else {
@@ -193,7 +191,9 @@ async fn refresh_and_persist(
     let client_secret = cfg
         .client_secret
         .as_deref()
-        .ok_or(GoogleClientError::NotConfigured("GOOGLE_OAUTH_CLIENT_SECRET"))?;
+        .ok_or(GoogleClientError::NotConfigured(
+            "GOOGLE_OAUTH_CLIENT_SECRET",
+        ))?;
 
     let body = RefreshRequest {
         grant_type: "refresh_token",

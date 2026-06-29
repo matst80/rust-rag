@@ -111,9 +111,10 @@ impl ProjectionWorker {
         info!("starting global projection rebuild");
 
         let store_for_compute = store.clone();
-        let cluster_result = tokio::task::spawn_blocking(move || compute_clusters(store_for_compute))
-            .await
-            .context("compute_clusters join")??;
+        let cluster_result =
+            tokio::task::spawn_blocking(move || compute_clusters(store_for_compute))
+                .await
+                .context("compute_clusters join")??;
 
         let Some(cluster_result) = cluster_result else {
             info!("no items to project");
@@ -162,7 +163,11 @@ impl ProjectionWorker {
         let cluster_result_for_write = cluster_result_arc.clone();
         let labels_for_write = labels_arc.clone();
         tokio::task::spawn_blocking(move || {
-            write_metadata(&store_for_write, &cluster_result_for_write, &labels_for_write)
+            write_metadata(
+                &store_for_write,
+                &cluster_result_for_write,
+                &labels_for_write,
+            )
         })
         .await
         .context("write_metadata join")??;
@@ -172,9 +177,7 @@ impl ProjectionWorker {
     }
 }
 
-fn compute_clusters(
-    store: Arc<dyn VectorStore + Send + Sync>,
-) -> Result<Option<ClusterResult>> {
+fn compute_clusters(store: Arc<dyn VectorStore + Send + Sync>) -> Result<Option<ClusterResult>> {
     let (items, _) = store.list_items(ListItemsRequest {
         limit: Some(10000),
         ..Default::default()
@@ -299,7 +302,11 @@ fn compute_clusters(
     // labelled at the end, KMeans ids stay stable.
     let max_cluster = raw_assignments.iter().copied().max().unwrap_or(0).max(0) as usize;
     let has_noise = raw_assignments.iter().any(|&c| c < 0);
-    let noise_bucket = if has_noise { Some(max_cluster + 1) } else { None };
+    let noise_bucket = if has_noise {
+        Some(max_cluster + 1)
+    } else {
+        None
+    };
     let assignments: Vec<usize> = raw_assignments
         .iter()
         .map(|&c| {
@@ -367,7 +374,10 @@ fn compute_clusters(
                     ) {
                         Ok(v) => v,
                         Err(e) => {
-                            warn!("list_graph_edges for {} failed: {e:?}", items_to_update[i].id);
+                            warn!(
+                                "list_graph_edges for {} failed: {e:?}",
+                                items_to_update[i].id
+                            );
                             continue;
                         }
                     };
@@ -400,7 +410,11 @@ fn compute_clusters(
                     }
                 }
                 moved_total += moved;
-                info!("propagation round {}: moved {} noise items", round + 1, moved);
+                info!(
+                    "propagation round {}: moved {} noise items",
+                    round + 1,
+                    moved
+                );
                 if moved == 0 {
                     break;
                 }
@@ -611,7 +625,10 @@ fn write_metadata(
     result: &ClusterResult,
     labels: &HashMap<usize, ClusterLabel>,
 ) -> Result<()> {
-    info!("writing projection metadata for {} items", result.items_to_update.len());
+    info!(
+        "writing projection metadata for {} items",
+        result.items_to_update.len()
+    );
     for (i, item) in result.items_to_update.iter().enumerate() {
         let (x, y, z) = result.coords[i];
         let cluster_id = result.assignments[i];
@@ -652,7 +669,10 @@ fn write_metadata(
                 map_data.insert("cluster_description".to_string(), serde_json::json!(desc));
             }
         }
-        obj.insert("projection".to_string(), serde_json::Value::Object(map_data));
+        obj.insert(
+            "projection".to_string(),
+            serde_json::Value::Object(map_data),
+        );
 
         if let Err(e) = store.update_item_metadata(&item.id, metadata) {
             warn!("failed to update metadata for {}: {:?}", item.id, e);

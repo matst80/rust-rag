@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::{Duration, interval};
@@ -102,16 +103,22 @@ pub async fn process_dreaming_round(state: &AppState) -> Result<()> {
     }
 
     info!(
-        "dreaming: processing {} item(s) from '{}'",
+        "dreaming: processing {} item(s) from '{}' (concurrency={})",
         items.len(),
-        cfg.source_id
+        cfg.source_id,
+        cfg.concurrency
     );
 
-    for item in items {
-        if let Err(e) = process_item_dreaming(state, item).await {
-            error!("dreaming: failed to process item: {e}");
-        }
-    }
+    let concurrency = cfg.concurrency.max(1);
+    futures_util::stream::iter(items)
+        .map(|item| async move {
+            if let Err(e) = process_item_dreaming(state, item).await {
+                error!("dreaming: failed to process item: {e}");
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<()>>()
+        .await;
 
     Ok(())
 }
@@ -281,4 +288,5 @@ mod tests {
         assert_eq!(resp.actions.len(), 1);
         assert_eq!(resp.actions[0].action, "promote");
     }
+
 }

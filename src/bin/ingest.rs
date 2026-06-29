@@ -11,7 +11,7 @@
 //! - `push`     walk + plan + upload + sweep.
 //! - `watch`    push, then keep running and re-push on file changes.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -462,7 +462,10 @@ async fn cmd_push(
                 totals.2 += resp.report.errors.len();
                 sent += n;
                 batch_size = 0;
-                println!("  batch: {sent}/{total} uploaded  (+{} chunks)", resp.report.chunks_inserted);
+                println!(
+                    "  batch: {sent}/{total} uploaded  (+{} chunks)",
+                    resp.report.chunks_inserted
+                );
             }
         }
         if !batch.is_empty() {
@@ -472,7 +475,10 @@ async fn cmd_push(
             totals.1 += resp.report.chunks_inserted;
             totals.2 += resp.report.errors.len();
             sent += n;
-            println!("  batch: {sent}/{total} uploaded  (+{} chunks)", resp.report.chunks_inserted);
+            println!(
+                "  batch: {sent}/{total} uploaded  (+{} chunks)",
+                resp.report.chunks_inserted
+            );
         }
         println!(
             "done: {} changed, {} chunks inserted, {} errors",
@@ -551,7 +557,7 @@ async fn cmd_watch(
     )
     .await?;
     use notify::{RecursiveMode, Watcher};
-    use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+    use notify_debouncer_full::{DebounceEventResult, new_debouncer};
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(8);
     let mut debouncer = new_debouncer(
         Duration::from_millis(500),
@@ -562,9 +568,7 @@ async fn cmd_watch(
             }
         },
     )?;
-    debouncer
-        .watcher()
-        .watch(root, RecursiveMode::Recursive)?;
+    debouncer.watcher().watch(root, RecursiveMode::Recursive)?;
     println!("watching {} — press Ctrl-C to stop", root.display());
     loop {
         match rx.recv().await {

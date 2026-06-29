@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::api::EmbedderHandle;
-use crate::code::chunker::{analyze_file, CodeChunk, FileAnalysis};
-use crate::code::lang::{detect_lang, Lang};
+use crate::code::chunker::{CodeChunk, FileAnalysis, analyze_file};
+use crate::code::lang::{Lang, detect_lang};
 use crate::db::code::{CodeChunkRow, CodeFile, CodeRepo};
 use crate::db::code_store::CodeStore;
 
@@ -68,9 +68,7 @@ pub async fn ingest_repo(
     embedder: Arc<EmbedderHandle>,
     opts: IngestOptions,
 ) -> Result<IngestReport> {
-    let svc = embedder
-        .try_ready()
-        .context("code embedder not ready")?;
+    let svc = embedder.try_ready().context("code embedder not ready")?;
     let root = PathBuf::from(&repo.root_path);
     if !root.exists() {
         anyhow::bail!("repo root does not exist: {}", root.display());
@@ -133,9 +131,7 @@ pub async fn ingest_repo(
         .await
         {
             Ok(()) => {}
-            Err(e) => report
-                .errors
-                .push(format!("{rel_path}: {e:#}")),
+            Err(e) => report.errors.push(format!("{rel_path}: {e:#}")),
         }
     }
 
@@ -195,15 +191,7 @@ pub async fn ingest_file(
         .map(|d| d.as_millis() as i64);
     let size_bytes = metadata.len() as i64;
     ingest_file_content(
-        repo,
-        rel_path,
-        &content,
-        size_bytes,
-        mtime,
-        store,
-        embedder,
-        opts,
-        report,
+        repo, rel_path, &content, size_bytes, mtime, store, embedder, opts, report,
     )
     .await
 }
@@ -227,8 +215,10 @@ pub async fn ingest_file_content(
     let file_id = file_id_for(&repo.id, rel_path);
 
     let prior = store.get_file(&repo.id, rel_path).await?;
-    let unchanged =
-        prior.as_ref().map(|f| f.content_hash == file_content_hash).unwrap_or(false);
+    let unchanged = prior
+        .as_ref()
+        .map(|f| f.content_hash == file_content_hash)
+        .unwrap_or(false);
     if unchanged && !opts.force {
         return Ok(());
     }

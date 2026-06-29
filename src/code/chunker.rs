@@ -57,8 +57,12 @@ pub struct FileAnalysis {
 /// runs before any parsing.
 pub fn detect_role(rel_path: &str) -> Option<&'static str> {
     let p = rel_path.to_ascii_lowercase();
-    if p.contains("/tests/") || p.starts_with("tests/") || p.ends_with("_test.go")
-        || p.contains(".test.") || p.contains(".spec.") || p.starts_with("test_")
+    if p.contains("/tests/")
+        || p.starts_with("tests/")
+        || p.ends_with("_test.go")
+        || p.contains(".test.")
+        || p.contains(".spec.")
+        || p.starts_with("test_")
         || p.contains("/test_")
     {
         return Some("test");
@@ -100,12 +104,7 @@ pub fn detect_role(rel_path: &str) -> Option<&'static str> {
 }
 
 /// Analyze a source-file's text. `rel_path` is used only for role detection.
-pub fn analyze_file(
-    rel_path: &str,
-    lang: Lang,
-    content: &str,
-    max_bytes: usize,
-) -> FileAnalysis {
+pub fn analyze_file(rel_path: &str, lang: Lang, content: &str, max_bytes: usize) -> FileAnalysis {
     let line_count = content.lines().count() as u32;
     let summary = extract_summary(lang, content);
     let imports = extract_imports(lang, content);
@@ -113,8 +112,7 @@ pub fn analyze_file(
     let role = detect_role(rel_path).map(|s| s.to_string());
 
     let chunks = if lang.has_ast_support() {
-        chunk_ast(lang, content, max_bytes)
-            .unwrap_or_else(|| chunk_fallback(content, max_bytes))
+        chunk_ast(lang, content, max_bytes).unwrap_or_else(|| chunk_fallback(content, max_bytes))
     } else {
         chunk_fallback(content, max_bytes)
     };
@@ -172,11 +170,7 @@ fn chunk_ast(lang: Lang, content: &str, max_bytes: usize) -> Option<Vec<CodeChun
                     kind = Some(cap.node.kind());
                 }
                 "name" => {
-                    name = cap
-                        .node
-                        .utf8_text(bytes)
-                        .ok()
-                        .map(|s| s.to_string());
+                    name = cap.node.utf8_text(bytes).ok().map(|s| s.to_string());
                 }
                 _ => {}
             }
@@ -433,7 +427,11 @@ fn detect_visibility(lang: Lang, slice: &str) -> Option<String> {
                 .find(|w| !w.is_empty() && *w != "func" && *w != "type")
                 .map(|w| w.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
                 .unwrap_or(false);
-            Some(if exported { "exported".into() } else { "priv".into() })
+            Some(if exported {
+                "exported".into()
+            } else {
+                "priv".into()
+            })
         }
         _ => None,
     }
@@ -744,7 +742,10 @@ fn extract_imports(lang: Lang, content: &str) -> Vec<String> {
             }
             Lang::Go => {
                 if let Some(rest) = t.strip_prefix("import ") {
-                    out.push(rest.trim_matches(|c: char| c == '"' || c.is_whitespace()).to_string());
+                    out.push(
+                        rest.trim_matches(|c: char| c == '"' || c.is_whitespace())
+                            .to_string(),
+                    );
                 }
             }
             _ => {}
@@ -817,7 +818,9 @@ fn extend_start_for_decorations(lang: Lang, content: &str, start: usize) -> usiz
 fn comment_start(line: &str) -> Option<usize> {
     let trimmed_offset = line.len() - line.trim_start().len();
     let trimmed = &line[trimmed_offset..];
-    if trimmed.starts_with("//") || trimmed.starts_with("#") || trimmed.starts_with("*")
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("#")
+        || trimmed.starts_with("*")
         || trimmed.starts_with("/*")
     {
         return Some(trimmed_offset);
@@ -863,11 +866,25 @@ fn t_add() { assert_eq!(add(1, 2), 3); }
 "#;
         let r = analyze_file("src/lib.rs", Lang::Rust, src, 4096);
         assert!(r.chunks.iter().any(|c| c.name.as_deref() == Some("add")));
-        let add_chunk = r.chunks.iter().find(|c| c.name.as_deref() == Some("add")).unwrap();
+        let add_chunk = r
+            .chunks
+            .iter()
+            .find(|c| c.name.as_deref() == Some("add"))
+            .unwrap();
         assert!(add_chunk.is_public);
         assert_eq!(add_chunk.visibility.as_deref(), Some("pub"));
-        assert!(add_chunk.doc_comment.as_deref().unwrap_or("").contains("adds"));
-        let t = r.chunks.iter().find(|c| c.name.as_deref() == Some("t_add")).unwrap();
+        assert!(
+            add_chunk
+                .doc_comment
+                .as_deref()
+                .unwrap_or("")
+                .contains("adds")
+        );
+        let t = r
+            .chunks
+            .iter()
+            .find(|c| c.name.as_deref() == Some("t_add"))
+            .unwrap();
         assert!(t.is_test);
         assert!(r.summary.as_deref().unwrap_or("").contains("mod doc"));
         assert!(r.imports.iter().any(|i| i == "std::path::Path"));
@@ -895,8 +912,14 @@ pub fn work() -> i32 { 42 }
 "#;
         let r = analyze_file("src/lib.rs", Lang::Rust, src, 32768);
         let kinds: Vec<&str> = r.chunks.iter().map(|c| c.kind.as_str()).collect();
-        assert!(!kinds.contains(&"mod_item"), "trivial mod chunks emitted: {kinds:?}");
-        assert!(!kinds.contains(&"use_declaration"), "trivial use chunks emitted: {kinds:?}");
+        assert!(
+            !kinds.contains(&"mod_item"),
+            "trivial mod chunks emitted: {kinds:?}"
+        );
+        assert!(
+            !kinds.contains(&"use_declaration"),
+            "trivial use chunks emitted: {kinds:?}"
+        );
         assert!(r.chunks.iter().any(|c| c.name.as_deref() == Some("work")));
     }
 

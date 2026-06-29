@@ -16,5 +16,5 @@ pub mod lang;
 pub mod parser;
 
 pub use chunker::{CodeChunk, FileAnalysis, analyze_file, detect_role};
-pub use ingest::{ingest_repo, IngestOptions, IngestReport};
+pub use ingest::{IngestOptions, IngestReport, ingest_repo};
 pub use lang::{Lang, detect_lang};

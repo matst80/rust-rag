@@ -6903,7 +6903,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(child_ids, vec!["section-a", "section-b"]);
         assert_eq!(
-            tree_with_edges.tree.children[0].node.children[0].node.entry.text,
+            tree_with_edges.tree.children[0].node.children[0]
+                .node
+                .entry
+                .text,
             "before"
         );
 
@@ -6934,7 +6937,10 @@ mod tests {
         refreshed_tree.assert_status_ok();
         let refreshed_tree = refreshed_tree.json::<CmsTreeResponse>();
         assert_eq!(
-            refreshed_tree.tree.children[0].node.children[0].node.entry.text,
+            refreshed_tree.tree.children[0].node.children[0]
+                .node
+                .entry
+                .text,
             "after"
         );
     }
