@@ -1,6 +1,6 @@
 "use client";
 
-import { Menu, Bot, Terminal as TerminalIcon, Link2, Plus, Trash2, X, Search } from "lucide-react";
+import { Menu, Bot, Terminal as TerminalIcon, FolderSearch, Link2, Plus, Trash2, X, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface AgentChatHeaderProps {
@@ -14,6 +14,7 @@ interface AgentChatHeaderProps {
   setViewMode: (mode: "chat" | "terminal") => void;
   onSearch?: () => void;
   onCreateTerminal?: () => void;
+  onOpenFiles?: () => void;
   onTerminate?: () => void;
   isStandalone?: boolean;
 }
@@ -29,6 +30,7 @@ export function AgentChatHeader({
   setViewMode,
   onSearch,
   onCreateTerminal,
+  onOpenFiles,
   onTerminate,
   isStandalone = false,
 }: AgentChatHeaderProps) {
@@ -86,6 +88,18 @@ export function AgentChatHeader({
             title={isTelegramBound ? "Telegram thread bound (click to rebind)" : "Bind to Telegram thread"}
           >
             <Link2 className="size-4" />
+          </button>
+        )}
+
+        {onOpenFiles && (
+          <button
+            type="button"
+            onClick={onOpenFiles}
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            title="Browse remote files"
+            aria-label="Browse remote files"
+          >
+            <FolderSearch className="size-4" />
           </button>
         )}
 

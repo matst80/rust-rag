@@ -19,6 +19,7 @@ import { AgentTerminal } from "./agent-terminal";
 import { PendingPermissions } from "./pending-permissions";
 import { FilePreview } from "./file-preview";
 import { QuickSearch } from "./quick-search";
+import { FileBrowser } from "./file-browser";
 
 export function AgentChat() {
   const {
@@ -39,6 +40,11 @@ export function AgentChat() {
     selectInstance,
     workers,
     projects,
+    fileBrowser,
+    fileBrowserHost,
+    listDirectories,
+    findFiles,
+    readFile,
     send,
     sendTerminalInput,
     drafts,
@@ -57,6 +63,7 @@ export function AgentChat() {
     Record<string, boolean>
   >({});
   const [activeStandaloneTerminalId, setActiveStandaloneTerminalId] = useState<string | null>(null);
+  const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
 
   const [isFileSearchOpen, setIsFileSearchOpen] = useState(false);
 
@@ -73,6 +80,17 @@ export function AgentChat() {
 
   const active = activeSessionId ? sessions[activeSessionId] : null;
   const draft = activeSessionId ? (drafts[activeSessionId] ?? "") : "";
+  const standaloneTerminal = activeStandaloneTerminalId
+    ? terminals[activeStandaloneTerminalId]
+    : null;
+  const standaloneRemote = instances.find((instance) => instance.name === activeInstance)
+    ?? (instances.length === 1 ? instances[0] : undefined);
+  const standaloneTitle = standaloneRemote?.name || activeInstance || "Standalone terminal";
+  const standaloneSubtitle = [standaloneRemote?.host, standaloneTerminal?.cwd]
+    .filter(Boolean)
+    .join(" · ");
+  const fileBrowserHostLabel = standaloneRemote?.name || activeInstance || fileBrowserHost;
+  const fileBrowserDirectory = standaloneTerminal?.cwd || active?.project_path || "/";
 
   const availableCommands = useMemo(() => {
     return active?.available_commands || [];
@@ -234,8 +252,13 @@ export function AgentChat() {
 				activeSessionId={activeSessionId}
 				activeStandaloneTerminalId={activeStandaloneTerminalId}
 				onSelectSession={(sid) => {
+					const terminalIds = sessionTerminals[sid] ?? []
+					const selectedTerminalId = activeTerminalId[sid] && terminalIds.includes(activeTerminalId[sid])
+						? activeTerminalId[sid]
+						: terminalIds[0] ?? null
 					setActiveSessionId(sid)
-					setViewMode({ ...viewMode, [sid]: "chat" })
+					setActiveTerminalId({ ...activeTerminalId, [sid]: selectedTerminalId })
+					setViewMode({ ...viewMode, [sid]: selectedTerminalId ? "terminal" : "chat" })
 					setTerminalFullScreen({ ...terminalFullScreen, [sid]: false })
 					setActiveStandaloneTerminalId(null)
 				}}
@@ -281,12 +304,14 @@ export function AgentChat() {
             <AgentChatHeader
               sidebarOpen={sidebarOpen}
               setSidebarOpen={setSidebarOpen}
-              title="ACP Agent Sessions"
-              viewMode="chat"
+              title="Terminal workspace"
+              subtitle="Select a terminal or start a new one"
+              viewMode="terminal"
               setViewMode={() => {}}
+              onOpenFiles={() => setFileBrowserOpen(true)}
             />
             <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-              Select or spawn a session
+              Select a terminal to get started
             </div>
           </div>
         ) : activeStandaloneTerminalId ? (
@@ -294,10 +319,11 @@ export function AgentChat() {
             <AgentChatHeader
               sidebarOpen={sidebarOpen}
               setSidebarOpen={setSidebarOpen}
-              title={`Standalone Terminal ${activeStandaloneTerminalId.slice(0, 8)}`}
-              subtitle={terminals[activeStandaloneTerminalId]?.cwd}
+              title={standaloneTitle}
+              subtitle={standaloneSubtitle || `Terminal ${activeStandaloneTerminalId.slice(0, 8)}`}
               viewMode="terminal"
               setViewMode={() => {}}
+              onOpenFiles={() => setFileBrowserOpen(true)}
               onTerminate={() => closeTerminal(activeStandaloneTerminalId)}
               isStandalone
             />
@@ -321,6 +347,7 @@ export function AgentChat() {
               title={active?.name || active?.folder || active?.project_path || activeSessionId!}
               subtitle={`${active?.agent_command} · ${active?.folder || active?.project_path}`}
               onBindTelegram={bindTelegramThread}
+              onOpenFiles={() => setFileBrowserOpen(true)}
               isTelegramBound={active?.thread_id != null && active.thread_id > 0}
               viewMode={(viewMode[activeSessionId!] as "chat" | "terminal") ?? "chat"}
               setViewMode={(mode) => setViewMode({ ...viewMode, [activeSessionId!]: mode })}
@@ -444,8 +471,6 @@ export function AgentChat() {
             if (type === "file") {
               readFile(activeSessionId, path);
             } else {
-              // For directories, we could spawn a terminal or just update the search
-              // Let's just spawn a terminal if user selects a dir for now
               send({
                 type: "create_terminal",
                 cwd: path,
@@ -456,6 +481,19 @@ export function AgentChat() {
             setIsFileSearchOpen(false);
           }}
           onClose={() => setIsFileSearchOpen(false)}
+        />
+      )}
+
+      {fileBrowserOpen && (
+        <FileBrowser
+          hostKey={fileBrowserHost}
+          hostLabel={fileBrowserHostLabel}
+          initialDirectory={fileBrowserDirectory}
+          state={fileBrowser}
+          onListDirectories={listDirectories}
+          onFindFiles={findFiles}
+          onReadFile={readFile}
+          onClose={() => setFileBrowserOpen(false)}
         />
       )}
 
