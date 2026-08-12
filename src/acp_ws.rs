@@ -63,7 +63,7 @@ fn is_terminal_resized(kind: &str) -> bool {
 fn terminal_payload(payload: &Value) -> &Value {
     payload
         .get("terminal")
-        .filter(Value::is_object)
+        .filter(|v| v.is_object())
         .unwrap_or(payload)
 }
 
