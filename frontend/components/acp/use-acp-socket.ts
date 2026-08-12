@@ -8,6 +8,7 @@ import {
     AcpInstance, 
     WorkerStatus,
     ProjectInfo,
+    FileBrowserState,
     EMPTY_ARRAY
 } from "./types"
 import { envelopeKind, detachAndClose, sessionIdOf } from "./utils"
@@ -25,6 +26,19 @@ function encodeBase64(data: string): string {
 	return btoa(binary)
 }
 
+function createFileBrowserState(startDirectory = "/"): FileBrowserState {
+	return {
+		query: "",
+		startDirectory,
+		directories: [],
+		files: [],
+		selectedPath: null,
+		file: null,
+		loading: null,
+		error: null,
+	}
+}
+
 export function useAcpSocket() {
 	const [conn, setConn] = useState<ConnectionState>({ status: "connecting" })
 	const [sessions, setSessions] = useState<Record<string, SessionInfo>>({})
@@ -39,6 +53,7 @@ export function useAcpSocket() {
 	const [activeInstance, setActiveInstance] = useState<string | null>(null)
 	const [workers, setWorkers] = useState<WorkerStatus[]>([])
 	const [projects, setProjects] = useState<ProjectInfo[]>([])
+	const [fileBrowserByHost, setFileBrowserByHost] = useState<Record<string, FileBrowserState>>({})
 	const [drafts, setDrafts] = useState<Record<string, string>>({})
 	const [sidebarOpen, setSidebarOpen] = useState(true)
 	const [isDesktop, setIsDesktop] = useState(false)
@@ -50,6 +65,7 @@ export function useAcpSocket() {
 	const terminalInputRef = useRef<Record<string, string>>({})
 	const terminalInputTimersRef = useRef<Record<string, number>>({})
 	const workersRef = useRef<WorkerStatus[]>([])
+	const activeHostKeyRef = useRef("default")
 
 	useEffect(() => {
 		activeInstanceRef.current = activeInstance
@@ -57,7 +73,9 @@ export function useAcpSocket() {
 
 	useEffect(() => {
 		workersRef.current = workers
-	}, [workers])
+		activeHostKeyRef.current = activeInstance
+			?? (workers.length === 1 ? workers[0].instance_id : "default")
+	}, [workers, activeInstance])
 
 	const send = useCallback((envelope: Record<string, unknown>) => {
 		const ws = wsRef.current
@@ -121,6 +139,10 @@ export function useAcpSocket() {
 		const url = target 
             ? `${protocol}//${host}/api/acp/ws?instance=${encodeURIComponent(target)}`
             : `${protocol}//${host}/api/acp/ws`
+		const hostKey = target || (workersRef.current.length === 1
+			? workersRef.current[0].instance_id
+			: "default")
+		activeHostKeyRef.current = hostKey
 
 		setConn({ status: "connecting" })
 		const ws = new WebSocket(url)
@@ -157,6 +179,81 @@ export function useAcpSocket() {
 			}
 
 			const k = kind.toLowerCase()
+
+			if (k === "directory_suggestions" || k === "directorysuggestions") {
+				const directories = Array.isArray(payload["directories"])
+					? (payload["directories"] as Array<{ path?: string }>)
+						.filter((directory) => typeof directory.path === "string")
+						.map((directory) => ({ path: directory.path! }))
+					: []
+				setFileBrowserByHost((prev) => {
+					const current = prev[hostKey] ?? createFileBrowserState()
+					return {
+						...prev,
+						[hostKey]: {
+										...current,
+										directories,
+								files: [],
+								query: typeof payload["query"] === "string" ? payload["query"] as string : current.query,
+							loading: null,
+							error: null,
+						},
+					}
+				})
+			}
+
+			if (k === "find_files_result" || k === "findfilesresult") {
+				const files = Array.isArray(payload["files"])
+					? (payload["files"] as unknown[]).filter((file): file is string => typeof file === "string")
+					: []
+				setFileBrowserByHost((prev) => {
+					const current = prev[hostKey] ?? createFileBrowserState()
+					return {
+						...prev,
+						[hostKey]: {
+										...current,
+										files,
+								directories: [],
+								query: typeof payload["query"] === "string" ? payload["query"] as string : current.query,
+							loading: null,
+							error: null,
+						},
+					}
+				})
+			}
+
+			if (k === "read_file_result" || k === "readfileresult") {
+				const content = typeof payload["content"] === "string" ? payload["content"] : ""
+				const path = typeof payload["path"] === "string" ? payload["path"] : ""
+				setFileBrowserByHost((prev) => {
+					const current = prev[hostKey] ?? createFileBrowserState()
+					return {
+						...prev,
+						[hostKey]: {
+							...current,
+							selectedPath: path || current.selectedPath,
+							file: {
+								path,
+								content,
+								startLine: Number(payload["start_line"] ?? 1),
+								lineCount: Number(payload["line_count"] ?? content.split("\\n").length),
+								totalLines: Number(payload["total_lines"] ?? content.split("\\n").length),
+							},
+							loading: null,
+							error: null,
+						},
+					}
+				})
+			}
+
+			if (k === "error") {
+				const message = typeof payload["message"] === "string" ? payload["message"] : "Remote command failed"
+				setFileBrowserByHost((prev) => {
+					const current = prev[hostKey] ?? createFileBrowserState()
+					if (!current.loading) return prev
+					return { ...prev, [hostKey]: { ...current, loading: null, error: message } }
+				})
+			}
 
 			if (k === "terminal_created" || k === "terminalcreated") {
 				const tinfo = (payload["terminal"] as TerminalInfo) ?? (payload as unknown as TerminalInfo)
@@ -468,6 +565,51 @@ export function useAcpSocket() {
 		}
 	}
 
+	const updateFileBrowser = useCallback((hostKey: string, update: (current: FileBrowserState) => FileBrowserState) => {
+		setFileBrowserByHost((prev) => {
+			const current = prev[hostKey] ?? createFileBrowserState()
+			return { ...prev, [hostKey]: update(current) }
+		})
+	}, [])
+
+	const listDirectories = useCallback((query: string, startDirectory: string) => {
+		const hostKey = activeHostKeyRef.current
+		updateFileBrowser(hostKey, (current) => ({
+			...current,
+			query,
+			startDirectory,
+			loading: "directories",
+			error: null,
+		}))
+		return send({ type: "list_directories", query, session_id: null })
+	}, [send, updateFileBrowser])
+
+	const findFiles = useCallback((query: string, startDirectory: string) => {
+		const hostKey = activeHostKeyRef.current
+		updateFileBrowser(hostKey, (current) => ({
+			...current,
+			query,
+			startDirectory,
+			loading: "files",
+			error: null,
+		}))
+		return send({ type: "find_files", query, start_directory: startDirectory, session_id: null })
+	}, [send, updateFileBrowser])
+
+	const readFile = useCallback((path: string, startLine = 1, lineCount = 400) => {
+		const hostKey = activeHostKeyRef.current
+		updateFileBrowser(hostKey, (current) => ({
+			...current,
+			selectedPath: path,
+			loading: "file",
+			error: null,
+		}))
+		return send({ type: "read_file", path, start_line: startLine, line_count: lineCount, session_id: null })
+	}, [send, updateFileBrowser])
+
+	const activeHostKey = activeInstance
+		?? (workers.length === 1 ? workers[0].instance_id : "default")
+
 	const setDraft = useCallback((sid: string, text: string) => {
 		setDrafts((prev) => ({ ...prev, [sid]: text }))
 		try {
@@ -542,6 +684,11 @@ export function useAcpSocket() {
 		selectInstance,
 		workers,
 		projects,
+		fileBrowser: fileBrowserByHost[activeHostKey] ?? createFileBrowserState(),
+		fileBrowserHost: activeHostKey,
+		listDirectories,
+		findFiles,
+		readFile,
 		send,
 		sendTerminalInput,
 		drafts,
