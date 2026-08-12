@@ -50,6 +50,28 @@ fn is_session_renamed(kind: &str) -> bool {
 fn is_topic_removed(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("TopicRemoved") || kind == "topic_removed"
 }
+fn is_terminal_created(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("TerminalCreated") || kind == "terminal_created"
+}
+fn is_terminal_closed(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("TerminalClosed") || kind == "terminal_closed"
+}
+fn is_terminal_resized(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("TerminalResized") || kind == "terminal_resized"
+}
+
+fn terminal_payload(payload: &Value) -> &Value {
+    payload
+        .get("terminal")
+        .filter(Value::is_object)
+        .unwrap_or(payload)
+}
+
+fn terminal_id(payload: &Value) -> Option<&str> {
+    terminal_payload(payload)
+        .get("terminal_id")
+        .and_then(Value::as_str)
+}
 
 /// One event captured from the WS stream.
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
@@ -93,6 +115,9 @@ struct InnerState {
     /// Projects list from the last Snapshot. Carried alongside `live_sessions`
     /// so synthesized snapshots look identical to daemon-emitted ones.
     live_projects: Vec<Value>,
+    /// Last known terminal metadata. Terminals are not necessarily included in
+    /// session history, so keep them separately for late-joining browsers.
+    live_terminals: HashMap<String, Value>,
     /// Outstanding PermissionRequest events keyed by request_id.
     pending_permissions: HashMap<String, AcpEvent>,
     /// Connection status for diagnostics.
@@ -253,11 +278,16 @@ impl AcpWsHandle {
     /// synthesized form merges those deltas in and stays current.
     pub async fn subscriber_snapshot(&self) -> Option<String> {
         let g = self.inner.lock().await;
-        if !g.live_sessions.is_empty() || !g.live_projects.is_empty() {
+        if !g.live_sessions.is_empty()
+            || !g.live_projects.is_empty()
+            || !g.live_terminals.is_empty()
+        {
             let sessions: Vec<Value> = g.live_sessions.values().cloned().collect();
+            let terminals: Vec<Value> = g.live_terminals.values().cloned().collect();
             let payload = json!({
                 "type": "state_snapshot",
                 "sessions": sessions,
+                "terminals": terminals,
                 "projects": g.live_projects,
             });
             return Some(payload.to_string());
@@ -483,6 +513,12 @@ async fn run_loop(
                             debug!(instance_id = %instance_id, "acp_ws: requested list_sessions on connect");
                         }
 
+                        // Periodic state frames let browser subscribers
+                        // recover after a broadcast lag without waiting for a
+                        // new terminal/session event to happen.
+                        let mut snapshot_tick = tokio::time::interval(Duration::from_secs(15));
+                        snapshot_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                         loop {
                             tokio::select! {
                                 _ = shutdown.notified() => {
@@ -501,6 +537,29 @@ async fn run_loop(
                                     if let Err(err) = sink.send(Message::Text(text.into())).await {
                                         warn!(instance_id = %instance_id, "acp_ws: send error, reconnecting: {err}");
                                         break;
+                                    }
+                                }
+                                _ = snapshot_tick.tick() => {
+                                    let snapshot = {
+                                        let g = inner.lock().await;
+                                        if !g.live_sessions.is_empty()
+                                            || !g.live_projects.is_empty()
+                                            || !g.live_terminals.is_empty()
+                                        {
+                                            let sessions: Vec<Value> = g.live_sessions.values().cloned().collect();
+                                            let terminals: Vec<Value> = g.live_terminals.values().cloned().collect();
+                                            Some(json!({
+                                                "type": "state_snapshot",
+                                                "sessions": sessions,
+                                                "terminals": terminals,
+                                                "projects": g.live_projects.clone(),
+                                            }).to_string())
+                                        } else {
+                                            g.latest_snapshot_text.clone()
+                                        }
+                                    };
+                                    if let Some(snapshot) = snapshot {
+                                        let _ = events_tx.send(snapshot);
                                     }
                                 }
                                 Some(msg) = stream.next() => {
@@ -670,6 +729,42 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         if let Some(arr) = payload.get("projects").and_then(Value::as_array) {
             g.live_projects = arr.clone();
         }
+        g.live_terminals.clear();
+        if let Some(arr) = payload.get("terminals").and_then(Value::as_array) {
+            for terminal in arr {
+                if let Some(tid) = terminal_id(terminal) {
+                    g.live_terminals.insert(tid.to_owned(), terminal.clone());
+                }
+            }
+        }
+    }
+
+    if is_terminal_created(&kind) {
+        if let Some(tid) = terminal_id(&payload) {
+            g.live_terminals
+                .insert(tid.to_owned(), terminal_payload(&payload).clone());
+        }
+    }
+
+    if is_terminal_resized(&kind) {
+        if let Some(tid) = terminal_id(&payload) {
+            if let Some(terminal) = g.live_terminals.get_mut(tid)
+                && let Value::Object(terminal_map) = terminal
+                && let Value::Object(update) = &payload
+            {
+                for key in ["cols", "rows"] {
+                    if let Some(value) = update.get(key) {
+                        terminal_map.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if is_terminal_closed(&kind) {
+        if let Some(tid) = terminal_id(&payload) {
+            g.live_terminals.remove(tid);
+        }
     }
 
     if (is_session_started(&kind) || is_session_renamed(&kind))
@@ -702,6 +797,12 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
     if is_session_ended(&kind) {
         if let Some(sid) = &session_id {
             g.live_sessions.remove(sid);
+            g.live_terminals.retain(|_, terminal| {
+                terminal
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    != Some(sid.as_str())
+            });
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));
         }

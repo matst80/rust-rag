@@ -8,7 +8,7 @@ interface AgentTerminalProps {
   terminalId: string;
   isFullScreen: boolean;
   onToggleFullScreen: () => void;
-  onClose: () => void;
+  onClose: (terminalId: string) => void;
   onInput: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   onAttach: (cols: number, rows: number) => void;
@@ -60,7 +60,7 @@ export function AgentTerminal({
                 Term {idx + 1}
               </button>
               <button
-                onClick={onClose}
+                onClick={() => onClose(tid)}
                 className="flex size-5 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-500/10 hover:text-red-500"
               >
                 <X className="size-2.5" />
