@@ -50,24 +50,21 @@ data:
   RAG_CHUNK_OVERLAP_TOKENS: "50"
   RAG_INTRA_THREADS: "2"
   RAG_CUDA_DEVICE_ID: "0"
-  ## RTX 2080 (serber) — 8 GB total, ~7500 MB usable. Tensor cores
-  ## present, so fp16 actually accelerates here unlike on the 1660 SUPER.
-  ## Embedder bge-m3 + reranker bge-reranker-base both fit comfortably.
-  ## Lowered from 4000 to 2500 to coexist with the reranker (2000 MB) and
-  ## other GPU tenants on serber. bge-m3 needs ~2 GB; ORT arena pre-alloc
-  ## of 4 GB fails when the card is shared.
+  ## Keep the embedding session's CUDA arena bounded so it can coexist with
+  ## other GPU tenants. The reranker is disabled by default below and can be
+  ## re-enabled independently when a suitable GPU is available.
   RAG_CUDA_MEM_LIMIT_MB: "2500"
   ## Hard-fail at session creation if CUDA EP doesn't register (instead of
   ## silently falling back to CPU). Flip to "false" to allow CPU fallback.
   RAG_CUDA_STRICT: "true"
   ## Verbose ORT log during cutover — drop back to "warning" once stable.
   RAG_ORT_LOG_LEVEL: "info"
-  ## Phase 3 cross-encoder reranker. Switched from bge-reranker-v2-m3
-  ## (568M params, XLM-RoBERTa-large) to bge-reranker-base (~135M, ~4×
-  ## smaller) — v2-m3 hit ~4s / batch on the 1660 SUPER (Turing, no
-  ## fp16 tensor cores). Tradeoff: base is English-leaning, v2-m3 was
-  ## multilingual. Revert by flipping paths back.
-  RAG_RERANKER_ENABLED: "true"
+  ## Phase 3 cross-encoder reranker. Disabled by default because it adds
+  ## substantial latency without the previous GPU acceleration. Set
+  ## RAG_RERANKER_ENABLED=true to load it, and pass rerank=true per request
+  ## (or set RAG_RERANKER_DEFAULT=true) when it is explicitly needed.
+  RAG_RERANKER_ENABLED: "false"
+  RAG_RERANKER_DEFAULT: "false"
   RAG_RERANKER_MODEL_PATH: "/app/assets/bge-reranker-base/model_fp16.onnx"
   RAG_RERANKER_TOKENIZER_PATH: "/app/assets/bge-reranker-base/tokenizer.json"
   RAG_RERANKER_TOP_N: "25"
@@ -266,9 +263,10 @@ spec:
             limits:
               cpu: "1"
               memory: 3Gi
-        ## Optional reranker assets. Skipped at runtime when
-        ## RAG_RERANKER_ENABLED is unset; the fetch itself runs unconditionally
-        ## so toggling the flag later doesn't require a re-roll. ~600 MB.
+        ## Optional reranker assets. The application does not load or invoke
+        ## them while RAG_RERANKER_ENABLED=false. The fetch remains
+        ## unconditional so enabling the feature later does not require a
+        ## model-cache re-roll. ~600 MB.
         - name: fetch-bge-reranker
           image: curlimages/curl:8.10.1
           env:
