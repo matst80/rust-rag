@@ -345,11 +345,6 @@ fn is_private_v6(ip: &Ipv6Addr) -> bool {
 async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<String>), ApiError> {
     let mut current = reqwest::Url::parse(url_str)
         .map_err(|e| ApiError::BadRequest(format!("invalid url: {e}")))?;
-    let client = reqwest::Client::builder()
-        .timeout(ATTACHMENT_FETCH_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| ApiError::Internal(e.into()))?;
 
     for _ in 0..=ATTACHMENT_MAX_REDIRECTS {
         match current.scheme() {
@@ -367,15 +362,33 @@ async fn safe_fetch(url_str: &str, max_bytes: u64) -> Result<(Bytes, Option<Stri
         let lookup = tokio::net::lookup_host(format!("{host}:{port}"))
             .await
             .map_err(|e| ApiError::BadRequest(format!("dns lookup failed: {e}")))?;
+
+        let mut first_sock = None;
         for sock in lookup {
             if is_private_ip(&sock.ip()) {
                 return Err(ApiError::BadRequest(format!(
                     "host {host} resolves to private/loopback address"
                 )));
             }
+            if first_sock.is_none() {
+                first_sock = Some(sock);
+            }
         }
 
-        let resp = client
+        let sock_addr = first_sock.ok_or_else(|| {
+            ApiError::BadRequest(format!("host {host} did not resolve to any addresses"))
+        })?;
+
+        // Rebuild a client configured to resolve `host` to `sock_addr`.
+        // This ensures reqwest uses the exact IP we just checked, defeating DNS rebinding.
+        let hop_client = reqwest::Client::builder()
+            .timeout(ATTACHMENT_FETCH_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(host, sock_addr)
+            .build()
+            .map_err(|e| ApiError::Internal(e.into()))?;
+
+        let resp = hop_client
             .get(current.clone())
             .header(
                 "Accept",
@@ -629,4 +642,57 @@ pub async fn entries_paths(
     Query(query): Query<EntriesPathsQuery>,
 ) -> Result<Json<EntriesPathsResponse>, ApiError> {
     entries_paths_core(&state, query).await.map(Json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_private_ip() {
+        use std::net::IpAddr;
+
+        // Loopback
+        assert!(is_private_ip(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"::1".parse::<IpAddr>().unwrap()));
+
+        // Private IPv4 ranges
+        assert!(is_private_ip(&"10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"192.168.1.1".parse::<IpAddr>().unwrap()));
+
+        // Public IPs (should be false)
+        assert!(!is_private_ip(&"8.8.8.8".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
+        // A standard IPv6 public address
+        assert!(!is_private_ip(&"2001:4860:4860::8888".parse::<IpAddr>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_safe_fetch_blocks_private_ips() {
+        // Loopback IPv4
+        let res = safe_fetch("http://127.0.0.1/test", 1000).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+
+        // Private range IPv4
+        let res = safe_fetch("http://10.0.0.1/test", 1000).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+
+        // Loopback IPv6
+        let res = safe_fetch("http://[::1]/test", 1000).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+    }
+
+    #[tokio::test]
+    async fn test_safe_fetch_invalid_scheme() {
+        let res = safe_fetch("ftp://example.com/test", 1000).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("scheme 'ftp' not allowed"));
+    }
 }
