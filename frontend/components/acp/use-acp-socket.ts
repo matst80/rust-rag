@@ -594,7 +594,12 @@ export function useAcpSocket() {
 		})
 	}, [])
 
-	const listDirectories = useCallback((query: string, startDirectory: string) => {
+	const listDirectories = useCallback((arg1: string | null, arg2?: string) => {
+		if (arg1 === null || (arg2 !== undefined && typeof arg1 === "string" && !arg1.startsWith("/") && !arg1.includes("."))) {
+			return send({ type: "list_directories", session_id: arg1, query: arg2 ?? "" })
+		}
+		const query = arg1 ?? ""
+		const startDirectory = arg2 ?? ""
 		const hostKey = activeHostKeyRef.current
 		updateFileBrowser(hostKey, (current) => ({
 			...current,
@@ -606,7 +611,12 @@ export function useAcpSocket() {
 		return send({ type: "list_directories", query, session_id: null })
 	}, [send, updateFileBrowser])
 
-	const findFiles = useCallback((query: string, startDirectory: string) => {
+	const findFiles = useCallback((arg1: string | null, arg2?: string) => {
+		if (arg1 === null || (arg2 !== undefined && typeof arg1 === "string" && !arg1.startsWith("/") && !arg1.includes("."))) {
+			return send({ type: "find_files", session_id: arg1, query: arg2 ?? "" })
+		}
+		const query = arg1 ?? ""
+		const startDirectory = arg2 ?? ""
 		const hostKey = activeHostKeyRef.current
 		updateFileBrowser(hostKey, (current) => ({
 			...current,
@@ -618,7 +628,14 @@ export function useAcpSocket() {
 		return send({ type: "find_files", query, start_directory: startDirectory, session_id: null })
 	}, [send, updateFileBrowser])
 
-	const readFile = useCallback((path: string, startLine = 1, lineCount = 400) => {
+	const readFile = useCallback((arg1: string | null, arg2?: string | number, startLine = 1, lineCount = 400) => {
+		if (arg1 === null || typeof arg2 === "string") {
+			const path = typeof arg2 === "string" ? arg2 : ""
+			const sLine = typeof startLine === "number" ? startLine : 1
+			return send({ type: "read_file", session_id: arg1, path, start_line: sLine, line_count: lineCount })
+		}
+		const path = arg1 ?? ""
+		const sLine = typeof arg2 === "number" ? arg2 : startLine
 		const hostKey = activeHostKeyRef.current
 		updateFileBrowser(hostKey, (current) => ({
 			...current,
@@ -626,7 +643,7 @@ export function useAcpSocket() {
 			loading: "file",
 			error: null,
 		}))
-		return send({ type: "read_file", path, start_line: startLine, line_count: lineCount, session_id: null })
+		return send({ type: "read_file", path, start_line: sLine, line_count: lineCount, session_id: null })
 	}, [send, updateFileBrowser])
 
 	const activeHostKey = activeInstance
@@ -640,18 +657,6 @@ export function useAcpSocket() {
 			// ignore
 		}
 	}, [])
-
-	const listDirectories = useCallback((sid: string | null, query: string) => {
-		send({ type: "list_directories", session_id: sid, query })
-	}, [send])
-
-	const findFiles = useCallback((sid: string | null, query: string) => {
-		send({ type: "find_files", session_id: sid, query })
-	}, [send])
-
-	const readFile = useCallback((sid: string | null, path: string, startLine?: number, lineCount?: number) => {
-		send({ type: "read_file", session_id: sid, path, start_line: startLine, line_count: lineCount })
-	}, [send])
 
 	useEffect(() => {
 		const isD = window.innerWidth >= 768
@@ -733,8 +738,5 @@ export function useAcpSocket() {
 		filePreview,
 		setFilePreview,
 		suggestions,
-		listDirectories,
-		findFiles,
-		readFile,
 	}
 }

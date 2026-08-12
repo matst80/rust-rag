@@ -53,9 +53,6 @@ export function AgentChat() {
     setSidebarOpen,
     filePreview,
     setFilePreview,
-    readFile,
-    listDirectories,
-    findFiles,
     suggestions,
   } = useAcpSocket();
 
