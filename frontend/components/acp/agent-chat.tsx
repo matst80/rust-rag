@@ -17,6 +17,7 @@ import { ChatMessages } from "./chat-messages";
 import { AgentChatPrompt } from "./agent-chat-prompt";
 import { AgentTerminal } from "./agent-terminal";
 import { PendingPermissions } from "./pending-permissions";
+import { FileBrowser } from "./file-browser";
 
 export function AgentChat() {
   const {
@@ -37,6 +38,11 @@ export function AgentChat() {
     selectInstance,
     workers,
     projects,
+    fileBrowser,
+    fileBrowserHost,
+    listDirectories,
+    findFiles,
+    readFile,
     send,
     sendTerminalInput,
     drafts,
@@ -49,9 +55,21 @@ export function AgentChat() {
     Record<string, boolean>
   >({});
   const [activeStandaloneTerminalId, setActiveStandaloneTerminalId] = useState<string | null>(null);
+  const [fileBrowserOpen, setFileBrowserOpen] = useState(false);
 
   const active = activeSessionId ? sessions[activeSessionId] : null;
   const draft = activeSessionId ? (drafts[activeSessionId] ?? "") : "";
+  const standaloneTerminal = activeStandaloneTerminalId
+    ? terminals[activeStandaloneTerminalId]
+    : null;
+  const standaloneRemote = instances.find((instance) => instance.name === activeInstance)
+    ?? (instances.length === 1 ? instances[0] : undefined);
+  const standaloneTitle = standaloneRemote?.name || activeInstance || "Standalone terminal";
+  const standaloneSubtitle = [standaloneRemote?.host, standaloneTerminal?.cwd]
+    .filter(Boolean)
+    .join(" · ");
+  const fileBrowserHostLabel = standaloneRemote?.name || activeInstance || fileBrowserHost;
+  const fileBrowserDirectory = standaloneTerminal?.cwd || active?.project_path || "/";
 
   const availableCommands = useMemo(() => {
     return active?.available_commands || [];
@@ -213,8 +231,13 @@ export function AgentChat() {
 				activeSessionId={activeSessionId}
 				activeStandaloneTerminalId={activeStandaloneTerminalId}
 				onSelectSession={(sid) => {
+					const terminalIds = sessionTerminals[sid] ?? []
+					const selectedTerminalId = activeTerminalId[sid] && terminalIds.includes(activeTerminalId[sid])
+						? activeTerminalId[sid]
+						: terminalIds[0] ?? null
 					setActiveSessionId(sid)
-					setViewMode({ ...viewMode, [sid]: "chat" })
+					setActiveTerminalId({ ...activeTerminalId, [sid]: selectedTerminalId })
+					setViewMode({ ...viewMode, [sid]: selectedTerminalId ? "terminal" : "chat" })
 					setTerminalFullScreen({ ...terminalFullScreen, [sid]: false })
 					setActiveStandaloneTerminalId(null)
 				}}
@@ -260,12 +283,14 @@ export function AgentChat() {
             <AgentChatHeader
               sidebarOpen={sidebarOpen}
               setSidebarOpen={setSidebarOpen}
-              title="ACP Agent Sessions"
-              viewMode="chat"
+              title="Terminal workspace"
+              subtitle="Select a terminal or start a new one"
+              viewMode="terminal"
               setViewMode={() => {}}
+              onOpenFiles={() => setFileBrowserOpen(true)}
             />
             <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-              Select or spawn a session
+              Select a terminal to get started
             </div>
           </div>
         ) : activeStandaloneTerminalId ? (
@@ -273,10 +298,11 @@ export function AgentChat() {
             <AgentChatHeader
               sidebarOpen={sidebarOpen}
               setSidebarOpen={setSidebarOpen}
-              title={`Standalone Terminal ${activeStandaloneTerminalId.slice(0, 8)}`}
-              subtitle={terminals[activeStandaloneTerminalId]?.cwd}
+              title={standaloneTitle}
+              subtitle={standaloneSubtitle || `Terminal ${activeStandaloneTerminalId.slice(0, 8)}`}
               viewMode="terminal"
               setViewMode={() => {}}
+              onOpenFiles={() => setFileBrowserOpen(true)}
               onTerminate={() => closeTerminal(activeStandaloneTerminalId)}
               isStandalone
             />
@@ -300,6 +326,7 @@ export function AgentChat() {
               title={active?.name || active?.folder || active?.project_path || activeSessionId!}
               subtitle={`${active?.agent_command} · ${active?.folder || active?.project_path}`}
               onBindTelegram={bindTelegramThread}
+              onOpenFiles={() => setFileBrowserOpen(true)}
               isTelegramBound={active?.thread_id != null && active.thread_id > 0}
               viewMode={(viewMode[activeSessionId!] as "chat" | "terminal") ?? "chat"}
               setViewMode={(mode) => setViewMode({ ...viewMode, [activeSessionId!]: mode })}
@@ -312,10 +339,10 @@ export function AgentChat() {
               direction="vertical"
               className="flex-1 min-h-0"
             >
-              {/* CHAT THREAD (Top section) */}
+              {/* CHAT THREAD (Supporting section) */}
               <ResizablePanel
-                defaultSize={60}
-                minSize={20}
+                defaultSize={30}
+                minSize={12}
                 className={cn(
                   "flex flex-col",
                   activeSessionId &&
@@ -342,8 +369,8 @@ export function AgentChat() {
                 viewMode[activeSessionId] === "terminal" &&
                 activeTerminalId[activeSessionId] && (
                   <ResizablePanel
-                    defaultSize={terminalFullScreen[activeSessionId] ? 100 : 40}
-                    minSize={10}
+                    defaultSize={terminalFullScreen[activeSessionId] ? 100 : 70}
+                    minSize={30}
                     className="flex flex-col"
                   >
                     <AgentTerminal
@@ -381,6 +408,19 @@ export function AgentChat() {
           </div>
         )}
       </section>
+
+      {fileBrowserOpen && (
+        <FileBrowser
+          hostKey={fileBrowserHost}
+          hostLabel={fileBrowserHostLabel}
+          initialDirectory={fileBrowserDirectory}
+          state={fileBrowser}
+          onListDirectories={listDirectories}
+          onFindFiles={findFiles}
+          onReadFile={readFile}
+          onClose={() => setFileBrowserOpen(false)}
+        />
+      )}
 
       {isSpawnDialogOpen && (
         <SpawnDialog

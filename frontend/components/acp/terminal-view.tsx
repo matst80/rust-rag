@@ -66,6 +66,9 @@ export const TerminalView = memo(function TerminalView({
           selectionBackground: "rgba(250, 250, 250, 0.3)",
         },
         allowTransparency: true,
+        // Keep Option available for character input on macOS. Without this,
+        // xterm can interpret Option+2 (the US Mac @ shortcut) as Meta/ESC.
+        macOptionIsMeta: false,
       });
 
       fitAddon = new FitAddon();
@@ -73,6 +76,28 @@ export const TerminalView = memo(function TerminalView({
 
       term.open(containerRef.current);
       fitAddon.fit();
+
+      // On a US Mac keyboard, @ is produced with Option+2. Browsers expose
+      // that chord as an Alt+Digit2 key event, which can otherwise be consumed
+      // as a Meta/ESC shortcut before xterm emits onData.
+      const isApplePlatform = /Mac|iPhone|iPad/.test(
+        navigator.platform || navigator.userAgent,
+      );
+      term.attachCustomKeyEventHandler((event) => {
+        if (
+          isApplePlatform &&
+          event.type === "keydown" &&
+          event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (event.code === "Digit2" || event.key === "@")
+        ) {
+          term?.input("@", true);
+          return false;
+        }
+        return true;
+      });
 
       // Keep input as text here. The socket hook batches and base64-encodes
       // it so rapid typing and paste operations do not create one websocket

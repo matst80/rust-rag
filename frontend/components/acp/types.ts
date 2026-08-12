@@ -52,6 +52,27 @@ export interface TerminalInfo {
 	exit_code?: number | null
 }
 
+export interface DirectorySuggestion {
+	path: string
+}
+
+export interface FileBrowserState {
+	query: string
+	startDirectory: string
+	directories: DirectorySuggestion[]
+	files: string[]
+	selectedPath: string | null
+	file: {
+		path: string
+		content: string
+		startLine: number
+		lineCount: number
+		totalLines: number
+	} | null
+	loading: "directories" | "files" | "file" | null
+	error: string | null
+}
+
 export interface ProjectInfo {
 	name: string
 	path: string
