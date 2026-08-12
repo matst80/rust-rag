@@ -240,6 +240,7 @@ export function AgentChat() {
 					setViewMode({ ...viewMode, [sid]: selectedTerminalId ? "terminal" : "chat" })
 					setTerminalFullScreen({ ...terminalFullScreen, [sid]: false })
 					setActiveStandaloneTerminalId(null)
+					if (window.innerWidth < 768) setSidebarOpen(false)
 				}}
 				onSpawn={() => {
 					setSpawnDialogTerminalOnly(false)
@@ -261,9 +262,11 @@ export function AgentChat() {
 						setViewMode({ ...viewMode, [sid]: "terminal" })
 						setTerminalFullScreen({ ...terminalFullScreen, [sid]: true })
 						setActiveStandaloneTerminalId(null)
+						if (window.innerWidth < 768) setSidebarOpen(false)
 					} else {
 						setActiveSessionId(null)
 						setActiveStandaloneTerminalId(tid)
+						if (window.innerWidth < 768) setSidebarOpen(false)
 					}
 				}}
 				terminals={terminals}
