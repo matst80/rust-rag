@@ -35,14 +35,14 @@ export function AgentTerminal({
     <div className="flex flex-col h-full bg-muted/5">
       {/* TERMINAL TABS */}
       {sessionTerminals && sessionTerminals.length > 0 && (
-        <div className="flex items-center gap-1 border-b border-border bg-muted/20 px-4 py-1.5 overflow-x-auto no-scrollbar shrink-0">
+        <div className="flex items-center gap-1 border-b border-border bg-muted/20 px-2 py-1.5 md:px-4 overflow-x-auto no-scrollbar shrink-0 touch-pan-x">
           {onShowChat && (
             <button
               onClick={onShowChat}
-              className="flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors"
+              className="flex min-h-9 shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors md:min-h-0 md:px-2 touch-manipulation"
             >
               <MessageSquare className="size-3" />
-              Chat Only
+              <span className="hidden sm:inline">Chat Only</span>
             </button>
           )}
           {sessionTerminals.map((tid, idx) => (
@@ -50,7 +50,7 @@ export function AgentTerminal({
               <button
                 onClick={() => onSelectTerminal?.(tid)}
                 className={cn(
-                  "flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors",
+                  "flex min-h-9 shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors md:min-h-0 md:px-2 touch-manipulation",
                   activeTerminalId === tid
                     ? "bg-background text-primary shadow-sm"
                     : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
@@ -61,29 +61,29 @@ export function AgentTerminal({
               </button>
               <button
                 onClick={() => onClose(tid)}
-                className="flex size-5 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-500/10 hover:text-red-500"
+                className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground/40 hover:bg-red-500/10 hover:text-red-500 md:size-5 touch-manipulation"
               >
                 <X className="size-2.5" />
               </button>
             </div>
           ))}
 
-          <div className="flex-1" />
+          <div className="md:flex-1" />
 
           <button
             onClick={onToggleFullScreen}
-            className="flex items-center gap-1.5 rounded px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors"
+            className="flex min-h-9 shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors md:min-h-0 md:px-2 touch-manipulation"
             title={isFullScreen ? "Exit Full Screen" : "Full Screen"}
           >
             {isFullScreen ? (
               <>
                 <Minimize2 className="size-3" />
-                Minimize
+                <span className="hidden sm:inline">Minimize</span>
               </>
             ) : (
               <>
                 <Maximize2 className="size-3" />
-                Maximize
+                <span className="hidden sm:inline">Maximize</span>
               </>
             )}
           </button>

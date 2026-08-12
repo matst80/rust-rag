@@ -56,7 +56,7 @@ export function AgentChatPrompt({
   });
 
   return (
-    <div className="shrink-0 flex flex-col border-t border-border bg-background relative">
+    <div className="shrink-0 flex flex-col border-t border-border bg-background relative pb-[env(safe-area-inset-bottom)]">
       {/* Autocomplete Menu */}
       {acOpen && items.length > 0 && (
         <div className="absolute bottom-full left-0 w-80 bg-popover border border-border rounded-t-lg shadow-xl mb-1 z-50 overflow-hidden">

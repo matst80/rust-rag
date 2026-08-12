@@ -123,16 +123,29 @@ export const TerminalView = memo(function TerminalView({
 
     init();
 
+    let resizeFrame: number | null = null;
     const handleResize = () => {
-      if (fitAddonRef.current) {
-        fitAddonRef.current.fit();
-      }
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = null;
+        fitAddonRef.current?.fit();
+      });
     };
     window.addEventListener("resize", handleResize);
+    window.visualViewport?.addEventListener("resize", handleResize);
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(handleResize);
+    if (resizeObserver && containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
 
     return () => {
       destroyed = true;
       window.removeEventListener("resize", handleResize);
+      window.visualViewport?.removeEventListener("resize", handleResize);
+      resizeObserver?.disconnect();
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
       if (term) term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
@@ -215,7 +228,8 @@ export const TerminalView = memo(function TerminalView({
 
   return (
     <div
-      className="w-full h-full bg-[#030306] p-2 overflow-hidden rounded-md border border-border/50 shadow-inner"
+      className="w-full h-full bg-[#030306] p-2 overflow-hidden rounded-md border border-border/50 shadow-inner touch-manipulation"
+      onClick={() => termRef.current?.focus()}
       onKeyDown={(e) => e.stopPropagation()}
       onKeyUp={(e) => e.stopPropagation()}
       onKeyPress={(e) => e.stopPropagation()}

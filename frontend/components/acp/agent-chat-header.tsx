@@ -39,7 +39,7 @@ export function AgentChatHeader({
       <button
         type="button"
         onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="mr-1 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+        className="mr-1 flex size-10 md:size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
         aria-label="Toggle sidebar"
         title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
       >
@@ -82,7 +82,7 @@ export function AgentChatHeader({
             type="button"
             onClick={onBindTelegram}
             className={cn(
-              "flex size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
+              "flex size-10 md:size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
               isTelegramBound ? "text-emerald-500" : "text-muted-foreground",
             )}
             title={isTelegramBound ? "Telegram thread bound (click to rebind)" : "Bind to Telegram thread"}
@@ -95,7 +95,7 @@ export function AgentChatHeader({
           <button
             type="button"
             onClick={onOpenFiles}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            className="flex size-10 md:size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
             title="Browse remote files"
             aria-label="Browse remote files"
           >
@@ -108,7 +108,7 @@ export function AgentChatHeader({
             type="button"
             onClick={() => setViewMode(viewMode === "chat" ? "terminal" : "chat")}
             className={cn(
-              "flex size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
+              "flex size-10 md:size-8 items-center justify-center rounded-md hover:bg-muted/40 hover:text-foreground",
               viewMode === "terminal" ? "text-primary" : "text-muted-foreground",
             )}
             title="Toggle Terminal"
@@ -121,7 +121,7 @@ export function AgentChatHeader({
           <button
             type="button"
             onClick={onCreateTerminal}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+            className="flex size-10 md:size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted/40 hover:text-foreground"
             title="New Terminal"
           >
             <Plus className="size-4" />
@@ -133,7 +133,7 @@ export function AgentChatHeader({
             type="button"
             onClick={onTerminate}
             className={cn(
-              "flex size-8 items-center justify-center rounded-md text-muted-foreground",
+              "flex size-10 md:size-8 items-center justify-center rounded-md text-muted-foreground",
               isStandalone ? "hover:bg-red-500/10 hover:text-red-500" : "hover:bg-destructive/10 hover:text-destructive"
             )}
             title={isStandalone ? "Close Terminal" : "Terminate Session"}
