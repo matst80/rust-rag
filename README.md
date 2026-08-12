@@ -31,6 +31,12 @@ Rust API environment variables:
 
 Direct API and MCP clients can authenticate with either `x-api-key: <key>` or `Authorization: Bearer <key>`.
 
+Reranking is controlled independently from retrieval:
+
+- `RAG_RERANKER_ENABLED` - optional cross-encoder model loading toggle. Defaults to `false`; set it to `true` only when the host has suitable acceleration and both reranker model paths are configured.
+- `RAG_RERANKER_DEFAULT` - optional server default for requests that omit the `rerank` field. Defaults to `false`. Requests can still opt in with `rerank: true` when the reranker is loaded.
+- `RAG_RERANKER_MODEL_PATH` / `RAG_RERANKER_TOKENIZER_PATH` - required when `RAG_RERANKER_ENABLED=true`.
+
 
 ## HTTP server
 

@@ -38,6 +38,7 @@ export function AgentChat() {
     workers,
     projects,
     send,
+    sendTerminalInput,
     drafts,
     setDraft,
     sidebarOpen,
@@ -165,13 +166,9 @@ export function AgentChat() {
 
   const onTerminalInput = useCallback(
     (tid: string, data: string) => {
-      send({
-        type: "terminal_input",
-        terminal_id: tid,
-        data,
-      });
+      sendTerminalInput(tid, data);
     },
-    [send],
+    [sendTerminalInput],
   );
 
   const onTerminalResize = useCallback(
@@ -356,7 +353,7 @@ export function AgentChat() {
                         ...terminalFullScreen,
                         [activeSessionId]: !terminalFullScreen[activeSessionId],
                       })}
-                      onClose={() => closeTerminal(activeTerminalId[activeSessionId]!)}
+                      onClose={(tid) => closeTerminal(tid)}
                       onInput={(data) => onTerminalInput(activeTerminalId[activeSessionId]!, data)}
                       onResize={(cols, rows) => onTerminalResize(activeTerminalId[activeSessionId]!, cols, rows)}
                       onAttach={(cols, rows) => onTerminalAttach(activeTerminalId[activeSessionId]!, cols, rows)}
