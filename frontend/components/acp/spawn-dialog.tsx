@@ -1,4 +1,4 @@
-import { useState, memo } from "react"
+import { useEffect, useState, memo } from "react"
 import { X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ProjectInfo } from "./types"

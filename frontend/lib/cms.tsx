@@ -7,22 +7,22 @@ import type { CmsTreeResponse } from "@/lib/api/types"
 export async function fetchCmsTree(id: string) {
   const cfg = getAuthConfig()
   const requestHeaders = await headers()
-  const headers: HeadersInit = {
+  const outgoingHeaders: Record<string, string> = {
     Accept: "application/json",
   }
 
   const cookie = requestHeaders.get("cookie")
   if (cookie) {
-    headers["cookie"] = cookie
+    outgoingHeaders["cookie"] = cookie
   }
   if (cfg.backendApiKey) {
-    headers["x-api-key"] = cfg.backendApiKey
+    outgoingHeaders["x-api-key"] = cfg.backendApiKey
   }
 
   const response = await fetch(
     `${cfg.appBaseUrl}/api/cms/tree/${encodeURIComponent(id)}`,
     {
-      headers,
+      headers: outgoingHeaders,
       cache: "no-store",
     },
   )

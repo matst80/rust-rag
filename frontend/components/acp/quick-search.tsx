@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Search, File, Folder, X, Command } from "lucide-react";
 import { cn } from "@/lib/utils";
 

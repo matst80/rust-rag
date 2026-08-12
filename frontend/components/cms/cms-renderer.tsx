@@ -1,6 +1,6 @@
 import React from "react"
 import ReactMarkdown from "react-markdown"
-import type { CmsTreeChild, CmsTreeNode } from "@/lib/api/types"
+import type { CmsTreeChild, CmsTreeNode, Entry } from "@/lib/api/types"
 
 export const CMS_STRUCTURAL_RELATIONS = new Set(["contains", "part_of"])
 
