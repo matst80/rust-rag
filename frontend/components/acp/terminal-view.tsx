@@ -74,14 +74,11 @@ export const TerminalView = memo(function TerminalView({
       term.open(containerRef.current);
       fitAddon.fit();
 
+      // Keep input as text here. The socket hook batches and base64-encodes
+      // it so rapid typing and paste operations do not create one websocket
+      // frame per xterm event.
       term.onData((data) => {
-        const bytes = new TextEncoder().encode(data);
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        const base64 = btoa(binary);
-        onInputRef.current(base64);
+        onInputRef.current(data);
       });
 
       term.onResize(({ cols, rows }) => {
@@ -165,9 +162,17 @@ export const TerminalView = memo(function TerminalView({
       suppressResize.current = false;
     };
 
+    const handleResync = () => {
+      if (!termRef.current || !fitAddonRef.current) return;
+      fitAddonRef.current.fit();
+      const dims = fitAddonRef.current.proposeDimensions();
+      if (dims) onAttachRef.current(dims.cols, dims.rows);
+    };
+
     window.addEventListener(`acp:term:output:${terminalId}`, handleOutput);
     window.addEventListener(`acp:term:snapshot:${terminalId}`, handleSnapshot);
     window.addEventListener(`acp:term:resized:${terminalId}`, handleResized);
+    window.addEventListener(`acp:term:resync:${terminalId}`, handleResync);
 
     return () => {
       window.removeEventListener(`acp:term:output:${terminalId}`, handleOutput);
@@ -179,6 +184,7 @@ export const TerminalView = memo(function TerminalView({
         `acp:term:resized:${terminalId}`,
         handleResized,
       );
+      window.removeEventListener(`acp:term:resync:${terminalId}`, handleResync);
     };
   }, [terminalId]);
 

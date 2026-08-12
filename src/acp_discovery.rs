@@ -21,7 +21,9 @@ const DEFAULT_REGISTER_TTL: Duration = Duration::from_secs(120);
 /// How often the janitor wakes to prune expired registrations.
 const REGISTER_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AcpInstanceSource {
     /// Discovered via mDNS browse on the LAN.
@@ -281,10 +283,7 @@ pub fn spawn(hooks: DiscoveryHooks) -> Option<AcpDiscoveryHandle> {
                         let url = format!("ws://{host}:{port}/");
                         let mut txt = HashMap::new();
                         for prop in info.get_properties().iter() {
-                            txt.insert(
-                                prop.key().to_string(),
-                                prop.val_str().to_string(),
-                            );
+                            txt.insert(prop.key().to_string(), prop.val_str().to_string());
                         }
                         let instance = AcpInstance {
                             name: short,

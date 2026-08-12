@@ -10,7 +10,7 @@
 //!
 //! Required env: RAG_DATABASE_URL, RAG_TOKENIZER_PATH.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use deadpool_postgres::Pool;
 use rust_rag::{chunking_md::MarkdownChunker, db::postgres};
 use std::{env, path::PathBuf};
@@ -29,8 +29,7 @@ async fn fetch_documents(pool: &Pool) -> Result<Vec<(String, String)>> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -64,10 +63,7 @@ async fn main() -> Result<()> {
 
         let client = pool.get().await?;
         let stored: i64 = client
-            .query_one(
-                "SELECT count(*) FROM chunks WHERE document_id = $1",
-                &[id],
-            )
+            .query_one("SELECT count(*) FROM chunks WHERE document_id = $1", &[id])
             .await?
             .get(0);
         if stored as usize != chunks.len() {

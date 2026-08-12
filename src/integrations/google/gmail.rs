@@ -193,11 +193,7 @@ pub async fn get_thread(
 }
 
 fn to_thread_message(raw: RawMessage) -> ThreadMessage {
-    let headers = raw
-        .payload
-        .as_ref()
-        .map(|p| &p.headers[..])
-        .unwrap_or(&[]);
+    let headers = raw.payload.as_ref().map(|p| &p.headers[..]).unwrap_or(&[]);
     let from = header_value(headers, "From");
     let to = header_value(headers, "To");
     let cc = header_value(headers, "Cc");

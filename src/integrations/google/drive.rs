@@ -106,10 +106,9 @@ pub struct FetchedDoc {
 pub async fn fetch(client: &GoogleClient, file_id: &str) -> Result<FetchedDoc, GoogleClientError> {
     // First fetch metadata so we know the mime type.
     let meta_url = format!("{FILES_GET}/{file_id}");
-    let meta_req = client.get(&meta_url).query(&[(
-        "fields",
-        "id,name,mimeType,modifiedTime,webViewLink,owners",
-    )]);
+    let meta_req = client
+        .get(&meta_url)
+        .query(&[("fields", "id,name,mimeType,modifiedTime,webViewLink,owners")]);
     let meta: DriveFile = client.get_json(meta_req).await?;
 
     let (returned_mime, bytes) = match meta.mime_type.as_str() {

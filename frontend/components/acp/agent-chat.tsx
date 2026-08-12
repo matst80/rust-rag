@@ -40,6 +40,7 @@ export function AgentChat() {
     workers,
     projects,
     send,
+    sendTerminalInput,
     drafts,
     setDraft,
     sidebarOpen,
@@ -186,13 +187,9 @@ export function AgentChat() {
 
   const onTerminalInput = useCallback(
     (tid: string, data: string) => {
-      send({
-        type: "terminal_input",
-        terminal_id: tid,
-        data,
-      });
+      sendTerminalInput(tid, data);
     },
-    [send],
+    [sendTerminalInput],
   );
 
   const onTerminalResize = useCallback(

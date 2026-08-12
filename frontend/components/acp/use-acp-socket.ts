@@ -14,6 +14,16 @@ import { envelopeKind, detachAndClose, sessionIdOf } from "./utils"
 
 const RECONNECT_INITIAL_MS = 1000
 const RECONNECT_MAX_MS = 30000
+const TERMINAL_INPUT_BATCH_MS = 12
+
+function encodeBase64(data: string): string {
+	const bytes = new TextEncoder().encode(data)
+	let binary = ""
+	for (let i = 0; i < bytes.length; i++) {
+		binary += String.fromCharCode(bytes[i])
+	}
+	return btoa(binary)
+}
 
 export function useAcpSocket() {
 	const [conn, setConn] = useState<ConnectionState>({ status: "connecting" })
@@ -39,6 +49,8 @@ export function useAcpSocket() {
 	const reconnectAttemptRef = useRef(0)
 	const seqRef = useRef(0)
 	const activeInstanceRef = useRef<string | null>(null)
+	const terminalInputRef = useRef<Record<string, string>>({})
+	const terminalInputTimersRef = useRef<Record<string, number>>({})
 	const workersRef = useRef<WorkerStatus[]>([])
 
 	useEffect(() => {
@@ -58,6 +70,39 @@ export function useAcpSocket() {
 		ws.send(JSON.stringify(envelope))
 		return true
 	}, [])
+
+	const flushTerminalInput = useCallback((terminalId: string) => {
+		const data = terminalInputRef.current[terminalId]
+		const ws = wsRef.current
+		if (!data || !ws || ws.readyState !== WebSocket.OPEN) return false
+
+		try {
+			ws.send(JSON.stringify({
+				type: "terminal_input",
+				terminal_id: terminalId,
+				data: encodeBase64(data),
+			}))
+			delete terminalInputRef.current[terminalId]
+			return true
+		} catch (err) {
+			console.warn("ACP: failed to send terminal input; retaining buffer", err)
+			return false
+		}
+	}, [])
+
+	const sendTerminalInput = useCallback((terminalId: string, data: string) => {
+		if (!data) return true
+		terminalInputRef.current[terminalId] =
+			(terminalInputRef.current[terminalId] ?? "") + data
+
+		if (terminalInputTimersRef.current[terminalId] === undefined) {
+			terminalInputTimersRef.current[terminalId] = window.setTimeout(() => {
+				delete terminalInputTimersRef.current[terminalId]
+				flushTerminalInput(terminalId)
+			}, TERMINAL_INPUT_BATCH_MS)
+		}
+		return true
+	}, [flushTerminalInput])
 
 	const connect = useCallback(async () => {
 		const target = activeInstanceRef.current
@@ -86,6 +131,11 @@ export function useAcpSocket() {
 		ws.onopen = () => {
 			setConn({ status: "open" })
 			reconnectAttemptRef.current = 0
+			// Flush text buffered while the socket was reconnecting. This keeps
+			// terminal input lossless without queueing control commands forever.
+			for (const terminalId of Object.keys(terminalInputRef.current)) {
+				flushTerminalInput(terminalId)
+			}
 		}
 
 		ws.onmessage = (ev) => {
@@ -173,6 +223,13 @@ export function useAcpSocket() {
 						}
 						return next
 					})
+					setActiveTerminalId((prev) => {
+						const next = { ...prev }
+						for (const sid in next) {
+							if (next[sid] === tid) next[sid] = null
+						}
+						return next
+					})
 				}
 			}
 
@@ -216,11 +273,20 @@ export function useAcpSocket() {
 				setSessionTerminals(sessionTerms)
 				setActiveTerminalId((prev) => {
 					const next = { ...prev }
+					for (const sid of Object.keys(next)) {
+						if (!sessionTerms[sid]) next[sid] = null
+					}
 					for (const [sid, tids] of Object.entries(sessionTerms)) {
-						if (!next[sid] && tids.length > 0) next[sid] = tids[0]
+						if (!tids.includes(next[sid] ?? "")) next[sid] = tids[0] ?? null
 					}
 					return next
 				})
+
+				// Existing xterm views may have survived a websocket resync. Ask
+				// them to re-attach so the daemon sends a fresh terminal snapshot.
+				for (const t of terminalList) {
+					window.dispatchEvent(new CustomEvent(`acp:term:resync:${t.terminal_id}`))
+				}
 
 				const projects = (payload as any).projects as ProjectInfo[] ?? []
 				setProjects(projects)
@@ -382,7 +448,7 @@ export function useAcpSocket() {
 				if (!wsRef.current) connect()
 			}, delay)
 		}
-	}, [])
+	}, [flushTerminalInput])
 
 	const refreshInstances = useCallback(async () => {
 		try {
@@ -402,6 +468,13 @@ export function useAcpSocket() {
 
 	const selectInstance = async (name: string) => {
 		try {
+			// Do not replay keystrokes into a different ACP instance if the
+			// user changes targets while input is buffered.
+			for (const timer of Object.values(terminalInputTimersRef.current)) {
+				window.clearTimeout(timer)
+			}
+			terminalInputTimersRef.current = {}
+			terminalInputRef.current = {}
 			setActiveInstance(name)
 			const res = await fetch("/bff/acp/select", {
 				method: "POST",
@@ -477,6 +550,10 @@ export function useAcpSocket() {
 		const t = window.setInterval(() => void refreshInstances(), 10_000)
 		return () => {
 			window.clearInterval(t)
+			for (const timer of Object.values(terminalInputTimersRef.current)) {
+				window.clearTimeout(timer)
+			}
+			terminalInputTimersRef.current = {}
 			if (wsRef.current) detachAndClose(wsRef.current)
 		}
 	}, [refreshInstances, connect])
@@ -500,6 +577,7 @@ export function useAcpSocket() {
 		workers,
 		projects,
 		send,
+		sendTerminalInput,
 		drafts,
 		setDraft,
 		sidebarOpen,

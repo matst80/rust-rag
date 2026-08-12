@@ -23,7 +23,7 @@
 //! Required env (same as `migrate_sqlite_to_pg`):
 //!   RAG_DATABASE_URL, RAG_MODEL_PATH, RAG_TOKENIZER_PATH
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use deadpool_postgres::Pool;
 use rust_rag::{
     chunking_md::MarkdownChunker,
@@ -91,8 +91,7 @@ async fn fetch_legacy(pool: &Pool) -> Result<Vec<LegacyChunk>> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -151,7 +150,11 @@ async fn main() -> Result<()> {
         for (bare, members) in &groups {
             info!(
                 "DRY: would merge {} → bare id {} ({} bytes total)",
-                members.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(", "),
+                members
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 bare,
                 members.iter().map(|m| m.content.len()).sum::<usize>()
             );

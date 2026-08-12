@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -47,7 +47,9 @@ pub async fn run_manager_worker(
         .clone()
         .or_else(|| state.openai_chat.base_url.clone());
     if base_url.is_none() {
-        warn!("manager worker: disabled (no base URL — set RAG_MANAGER_API_BASE_URL or RAG_OPENAI_API_BASE_URL)");
+        warn!(
+            "manager worker: disabled (no base URL — set RAG_MANAGER_API_BASE_URL or RAG_OPENAI_API_BASE_URL)"
+        );
         return;
     }
     let model = match cfg
@@ -658,12 +660,7 @@ async fn start_thinking_message(
     Ok(id)
 }
 
-async fn update_thinking(
-    state: &AppState,
-    id: &str,
-    text: &str,
-    thinking: bool,
-) -> Result<()> {
+async fn update_thinking(state: &AppState, id: &str, text: &str, thinking: bool) -> Result<()> {
     let store = state.messages.clone();
     let id_owned = id.to_owned();
     let text_owned = text.to_owned();
@@ -685,7 +682,6 @@ async fn update_thinking(
     state.message_notify.notify_waiters();
     Ok(())
 }
-
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]
 struct ToolCall {
@@ -1144,7 +1140,9 @@ async fn execute_tool(
         "acp_set_permission_mode" => {
             tool_acp_passthrough(state, "set_permission_mode", &function.arguments).await
         }
-        "acp_set_config" => tool_acp_passthrough(state, "set_config_option", &function.arguments).await,
+        "acp_set_config" => {
+            tool_acp_passthrough(state, "set_config_option", &function.arguments).await
+        }
         "acp_bind_telegram_thread" => {
             tool_acp_passthrough(state, "bind_telegram_thread", &function.arguments).await
         }
@@ -1189,9 +1187,7 @@ fn parse_instance(args: &str) -> Option<String> {
         return None;
     }
     let v: Value = serde_json::from_str(args).ok()?;
-    v.get("instance")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    v.get("instance").and_then(Value::as_str).map(str::to_owned)
 }
 
 async fn tool_acp_list_instances(state: &AppState) -> Result<String> {
@@ -1444,8 +1440,7 @@ async fn tool_assign_task(
         created_at: now,
     };
     let messages = state.messages.clone();
-    let posted =
-        tokio::task::spawn_blocking(move || messages.send_message(new_msg)).await??;
+    let posted = tokio::task::spawn_blocking(move || messages.send_message(new_msg)).await??;
     state.publish_message(&posted);
     if posted.created_at > *last_seen {
         *last_seen = posted.created_at;
@@ -1610,8 +1605,7 @@ async fn tool_post_message(
         created_at: now,
     };
     let store = state.messages.clone();
-    let record =
-        tokio::task::spawn_blocking(move || store.send_message(new_msg)).await??;
+    let record = tokio::task::spawn_blocking(move || store.send_message(new_msg)).await??;
     state.message_notify.notify_waiters();
     // Advance cursor so we don't re-trigger on our own post.
     if record.created_at > *last_seen {
@@ -1656,7 +1650,9 @@ async fn tool_list_channels(state: &AppState) -> Result<String> {
             })
         })
         .collect();
-    Ok(serde_json::to_string(&json!({ "channels": json_channels }))?)
+    Ok(serde_json::to_string(
+        &json!({ "channels": json_channels }),
+    )?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1718,11 +1714,16 @@ struct RecallArgs {
 }
 
 async fn tool_recall(state: &AppState, cfg: &ManagerConfig, args: &str) -> Result<String> {
-    let args: RecallArgs =
-        serde_json::from_str(args).context("invalid arguments for recall")?;
+    let args: RecallArgs = serde_json::from_str(args).context("invalid arguments for recall")?;
     let limit = args.limit.unwrap_or(20).min(100).max(1);
-    let memories = recall_items(state, cfg, args.kind.as_deref(), args.query.as_deref(), limit)
-        .await?;
+    let memories = recall_items(
+        state,
+        cfg,
+        args.kind.as_deref(),
+        args.query.as_deref(),
+        limit,
+    )
+    .await?;
     Ok(serde_json::to_string(&json!({
         "memories": memories.iter().map(item_to_memory_json).collect::<Vec<_>>()
     }))?)
@@ -1779,8 +1780,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
 }
 
 async fn tool_forget(state: &AppState, args: &str) -> Result<String> {
-    let args: ForgetArgs =
-        serde_json::from_str(args).context("invalid arguments for forget")?;
+    let args: ForgetArgs = serde_json::from_str(args).context("invalid arguments for forget")?;
     let store = state.store.clone();
     let id = args.id.clone();
     let id_for_task = id.clone();
@@ -1800,14 +1800,24 @@ struct SearchRagArgs {
 async fn tool_search_rag(state: &AppState, args: &str) -> Result<String> {
     let args: SearchRagArgs =
         serde_json::from_str(args).context("invalid arguments for search_rag")?;
-    let embedder = state.embedder.get_ready().map_err(|e| anyhow!(e.to_string()))?;
+    let embedder = state
+        .embedder
+        .get_ready()
+        .map_err(|e| anyhow!(e.to_string()))?;
     let store = state.store.clone();
     let top_k = args.top_k.unwrap_or(5).min(25).max(1);
     let query = args.query.clone();
     let source_id = args.source_id.clone();
     let hits = tokio::task::spawn_blocking(move || -> Result<_> {
         let (embedding, sparse) = embedder.embed_both(&query)?;
-        store.search_hybrid(&query, &embedding, &sparse, top_k, source_id.as_deref(), None)
+        store.search_hybrid(
+            &query,
+            &embedding,
+            &sparse,
+            top_k,
+            source_id.as_deref(),
+            None,
+        )
     })
     .await??;
     let payload: Vec<Value> = hits

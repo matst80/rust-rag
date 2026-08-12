@@ -19,10 +19,7 @@ pub enum ValidationError {
     #[error("unknown type: {0}")]
     UnknownType(String),
     #[error("schema for {type_name} is invalid: {message}")]
-    InvalidSchema {
-        type_name: String,
-        message: String,
-    },
+    InvalidSchema { type_name: String, message: String },
     #[error("data failed schema validation for {type_name}")]
     Failed {
         type_name: String,

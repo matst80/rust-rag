@@ -16,11 +16,7 @@ use ort::{
     execution_providers::CPUExecutionProvider, inputs, session::Session,
     session::builder::GraphOptimizationLevel, value::TensorRef,
 };
-use std::{
-    path::Path,
-    sync::Mutex,
-    time::Instant,
-};
+use std::{path::Path, sync::Mutex, time::Instant};
 use tokenizers::{EncodeInput, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 /// Score `(query, passage_i)` cross-encoder pairs in a single batched
@@ -74,10 +70,7 @@ impl OrtReranker {
             pad_type_id: 0,
             pad_token: "<pad>".to_owned(),
         }));
-        println!(
-            "reranker: tokenizer loaded in {:?}",
-            started.elapsed()
-        );
+        println!("reranker: tokenizer loaded in {:?}", started.elapsed());
 
         crate::embedding::initialize_ort_for_reranker(ort_dylib_path)?;
 
@@ -102,10 +95,7 @@ impl OrtReranker {
             }
         }
 
-        println!(
-            "reranker: committing model from {}",
-            model_path.display()
-        );
+        println!("reranker: committing model from {}", model_path.display());
         let commit_started = Instant::now();
         let session = builder
             .commit_from_file(model_path)
@@ -201,7 +191,10 @@ impl Reranker for OrtReranker {
             Array2::zeros((batch, seq_len))
         };
 
-        let mut session = self.session.lock().expect("reranker session mutex poisoned");
+        let mut session = self
+            .session
+            .lock()
+            .expect("reranker session mutex poisoned");
         let input_ids_t = TensorRef::from_array_view(input_ids_arr.view()).map_err(ort_error)?;
         let attn_t = TensorRef::from_array_view(attn_arr.view()).map_err(ort_error)?;
         let outputs = if self.accepts_token_type_ids {
@@ -274,7 +267,11 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
         .with_conv_algorithm_search(ConvAlgorithmSearch::Heuristic)
         .with_conv_max_workspace(false)
         .build();
-    let cuda = if strict { cuda.error_on_failure() } else { cuda };
+    let cuda = if strict {
+        cuda.error_on_failure()
+    } else {
+        cuda
+    };
 
     // `strict` mode also drops the CPU EP from the inference list. ORT's
     // `error_on_failure` only governs EP *registration*; per-op CPU
@@ -303,4 +300,3 @@ fn execution_providers() -> Vec<ort::execution_providers::ExecutionProviderDispa
 fn ort_error<E: std::fmt::Display>(error: E) -> anyhow::Error {
     anyhow!(error.to_string())
 }
-

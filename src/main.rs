@@ -35,13 +35,14 @@ use rust_rag::{
 /// Returning a fully-populated `OpenAiChatConfig` keeps the worker signature
 /// unchanged.
 fn ontology_llm_config(cfg: &AppConfig) -> OpenAiChatConfig {
-    if let (Some(url), Some(model)) = (
-        cfg.analysis.base_url.clone(),
-        cfg.analysis.model.clone(),
-    ) {
+    if let (Some(url), Some(model)) = (cfg.analysis.base_url.clone(), cfg.analysis.model.clone()) {
         OpenAiChatConfig {
             base_url: Some(url),
-            api_key: cfg.analysis.api_key.clone().or_else(|| cfg.openai_chat.api_key.clone()),
+            api_key: cfg
+                .analysis
+                .api_key
+                .clone()
+                .or_else(|| cfg.openai_chat.api_key.clone()),
             default_model: Some(model),
             timeout_secs: cfg.analysis.timeout_secs.max(1),
             cdp_url: cfg.openai_chat.cdp_url.clone(),
@@ -106,7 +107,11 @@ fn init_otel() -> Result<Option<OtelProviders>> {
     opentelemetry::global::set_meter_provider(meter.clone());
 
     eprintln!("otel: traces+logs+metrics → {endpoint} (service={service_name})");
-    Ok(Some(OtelProviders { tracer, logger, meter }))
+    Ok(Some(OtelProviders {
+        tracer,
+        logger,
+        meter,
+    }))
 }
 
 #[tokio::main]
@@ -116,8 +121,7 @@ async fn main() -> Result<()> {
     // its own filter that opens these up so request spans actually export.
     let fmt_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "rust_rag=info,axum=info,tower_http=info".into());
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_filter(fmt_filter);
+    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(fmt_filter);
 
     let otel_provider = init_otel()?;
     if let Some(providers) = otel_provider.as_ref() {
@@ -128,9 +132,7 @@ async fn main() -> Result<()> {
             .ok()
             .and_then(|v| v.parse::<tracing_subscriber::EnvFilter>().ok())
             .unwrap_or_else(|| {
-                tracing_subscriber::EnvFilter::new(
-                    "rust_rag=info,axum=info,tower_http=debug",
-                )
+                tracing_subscriber::EnvFilter::new("rust_rag=info,axum=info,tower_http=debug")
             });
         let log_filter = std::env::var("RAG_OTEL_LOG_FILTER")
             .ok()
@@ -205,10 +207,8 @@ async fn main() -> Result<()> {
         if config.graph_enabled && config.graph_build_on_startup {
             println!("rebuilding similarity graph (postgres)");
             let pg_clone = pg.clone();
-            let rebuilt = tokio::task::spawn_blocking(move || {
-                pg_clone.rebuild_similarity_graph()
-            })
-            .await??;
+            let rebuilt =
+                tokio::task::spawn_blocking(move || pg_clone.rebuild_similarity_graph()).await??;
             println!("similarity graph rebuilt with {rebuilt} edges");
         }
         Some(pg)
@@ -285,11 +285,7 @@ async fn main() -> Result<()> {
     .with_analysis(config.analysis.clone())
     .with_dreaming(config.dreaming.clone())
     .with_ontology(config.ontology.clone(), ontology_llm_config(&config))
-    .with_google_oauth(
-        config.google_oauth.clone(),
-        oauth_creds,
-        oauth_token_key,
-    )
+    .with_google_oauth(config.google_oauth.clone(), oauth_creds, oauth_token_key)
     .with_web_push(
         config.web_push.clone(),
         match &pg_store {
@@ -339,14 +335,16 @@ async fn main() -> Result<()> {
     let reranker: Option<std::sync::Arc<dyn rust_rag::reranker::Reranker>> = if reranker_enabled {
         let model_path = std::env::var_os("RAG_RERANKER_MODEL_PATH")
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!(
-                "RAG_RERANKER_ENABLED=true but RAG_RERANKER_MODEL_PATH is unset"
-            ))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("RAG_RERANKER_ENABLED=true but RAG_RERANKER_MODEL_PATH is unset")
+            })?;
         let tokenizer_path = std::env::var_os("RAG_RERANKER_TOKENIZER_PATH")
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!(
-                "RAG_RERANKER_ENABLED=true but RAG_RERANKER_TOKENIZER_PATH is unset"
-            ))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "RAG_RERANKER_ENABLED=true but RAG_RERANKER_TOKENIZER_PATH is unset"
+                )
+            })?;
         let max_length = std::env::var("RAG_RERANKER_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -490,6 +488,7 @@ async fn main() -> Result<()> {
                 embedder_handle.mark_failed(error.to_string());
             }
         }
+
     });
 
     let state_for_shutdown = state.clone();
