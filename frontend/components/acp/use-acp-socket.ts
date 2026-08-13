@@ -137,7 +137,10 @@ export function useAcpSocket() {
 		if (wsRef.current) detachAndClose(wsRef.current)
 
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
-		const host = window.location.host
+		let host = window.location.host
+		if (host.includes(":3000")) {
+			host = host.replace(":3000", ":4001")
+		}
 		const url = target 
             ? `${protocol}//${host}/api/acp/ws?instance=${encodeURIComponent(target)}`
             : `${protocol}//${host}/api/acp/ws`
@@ -208,15 +211,17 @@ export function useAcpSocket() {
 				const files = Array.isArray(payload["files"])
 					? (payload["files"] as unknown[]).filter((file): file is string => typeof file === "string")
 					: []
+				const query = typeof payload["query"] === "string" ? (payload["query"] as string) : ""
+				setSuggestions((prev) => ({ ...prev, query, files }))
 				setFileBrowserByHost((prev) => {
 					const current = prev[hostKey] ?? createFileBrowserState()
 					return {
 						...prev,
 						[hostKey]: {
-										...current,
-										files,
-								directories: [],
-								query: typeof payload["query"] === "string" ? payload["query"] as string : current.query,
+							...current,
+							files,
+							directories: [],
+							query: typeof payload["query"] === "string" ? payload["query"] as string : current.query,
 							loading: null,
 							error: null,
 						},
@@ -552,11 +557,14 @@ export function useAcpSocket() {
 			const res = await fetch("/bff/acp/instances", { credentials: "include" })
 			if (!res.ok) return
 			const data = await res.json()
+			const wList: WorkerStatus[] = data.workers || []
 			setInstances(data.instances || [])
-			setWorkers(data.workers || [])
-			// Optimistically set active if not set
-			if (data.active && activeInstanceRef.current === null) {
-				setActiveInstance(data.active)
+			setWorkers(wList)
+			workersRef.current = wList
+			const activeName = data.active ?? (wList.length === 1 ? wList[0].instance_id : null)
+			if (activeName && activeInstanceRef.current === null) {
+				setActiveInstance(activeName)
+				activeInstanceRef.current = activeName
 			}
 		} catch (err) {
 			console.warn("ACP: failed to refresh instances", err)
@@ -565,14 +573,13 @@ export function useAcpSocket() {
 
 	const selectInstance = async (name: string) => {
 		try {
-			// Do not replay keystrokes into a different ACP instance if the
-			// user changes targets while input is buffered.
 			for (const timer of Object.values(terminalInputTimersRef.current)) {
 				window.clearTimeout(timer)
 			}
 			terminalInputTimersRef.current = {}
 			terminalInputRef.current = {}
 			setActiveInstance(name)
+			activeInstanceRef.current = name
 			const res = await fetch("/bff/acp/select", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
@@ -612,20 +619,32 @@ export function useAcpSocket() {
 	}, [send, updateFileBrowser])
 
 	const findFiles = useCallback((arg1: string | null, arg2?: string) => {
-		if (arg1 === null || (arg2 !== undefined && typeof arg1 === "string" && !arg1.startsWith("/") && !arg1.includes("."))) {
-			return send({ type: "find_files", session_id: arg1, query: arg2 ?? "" })
+		let sessionId: string | null = null
+		let query = ""
+		let startDirectory: string | undefined = undefined
+
+		if (arg1 === null || (arg2 !== undefined && typeof arg1 === "string" && !arg1.startsWith("/") && !arg1.includes("/"))) {
+			sessionId = arg1
+			query = arg2 ?? ""
+		} else {
+			query = arg1 ?? ""
+			startDirectory = arg2
 		}
-		const query = arg1 ?? ""
-		const startDirectory = arg2 ?? ""
+
 		const hostKey = activeHostKeyRef.current
 		updateFileBrowser(hostKey, (current) => ({
 			...current,
 			query,
-			startDirectory,
+			...(startDirectory !== undefined ? { startDirectory } : {}),
 			loading: "files",
 			error: null,
 		}))
-		return send({ type: "find_files", query, start_directory: startDirectory, session_id: null })
+		return send({
+			type: "find_files",
+			session_id: sessionId,
+			query,
+			...(startDirectory ? { start_directory: startDirectory } : {}),
+		})
 	}, [send, updateFileBrowser])
 
 	const readFile = useCallback((arg1: string | null, arg2?: string | number, startLine = 1, lineCount = 400) => {
@@ -690,12 +709,14 @@ export function useAcpSocket() {
 	}, [workers, activeInstance, connect, conn.status])
 
 	useEffect(() => {
-		; (async () => {
+		let isMounted = true;
+		(async () => {
 			await refreshInstances()
-			connect()
+			if (isMounted) connect()
 		})()
 		const t = window.setInterval(() => void refreshInstances(), 10_000)
 		return () => {
+			isMounted = false
 			window.clearInterval(t)
 			for (const timer of Object.values(terminalInputTimersRef.current)) {
 				window.clearTimeout(timer)
@@ -703,7 +724,7 @@ export function useAcpSocket() {
 			terminalInputTimersRef.current = {}
 			if (wsRef.current) detachAndClose(wsRef.current)
 		}
-	}, [refreshInstances, connect])
+	}, [])
 
 	return {
 		conn,
