@@ -341,20 +341,22 @@ export function AgentChat() {
           </div>
         ) : (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            <AgentChatHeader
-              sidebarOpen={sidebarOpen}
-              setSidebarOpen={setSidebarOpen}
-              title={active?.name || active?.folder || active?.project_path || activeSessionId!}
-              subtitle={`${active?.agent_command} · ${active?.folder || active?.project_path}`}
-              onBindTelegram={bindTelegramThread}
-              onOpenFiles={() => setFileBrowserOpen(true)}
-              isTelegramBound={active?.thread_id != null && active.thread_id > 0}
-              viewMode={(viewMode[activeSessionId!] as "chat" | "terminal") ?? "chat"}
-              setViewMode={(mode) => setViewMode({ ...viewMode, [activeSessionId!]: mode })}
-              onSearch={() => setIsFileSearchOpen(true)}
-              onCreateTerminal={() => activeSessionId && createTerminal(activeSessionId)}
-              onTerminate={terminateSession}
-            />
+            {!(activeSessionId && terminalFullScreen[activeSessionId]) && (
+              <AgentChatHeader
+                sidebarOpen={sidebarOpen}
+                setSidebarOpen={setSidebarOpen}
+                title={active?.name || active?.folder || active?.project_path || activeSessionId!}
+                subtitle={`${active?.agent_command} · ${active?.folder || active?.project_path}`}
+                onBindTelegram={bindTelegramThread}
+                onOpenFiles={() => setFileBrowserOpen(true)}
+                isTelegramBound={active?.thread_id != null && active.thread_id > 0}
+                viewMode={(viewMode[activeSessionId!] as "chat" | "terminal") ?? "chat"}
+                setViewMode={(mode) => setViewMode({ ...viewMode, [activeSessionId!]: mode })}
+                onSearch={() => setIsFileSearchOpen(true)}
+                onCreateTerminal={() => activeSessionId && createTerminal(activeSessionId)}
+                onTerminate={terminateSession}
+              />
+            )}
 
             {/* CONTENT AREA */}
             <ResizablePanelGroup

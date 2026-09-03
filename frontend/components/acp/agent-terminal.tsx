@@ -77,13 +77,13 @@ export function AgentTerminal({
           >
             {isFullScreen ? (
               <>
-                <Minimize2 className="size-3" />
-                <span className="hidden sm:inline">Minimize</span>
+                <Minimize2 className="size-3.5" />
+                <span>Exit Fullscreen</span>
               </>
             ) : (
               <>
-                <Maximize2 className="size-3" />
-                <span className="hidden sm:inline">Maximize</span>
+                <Maximize2 className="size-3.5" />
+                <span>Fullscreen</span>
               </>
             )}
           </button>
