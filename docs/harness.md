@@ -18,8 +18,8 @@ and chunked); `data` holds the structured payload.
 | type | data fields |
 |---|---|
 | `harness_doc` | `doc_type` (ADR\|SPEC\|INVARIANT), `title`, `version`, `status` (DRAFT\|ACTIVE\|SUPERSEDED\|DEPRECATED) |
-| `harness_plan` | `title`, `state` (PROPOSED\|GRILLED\|APPROVED) |
-| `harness_sprint` | `plan_id`, `cadence`, `goal`, `state` (PLANNED\|ACTIVE\|COMPLETED) |
+| `harness_plan` | `title`, `state` (PROPOSED\|GRILLED\|APPROVED), `repo?` (harness_repo id/name) |
+| `harness_sprint` | `plan_id`, `cadence`, `goal`, `state` (PLANNED\|ACTIVE\|COMPLETED), `repo?` (harness_repo id/name) |
 | `harness_todo` | `sprint_id`, `title`, `action_spec` (object), `state`, `sequence_order` |
 | `harness_agent` | `role`, `capabilities` (string list) |
 | `harness_stream` | `stream_name`, `aggregate_type`, `schema_definition` (JSON Schema object) |
@@ -34,7 +34,7 @@ against it.
 | type | data fields |
 |---|---|
 | `harness_repo` | `name`, `url?`, `default_branch?` |
-| `harness_poc` | `repo`, `summary`, `rollout_recommendation?`, `timestamp` (epoch ms) |
+| `harness_poc` | `repo`, `summary`, `session_id?` (source session id — join key for session memories), `rollout_recommendation?`, `timestamp` (epoch ms) |
 | `harness_decision` | `title`, `supersedes?`, `status?` (proposed\|accepted\|rejected) |
 | `harness_risk` | `title`, `severity` (low\|medium\|high\|critical), `mitigation?` |
 | `harness_compliance` | `title`, `framework` (GDPR, SOC2, …), `requirement?` |
@@ -42,6 +42,7 @@ against it.
 | `harness_scaling` | `title`, `bottleneck?`, `measured_metric?` |
 | `harness_validation` | `title`, `status` (needed\|done), `how?`, `result?` |
 | `harness_rollout` | `title`, `phases[]` ({name, description?, gate?}), `prerequisites[]` |
+| `harness_fact` | `statement` — free-form session-evidence note agents store while working; appears in the tree as evidence, carries no hierarchy |
 
 ## Edge relations (manual directed edges)
 
@@ -63,7 +64,17 @@ created via `POST /admin/graph/edges` (or MCP `create_manual_edge`):
 (:harness_risk)-[:ADDRESSED_BY]->(:harness_validation)
 (:harness_rollout)-[:REQUIRES]->(:harness_resource)
 (:harness_decision)-[:SUPERSEDES]->(:harness_decision)
+
+(:harness_repo)-[:HAS_PLAN]->(:harness_plan)
+(:harness_sprint)-[:DERIVES_FROM]->(:harness_poc)
+(:harness_todo)-[:EVIDENCED_BY]->(:harness_poc | <promoted memory node>)
 ```
+
+The last three bridge the sprint domain to the POC/memory domain:
+`HAS_PLAN` scopes planned work to a repo, `DERIVES_FROM` points a sprint at
+the session that motivated it, and `EVIDENCED_BY` ties a todo (or promoted
+memory) to session evidence. Raw session memories need no edges of their own —
+they join by id: `harness_poc.session_id == memory.source_id`.
 
 ## Posting grill audits
 
@@ -111,6 +122,31 @@ between them in one call and resolves, per node:
 Also available as MCP tool `harness_tree`. Requires a Postgres-backed store
 (SQLite deployments get a 503 for this endpoint; the rest works on SQLite).
 
+### Session memories in the tree
+
+For every `harness_poc` whose `data.session_id` is set, the tree also returns
+a `memories[]` array: the regular entries captured in that session (entries
+whose `source_id` equals the session id), excluding harness-typed entries.
+Each memory carries `poc_id` + `session_id`, so consumers can join session
+evidence onto sprints/todos without extra requests:
+
+```json
+{
+  "id": "mem-42",
+  "poc_id": "poc-1",
+  "session_id": "736dac0a-b652-4879-984c-02f583f37a48",
+  "type_name": null,
+  "text": "benchmarked pgvector HNSW vs sequential scan…",
+  "truncated": false,
+  "created_at": 1757000000000,
+  "updated_at": 1757000000000
+}
+```
+
+`text` is truncated at 2,000 chars (`truncated: true` marks that). Typical
+use: pick a sprint that `DERIVES_FROM` a POC and show that POC's memories as
+the evidence behind the sprint's todos.
+
 ## Grill Cockpit UI
 
 `/grill` — dark, monospace operator UI:
@@ -126,6 +162,27 @@ Also available as MCP tool `harness_tree`. Requires a Postgres-backed store
   event streams, and the exact Markdown context slice with token count.
 - **Bottom**: chronological audit timeline; clicking an audit loads that
   verdict.
+
+## Graph Insights (`/insights`)
+
+Cross-POC aggregation views that the per-session tree cannot show. Everything
+is computed client-side from `GET /api/harness/tree` (nodes + edges + typed
+`data`) plus `/api/search` for semantic matching — no extra endpoints:
+
+- **Repo selector**: chips for every `harness_repo` node, or all repos.
+- **Risk dashboard**: risks aggregated across every POC on the repo —
+  severity distribution (from `data.severity`), POC session of origin
+  (reverse `RAISED` walk), and validation state via `ADDRESSED_BY`
+  (`done` / `needed` / unaddressed), sorted worst-first.
+- **Decision timeline**: chronological per POC session; `SUPERSEDES` chains
+  render as struck-through history ("superseded by ...") so a later POC's
+  decision replaces, not drowns, the earlier one.
+- **Explore**: semantic search over promoted memories scoped by node type
+  (`type_names`) — e.g. *"what compliance concerns have come up near payments
+  code"* — with repo/POC breadcrumbs joined back from the graph and a node
+  detail panel (framework, severity, phases, ...).
+
+Selecting any node deep-links into the Grill cockpit (`/grill?node=<id>`).
 
 ## Tests
 

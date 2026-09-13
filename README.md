@@ -6,6 +6,7 @@
 
 - [Start Guide](docs/setup-guide.md) - Product overview and search workflow.
 - [MCP Setup](docs/mcp-setup.md) - Agent integration and bridge configuration.
+- [API Spec](docs/api-spec.md) - Machine-readable OpenAPI 3.1 spec for integrations.
 
 ## Authentication
 

@@ -21,6 +21,8 @@ import type {
   HarnessTreeResponse,
 } from "@/lib/api"
 import { GrillGraph } from "@/components/grill/grill-graph"
+import { SprintBrief } from "@/components/grill/sprint-brief"
+import { MarkdownView } from "@/components/entries/markdown-view"
 
 function SeverityBadge({ severity }: { severity: string }) {
   return severity === "BLOCKING" ? (
@@ -109,6 +111,62 @@ function ViolationCard({
   )
 }
 
+function DataPayload({ node }: { node: HarnessTreeNode }) {
+  if (!node.data || Object.keys(node.data).length === 0) return null
+  return (
+    <div className="rounded-sm border p-3 text-xs">
+      <p className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+        Structured payload
+      </p>
+      <dl className="grid grid-cols-[max-content_1fr] items-baseline gap-x-4 gap-y-1">
+        {Object.entries(node.data)
+          .filter(([key]) => key !== "session_id")
+          .map(([key, value]) => (
+            <div key={key} className="col-span-2 grid grid-cols-subgrid">
+              <dt className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                {key.replace(/_/g, " ")}
+              </dt>
+              <dd className="break-words font-mono text-foreground/90">
+                {typeof value === "object" && value !== null
+                  ? JSON.stringify(value)
+                  : String(value)}
+              </dd>
+            </div>
+          ))}
+      </dl>
+    </div>
+  )
+}
+
+function ContentPreview({ node }: { node: HarnessTreeNode }) {
+  const { data: full, isLoading } = useItem(node.id)
+  const text = full?.text?.trim()
+
+  return (
+    <div className="flex flex-col gap-3">
+      {isLoading && !text && (
+        <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" /> loading content…
+        </div>
+      )}
+      {text ? (
+        <div className="rounded-sm border p-3">
+          <p className="mb-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            Content
+          </p>
+          <MarkdownView content={text} className="text-xs" />
+        </div>
+      ) : null}
+      <DataPayload node={node} />
+      {node.source_id && (
+        <p className="font-mono text-[10px] text-muted-foreground/70">
+          source: {node.source_id}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function AuditPanel({
   tree,
   selectedId,
@@ -190,14 +248,19 @@ export function AuditPanel({
     <div className="flex h-full flex-col">
       <div className="border-b px-4 py-2">
         <h2 className="text-xs font-semibold uppercase tracking-[3px]">
-          Adversarial Diff
+          Node Inspector
         </h2>
         <p className="truncate font-mono text-[10px] text-muted-foreground">
-          {node ? `${node.id} · ${node.type_name}` : "no node selected"}
+          {node
+            ? `${node.type_name} · ${node.id}${node.state ? ` · ${node.state}` : ""}`
+            : "no node selected"}
         </p>
       </div>
-      <Tabs defaultValue="verdict" className="flex flex-1 flex-col gap-0">
+      <Tabs defaultValue="overview" className="flex flex-1 flex-col gap-0">
         <TabsList className="mx-4 mt-2 h-7 w-fit">
+          <TabsTrigger value="overview" className="h-5 font-mono text-[10px]">
+            Overview
+          </TabsTrigger>
           <TabsTrigger value="verdict" className="h-5 font-mono text-[10px]">
             Compiler Errors
           </TabsTrigger>
@@ -205,6 +268,22 @@ export function AuditPanel({
             Graph
           </TabsTrigger>
         </TabsList>
+        <TabsContent value="overview" className="flex-1 overflow-hidden">
+          {!node && (
+            <div className="flex h-full items-center justify-center px-6 text-center text-xs text-muted-foreground">
+              Select a node in the tree to preview its content — sprints get an
+              auto-generated brief with todos, risks and session evidence.
+            </div>
+          )}
+          {node && node.type_name === "harness_sprint" && tree && (
+            <SprintBrief tree={tree} sprint={node} />
+          )}
+          {node && node.type_name !== "harness_sprint" && (
+            <div className="h-full overflow-y-auto px-4 py-3">
+              <ContentPreview node={node} />
+            </div>
+          )}
+        </TabsContent>
         <TabsContent value="verdict" className="flex-1 overflow-y-auto px-4 py-3">
           {!node && (
             <div className="flex h-full items-center justify-center text-xs text-muted-foreground">

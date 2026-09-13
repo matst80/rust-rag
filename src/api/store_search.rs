@@ -968,12 +968,12 @@ fn maybe_refresh_profile(memory: &dyn UserMemoryStore, subject: &str, now_ms: i6
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CountTokensRequest {
     text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct CountTokensResponse {
     token_count: usize,
     char_count: usize,
@@ -996,7 +996,7 @@ pub(crate) async fn count_tokens(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct RechunkRequest {
     max_chars: Option<usize>,
     overlap_chars: Option<usize>,
@@ -1072,7 +1072,7 @@ Rules:\n\
 Respond ONLY with a JSON array of strings, each string being one chunk. No markdown, no explanation.\n\
 Example: [\"chunk one text\", \"chunk two text\"]";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct LlmRechunkRequest {
     model: Option<String>,
     max_chunks: Option<usize>,

@@ -2,6 +2,7 @@ use axum::{
     Json,
     extract::{Query, State},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,7 +10,7 @@ use super::error::ApiError;
 use super::state::AppState;
 use super::store_search::DeleteResponse;
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub(crate) struct AcpInstancesResponse {
     instances: Vec<crate::acp_discovery::AcpInstance>,
     active: Option<String>,
@@ -44,7 +45,7 @@ pub(crate) async fn list_acp_instances(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 pub(crate) struct SelectAcpInstanceRequest {
     name: String,
 }
@@ -64,7 +65,7 @@ pub(crate) async fn select_acp_instance(
     Ok(Json(inst))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct RegisterAcpInstanceRequest {
     name: String,
     host: String,
@@ -104,12 +105,12 @@ pub(crate) async fn register_acp_instance(
     Ok(Json(stored))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct HeartbeatAcpInstanceRequest {
     name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct HeartbeatAcpResponse {
     refreshed: bool,
 }

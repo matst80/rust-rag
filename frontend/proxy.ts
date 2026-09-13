@@ -25,7 +25,7 @@ async function getTokenEndpoint(issuer: string): Promise<string> {
 }
 
 function isProtectedAppRoute(pathname: string) {
-	return pathname === "/" || pathname.startsWith("/entries") || pathname.startsWith("/visualize") || pathname.startsWith("/grill")
+	return pathname === "/" || pathname.startsWith("/entries") || pathname.startsWith("/visualize") || pathname.startsWith("/grill") || pathname.startsWith("/insights")
 }
 
 export async function proxy(request: NextRequest) {
@@ -172,6 +172,8 @@ export const config = {
 		"/visualize/:path*",
 		"/grill",
 		"/grill/:path*",
+		"/insights",
+		"/insights/:path*",
 		"/start-guide",
 		"/mcp-setup",
 		"/chat",

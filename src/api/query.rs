@@ -8,6 +8,7 @@ use axum::{
     http::{HeaderName, HeaderValue, StatusCode, header},
     response::Response,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashSet, convert::Infallible};
@@ -23,7 +24,7 @@ fn default_max_distance() -> f32 {
     0.8
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssistedQueryRequest {
     pub query: String,
     #[serde(default)]

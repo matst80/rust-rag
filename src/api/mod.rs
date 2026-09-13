@@ -19,6 +19,7 @@ pub mod messages;
 mod multimodal;
 mod ontology;
 mod openai;
+pub mod openapi;
 mod presence;
 mod push;
 mod query;

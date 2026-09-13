@@ -193,6 +193,7 @@ x-api-key: {{api_key}}
   "data": {
     "repo": "repo-rust-rag",
     "summary": "Benchmarked pgvector index strategies on 50k chunks.",
+    "session_id": "736dac0a-b652-4879-984c-02f583f37a48",
     "rollout_recommendation": "Adopt pgvector now; revisit HNSW past 500k chunks.",
     "timestamp": 1757700000000
   },
@@ -324,3 +325,26 @@ Content-Type: application/json
 x-api-key: {{api_key}}
 
 { "from_item_id": "dec-hnsw-2026-12", "to_item_id": "dec-pgvector-2026-09", "relation": "SUPERSEDES", "directed": true }
+
+### --- Sprint ↔ session-evidence bridges ---
+
+### Scope the plan to the repo
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "repo-rust-rag", "to_item_id": "plan-001", "relation": "HAS_PLAN", "directed": true }
+
+### Tie the sprint to the POC session that motivated it
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "sprint-001", "to_item_id": "poc-rust-rag-2026-09", "relation": "DERIVES_FROM", "directed": true }
+
+### Tie a todo to session evidence (a promoted memory or the POC itself)
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "todo-001", "to_item_id": "dec-pgvector-2026-09", "relation": "EVIDENCED_BY", "directed": true }

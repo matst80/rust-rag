@@ -9,6 +9,7 @@ import {
   BookOpen,
   Brain,
   Flame,
+  Radar,
   FolderOpen,
   FolderTree,
   GitBranch,
@@ -37,6 +38,7 @@ const navigation = [
   { name: "Wiki", href: "/wiki", icon: FolderTree },
   { name: "Graph", href: "/visualize", icon: GitBranch },
   { name: "Grill", href: "/grill", icon: Flame },
+  { name: "Insights", href: "/insights", icon: Radar },
   { name: "Agents", href: "/acp", icon: Terminal },
 ]
 

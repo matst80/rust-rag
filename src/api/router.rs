@@ -13,8 +13,8 @@ use super::auth_guard::require_api_key;
 use super::state::AppState;
 use super::{
     acp, analysis, attachments, cms, dream, graph, harness, health, ingest_url, integrations,
-    items, map, messages, multimodal, ontology, openai, push, query, schemas, store_search,
-    whisper,
+    items, map, messages, multimodal, ontology, openai, openapi, push, query, schemas,
+    store_search, whisper,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -180,6 +180,9 @@ pub fn router(state: AppState) -> Router {
     let upload_path = state.upload_path.as_str().to_owned();
     Router::new()
         .route("/healthz", get(health::health))
+        .route("/openapi.json", get(openapi::openapi_endpoint))
+        .route("/api/openapi.json", get(openapi::openapi_endpoint))
+        .route("/api/docs", get(openapi::swagger_ui_endpoint))
         .nest_service("/assets", ServeDir::new(&upload_path))
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))

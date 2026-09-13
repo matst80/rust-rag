@@ -210,7 +210,7 @@ async fn harness_nodes_edges_and_tree_on_postgres() {
             .expect("tree listing");
         items.extend(page);
     }
-    let tree = assemble_tree(items, edges);
+    let tree = assemble_tree(items, edges, Vec::new());
     let todo = tree.nodes.iter().find(|n| n.id == "todo-1").unwrap();
     assert_eq!(todo.badge, Some(Badge::Red));
     let verdict = todo.verdict.as_ref().unwrap();

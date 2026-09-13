@@ -631,7 +631,7 @@ fn write_metadata(
     );
     for (i, item) in result.items_to_update.iter().enumerate() {
         let (x, y, z) = result.coords[i];
-        let cluster_id = result.assignments[i];
+        let _cluster_id = result.assignments[i];
 
         let mut metadata = item.metadata.clone();
         let obj = match metadata.as_object_mut() {

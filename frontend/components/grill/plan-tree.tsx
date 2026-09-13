@@ -26,6 +26,7 @@ const TYPE_LABELS: Record<string, string> = {
   harness_scaling: "SCALING",
   harness_validation: "VALIDATION",
   harness_rollout: "ROLLOUT",
+  harness_fact: "FACT",
 }
 
 function Badge({ node }: { node: HarnessTreeNode }) {
@@ -160,10 +161,16 @@ function BranchRows({
   )
 }
 
-/** Relations that nest a child underneath its parent in the tree. */
+/**
+ * Relations that nest a child underneath its parent in the tree. Matched
+ * case-insensitively: agents emit both the canonical SCREAMING_CASE relations
+ * and lowercase ones (`contains`, `implemented_by`, `depends_on`, …).
+ */
 const CHILD_RELATIONS = new Set([
   "BREAKS_INTO",
   "CONTAINS_TODO",
+  "CONTAINS",
+  "IMPLEMENTED_BY",
   "GOVERNED_BY",
   "ENFORCES_DOC",
   "DELEGATES_TO",
@@ -215,15 +222,21 @@ export function PlanTree({
   selectedId: string | null
   onSelect: (id: string) => void
 }) {
-  const { planBranches, pocBranches, unlinked } = useMemo(() => {
+  const { planBranches, pocBranches, facts, unlinked } = useMemo(() => {
     const byId = new Map<string, HarnessTreeNode>()
     const childrenByParent = new Map<string, HarnessTreeEdge[]>()
+    const seenEdges = new Set<string>()
     const planIds: string[] = []
     const repoIds: string[] = []
-    if (!tree) return { planBranches: [], pocBranches: [], unlinked: [] }
+    if (!tree) return { planBranches: [], pocBranches: [], facts: [], unlinked: [] }
 
     for (const node of tree.nodes) byId.set(node.id, node)
     for (const edge of tree.edges) {
+      if (!CHILD_RELATIONS.has((edge.relation ?? "").toUpperCase())) continue
+      // Agents re-emit the same edge; dedupe on from+to+relation.
+      const key = `${edge.from_item_id}|${edge.to_item_id}|${edge.relation ?? ""}`
+      if (seenEdges.has(key)) continue
+      seenEdges.add(key)
       const list = childrenByParent.get(edge.from_item_id) ?? []
       list.push(edge)
       childrenByParent.set(edge.from_item_id, list)
@@ -237,10 +250,14 @@ export function PlanTree({
     const rendered = new Set<string>()
     const planBranches = buildBranches(planIds, byId, childrenByParent, rendered)
     const pocBranches = buildBranches(repoIds, byId, childrenByParent, rendered)
+    const facts = tree.nodes.filter((n) => n.type_name === "harness_fact" && !rendered.has(n.id))
     const unlinked = tree.nodes.filter(
-      (n) => !rendered.has(n.id) && n.type_name !== "harness_audit"
+      (n) =>
+        !rendered.has(n.id) &&
+        n.type_name !== "harness_audit" &&
+        n.type_name !== "harness_fact"
     )
-    return { planBranches, pocBranches, unlinked }
+    return { planBranches, pocBranches, facts, unlinked }
   }, [tree])
 
   const empty = planBranches.length === 0 && pocBranches.length === 0
@@ -296,8 +313,21 @@ export function PlanTree({
             ))}
           </Section>
         )}
+        {facts.length > 0 && (
+          <Section label={`Session facts (${facts.length})`}>
+            {facts.map((node) => (
+              <NodeRow
+                key={node.id}
+                node={node}
+                selectedId={selectedId}
+                onSelect={onSelect}
+                depth={1}
+              />
+            ))}
+          </Section>
+        )}
         {unlinked.length > 0 && (
-          <Section label={`Unlinked (${unlinked.length})`}>
+          <Section label={`Unlinked (${unlinked.length})`} defaultOpen={unlinked.length <= 10}>
             {unlinked.map((node) => (
               <NodeRow
                 key={node.id}

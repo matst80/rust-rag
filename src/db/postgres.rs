@@ -20,10 +20,10 @@ use super::{
 
 pub use deadpool_postgres::Pool as PgPool;
 
-const EMBEDDING_MODEL: &str = "bge-m3";
-const EMBEDDING_VERSION: i32 = 1;
+const EMBEDDING_MODEL: &str = "bge-m3-int8";
+const EMBEDDING_VERSION: i32 = 2;
 /// bge-m3 sparse output is one weight per vocab token. Vocab size is fixed.
-const SPARSE_DIM: i32 = 250_002;
+pub const SPARSE_DIM: i32 = 250_002;
 
 /// Convert our `(vocab_id, weight)` pairs into a `pgvector::SparseVector`.
 /// Returns `None` when the input is empty so the column is bound as NULL.

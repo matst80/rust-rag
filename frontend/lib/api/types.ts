@@ -167,6 +167,8 @@ export interface SearchResult {
   section_path?: string[];
   /** Which retrievers contributed: ["dense"] | ["sparse"] | ["dense","sparse"]. */
   retrievers?: string[];
+  /** Typed-entry schema name (e.g. harness_risk). Null for untyped entries. */
+  type_name?: string | null;
 }
 
 export interface RelatedResult extends SearchResult {
@@ -278,6 +280,8 @@ export interface SearchRequest {
   /** Cross-encoder reranking on top-N candidates. Has no effect when the server has no reranker loaded. */
   rerank?: boolean;
   type?: string;
+  /** Restrict to several typed-entry schemas at once (merged per type before the top-K cut). Ignored when `type` is set. */
+  type_names?: string[];
 }
 
 export interface UpdateItemRequest {
@@ -709,6 +713,7 @@ export const HARNESS_NODE_TYPES = [
   "harness_scaling",
   "harness_validation",
   "harness_rollout",
+  "harness_fact",
 ] as const;
 
 export type HarnessNodeType = (typeof HARNESS_NODE_TYPES)[number];
@@ -740,6 +745,8 @@ export interface HarnessTreeNode {
   type_name: HarnessNodeType | string;
   title: string;
   state: string | null;
+  /** Full typed payload (severity, framework, phases, ...). */
+  data?: Record<string, unknown> | null;
   source_id: string;
   created_at: number;
   updated_at: number;
@@ -754,9 +761,27 @@ export interface HarnessTreeEdge {
   relation: string | null;
 }
 
+/**
+ * Session memory joined into the tree via harness_poc.session_id ===
+ * memory.source_id. Not a `node`; join to a POC via `poc_id` and onward to
+ * sprints/todos via DERIVES_FROM / EVIDENCED_BY edges.
+ */
+export interface HarnessTreeMemory {
+  id: string;
+  poc_id: string;
+  session_id: string;
+  type_name: string | null;
+  /** Entry text, truncated at 2,000 chars when `truncated` is true. */
+  text: string;
+  truncated: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface HarnessTreeResponse {
   nodes: HarnessTreeNode[];
   edges: HarnessTreeEdge[];
+  memories?: HarnessTreeMemory[];
 }
 
 export interface TokenCountResponse {

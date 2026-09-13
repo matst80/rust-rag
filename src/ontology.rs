@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use reqwest::Client;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
@@ -14,7 +15,7 @@ use tracing::{error, info, warn};
 /// One-shot run report returned by [`run_once`] / [`run_for_item`].
 /// Surfaced via the admin endpoints so a caller can verify the worker
 /// without tailing logs.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct OntologyRunReport {
     /// Items the worker pulled and ran the LLM on.
     pub items_processed: usize,
@@ -30,7 +31,7 @@ pub struct OntologyRunReport {
     pub debug: Vec<ItemDebug>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ItemDebug {
     pub item_id: String,
     /// Number of neighbors fed to the LLM (max = `RAG_ONTOLOGY_NEIGHBOR_COUNT`).
@@ -51,7 +52,7 @@ pub struct ItemDebug {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct FilterDrops {
     /// Predicate not in the schema table for this source_id.
     pub bad_predicate: usize,
@@ -68,7 +69,7 @@ pub struct FilterDrops {
     pub duplicate_pair: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommittedEdge {
     pub item_id: String,
     pub from_id: String,
