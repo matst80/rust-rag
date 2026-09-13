@@ -21,6 +21,7 @@ use crate::{
         MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
     },
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use rmcp::{
     RoleServer, ServerHandler,
@@ -38,7 +39,6 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{borrow::Cow, fmt::Write as _, sync::Arc, time::Duration};
 
 const SERVER_NAME: &str = "rust-rag";
@@ -628,7 +628,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     }
 
     #[tool(
-        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace (see `list_memory_conventions` for the canonical taxonomy). Pass `type` to scope to a single typed-entry schema (see `list_schemas` for what's registered) — useful for retrieving only decisions, only facts, etc. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
+        description = "Semantic search across stored entries — use FIRST when starting any task to load prior context and avoid duplicating another agent's work. Omit `source_id` for global cross-agent search; pass it to scope to one namespace (see `list_memory_conventions` for the canonical taxonomy). Pass `type` to scope to a single typed-entry schema, or `type_names` to scope to several at once (e.g. the harness node types) — results are merged per type before the top-K cut. Returns ranked vector hits plus `related` items manually linked from the top hit (not just vector-similar). Cross-encoder reranking is ON by default for MCP callers (better top-K relevance at small latency cost); pass `rerank: false` to skip when latency matters or the server has no reranker loaded."
     )]
     async fn search_entries(
         &self,
@@ -1313,6 +1313,19 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
         Ok(Json(neighborhood.into()))
     }
 
+    #[tool(
+        description = "Assemble the agent-harness graph: all typed harness nodes (harness_doc/plan/sprint/todo/agent/stream/audit) plus the manual edges between them, with the latest AUDITED verdict and status badge (green/yellow/red) resolved per node. Use to navigate Plan→Sprint→Todo hierarchies and find invariant collisions. Pass `source_id` to scope to one namespace."
+    )]
+    async fn harness_tree(
+        &self,
+        Parameters(query): Parameters<crate::api::harness::HarnessTreeQuery>,
+    ) -> Result<Json<crate::api::harness::HarnessTreeResponse>, String> {
+        crate::api::harness::harness_tree_core(&self.state, query.source_id)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
     #[tool(description = "Rebuild similarity edges across the graph.")]
     async fn rebuild_graph(&self) -> Result<Json<GraphRebuildResponse>, String> {
         let store = self.state.store.clone();
@@ -1868,7 +1881,9 @@ Wait for the terminal_created event before returning (default 10s timeout)."
         }))
     }
 
-    #[tool(description = "Send input to an ACP terminal. `data` is a plain string that will be base64-encoded before sending.")]
+    #[tool(
+        description = "Send input to an ACP terminal. `data` is a plain string that will be base64-encoded before sending."
+    )]
     async fn acp_terminal_input(
         &self,
         Parameters(params): Parameters<AcpTerminalInputParams>,
@@ -3072,11 +3087,7 @@ fn parse_terminal_created(text: &str) -> Option<String> {
     }
     payload
         .get("terminal_id")
-        .or_else(|| {
-            payload
-                .get("terminal")
-                .and_then(|t| t.get("terminal_id"))
-        })
+        .or_else(|| payload.get("terminal").and_then(|t| t.get("terminal_id")))
         .and_then(|v| v.as_str())
         .map(str::to_owned)
 }
@@ -3157,6 +3168,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 retrievers: Vec::new(),
                 path: None,
                 analysis: None,
+                type_name: None,
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }

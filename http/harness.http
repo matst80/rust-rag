@@ -1,0 +1,326 @@
+### Harness (Grill) graph — see docs/harness.md
+### Base URL (adjust to your deployment)
+@base = http://localhost:4001
+@api_key = {{$dotenv RAG_API_KEY}}
+
+### 1. Project a governing doc (ADR)
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "adr-007",
+  "type": "harness_doc",
+  "text": "ADR 7: The embedding cache MUST be shared across processes via Postgres. Per-process caches violate the shared-pool invariant.",
+  "source_id": "harness",
+  "data": {
+    "doc_type": "ADR",
+    "title": "ADR 7 shared embedding cache",
+    "version": "1.1",
+    "status": "ACTIVE"
+  },
+  "metadata": { "author": "harness", "tags": ["adr"] }
+}
+
+### 2. Project a plan
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "plan-001",
+  "type": "harness_plan",
+  "text": "Plan: add an embedding cache to cut re-embedding costs. Assumption: a per-process LRU cache is sufficient.",
+  "source_id": "harness",
+  "data": { "title": "Embedding cache", "state": "PROPOSED" },
+  "metadata": { "author": "harness", "tags": ["plan"] }
+}
+
+### 3. Project a sprint + todo
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "sprint-001",
+  "type": "harness_sprint",
+  "text": "Sprint: cache foundation.",
+  "source_id": "harness",
+  "data": { "plan_id": "plan-001", "cadence": "weekly", "goal": "Cache prototype", "state": "PLANNED" },
+  "metadata": { "author": "harness" }
+}
+
+###
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "todo-001",
+  "type": "harness_todo",
+  "text": "Implement a per-process LRU embedding cache keyed by model+text hash.",
+  "source_id": "harness",
+  "data": {
+    "sprint_id": "sprint-001",
+    "title": "Implement LRU cache",
+    "action_spec": { "tool": "edit", "paths": ["src/embedding/**"] },
+    "state": "PENDING",
+    "sequence_order": 1
+  },
+  "metadata": { "author": "harness" }
+}
+
+### 4. Structural edges (plan -> doc, plan -> sprint, sprint -> todo, todo -> doc)
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "plan-001", "to_item_id": "adr-007", "relation": "GOVERNED_BY", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "plan-001", "to_item_id": "sprint-001", "relation": "BREAKS_INTO", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "sprint-001", "to_item_id": "todo-001", "relation": "CONTAINS_TODO", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "todo-001", "to_item_id": "adr-007", "relation": "ENFORCES_DOC", "directed": true }
+
+### 5. Post a grill audit verdict (harness-side LLM verification result)
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "audit-todo-001-v1",
+  "type": "harness_audit",
+  "text": "Grill verdict for todo-001 v1.",
+  "source_id": "harness",
+  "data": {
+    "target_id": "todo-001",
+    "target_type": "harness_todo",
+    "passed": false,
+    "score": 0.35,
+    "violations": [
+      {
+        "doc_id": "adr-007",
+        "title": "ADR 7 shared embedding cache",
+        "violation_reason": "Task assumes a per-process LRU cache; ADR 7 mandates a shared Postgres-backed cache.",
+        "severity": "BLOCKING"
+      }
+    ],
+    "unanchored_assumptions": ["cache eviction policy is irrelevant to correctness"],
+    "suggested_edits": [
+      { "doc_id": "adr-007", "suggestion": "Implement the cache as a Postgres-backed shared table with an LRU eviction worker." }
+    ],
+    "auditor": "grill-worker",
+    "audited_at": 1757700000000
+  },
+  "metadata": { "author": "grill-worker" }
+}
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "audit-todo-001-v1", "to_item_id": "todo-001", "relation": "AUDITED", "directed": true }
+
+### 6. Cockpit tree (nodes + edges + latest verdict + badges)
+GET {{base}}/api/harness/tree
+x-api-key: {{api_key}}
+
+### 7. Multi-type hybrid search over harness nodes
+POST {{base}}/api/search
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "query": "embedding cache invalidation",
+  "top_k": 5,
+  "type_names": ["harness_plan", "harness_todo", "harness_doc"]
+}
+
+### 8. Two-hop graph expansion from the todo
+GET {{base}}/api/graph/neighborhood/todo-001?depth=2&limit=100
+x-api-key: {{api_key}}
+
+### 9. Token count for a context slice
+POST {{base}}/admin/tokens/count
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "text": "# Context Slice\nTask: implement the shared cache…" }
+
+### --- POC-session domain ---
+
+### Register the repo
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "repo-rust-rag",
+  "type": "harness_repo",
+  "text": "rust-rag — Graph RAG backend.",
+  "source_id": "harness",
+  "data": { "name": "rust-rag", "url": "https://github.com/matst80/rust-rag", "default_branch": "main" },
+  "metadata": { "author": "harness" }
+}
+
+### A POC session on that repo
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "poc-rust-rag-2026-09",
+  "type": "harness_poc",
+  "text": "POC session: benchmarked pgvector HNSW vs sequential scan; recommendation is to defer HNSW.",
+  "source_id": "harness",
+  "data": {
+    "repo": "repo-rust-rag",
+    "summary": "Benchmarked pgvector index strategies on 50k chunks.",
+    "rollout_recommendation": "Adopt pgvector now; revisit HNSW past 500k chunks.",
+    "timestamp": 1757700000000
+  },
+  "metadata": { "author": "harness" }
+}
+
+### Promoted memories raised by the session
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "dec-pgvector-2026-09",
+  "type": "harness_decision",
+  "text": "Use pgvector sequential scan for hybrid search until the corpus exceeds ~500k chunks.",
+  "source_id": "harness",
+  "data": { "title": "Defer HNSW index" },
+  "metadata": { "author": "harness" }
+}
+
+###
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "risk-latency-2026-09",
+  "type": "harness_risk",
+  "text": "Sequential scans may push p99 latency past the SLO as the corpus grows.",
+  "source_id": "harness",
+  "data": { "title": "p99 latency growth", "severity": "high" },
+  "metadata": { "author": "harness" }
+}
+
+###
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "val-latency-bench",
+  "type": "harness_validation",
+  "text": "Re-run the latency benchmark monthly at 100k/250k/500k chunk counts.",
+  "source_id": "harness",
+  "data": { "title": "Quarterly latency benchmark", "status": "needed", "how": "make eval against prod snapshot" },
+  "metadata": { "author": "harness" }
+}
+
+###
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "roll-pgvector",
+  "type": "harness_rollout",
+  "text": "Two-phase rollout: shadow namespace first, then cut the default store over.",
+  "source_id": "harness",
+  "data": {
+    "title": "pgvector cutover",
+    "phases": [
+      { "name": "shadow", "description": "Dual-write into pgvector behind a flag", "gate": "RRF parity within 2%" },
+      { "name": "cutover", "description": "Switch RAG_DATABASE_URL routing" }
+    ],
+    "prerequisites": ["postgres 12.7+ with pgvector", "backup snapshot restored"]
+  },
+  "metadata": { "author": "harness" }
+}
+
+###
+POST {{base}}/api/store
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{
+  "id": "res-gpu-pool",
+  "type": "harness_resource",
+  "text": "Shared GPU node pool for embedding + reranker workloads.",
+  "source_id": "harness",
+  "data": { "title": "serber GPU pool", "kind": "kubernetes-node", "provisioned": true },
+  "metadata": { "author": "harness" }
+}
+
+### POC edges: repo→poc, poc→raised, risk→validation, rollout→resource
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "repo-rust-rag", "to_item_id": "poc-rust-rag-2026-09", "relation": "HAD_POC", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "poc-rust-rag-2026-09", "to_item_id": "dec-pgvector-2026-09", "relation": "RAISED", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "poc-rust-rag-2026-09", "to_item_id": "risk-latency-2026-09", "relation": "RAISED", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "poc-rust-rag-2026-09", "to_item_id": "roll-pgvector", "relation": "RAISED", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "risk-latency-2026-09", "to_item_id": "val-latency-bench", "relation": "ADDRESSED_BY", "directed": true }
+
+###
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "roll-pgvector", "to_item_id": "res-gpu-pool", "relation": "REQUIRES", "directed": true }
+
+### A later POC supersedes the earlier decision (history chain)
+POST {{base}}/admin/graph/edges
+Content-Type: application/json
+x-api-key: {{api_key}}
+
+{ "from_item_id": "dec-hnsw-2026-12", "to_item_id": "dec-pgvector-2026-09", "relation": "SUPERSEDES", "directed": true }

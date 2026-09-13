@@ -88,6 +88,11 @@ pub struct SearchRequest {
     /// Restrict results to entries whose `type` equals this value.
     #[serde(default, rename = "type")]
     pub type_name: Option<String>,
+    /// Restrict results to entries whose `type` is any of these values.
+    /// Ignored when `type` is set. Results are merged per type before the
+    /// overall top-K is cut, so every requested type gets a fair shot.
+    #[serde(default, rename = "type_names")]
+    pub type_names: Option<Vec<String>>,
 
     /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
     #[serde(default = "default_hybrid")]
@@ -165,6 +170,10 @@ pub struct SearchResultPayload {
     /// `None` when no analysis has been run yet.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub analysis: Option<Value>,
+    /// Typed-entry schema name (e.g. `harness_plan`). `None` for untyped
+    /// entries.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub type_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -201,6 +210,7 @@ impl From<SearchHit> for SearchResultPayload {
             retrievers: value.retrievers,
             path: value.path,
             analysis: value.analysis,
+            type_name: value.type_name,
         }
     }
 }
@@ -497,6 +507,12 @@ pub(crate) async fn search_core(
     let top_k = request.top_k;
     let source_id = request.source_id;
     let type_name = request.type_name;
+    // Multi-type filter: only honored when the single-type filter is unset.
+    let type_names = if type_name.is_some() {
+        None
+    } else {
+        request.type_names.filter(|t| !t.is_empty())
+    };
     let max_distance = request.max_distance;
     let now_ms = current_timestamp_millis()?;
     // Reranker is **opt-in**: the cross-encoder adds noticeable latency
@@ -523,13 +539,24 @@ pub(crate) async fn search_core(
         let top_k = top_k;
         tokio::task::spawn_blocking(
             move || -> anyhow::Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
-                let (items, _) = store.list_items(ListItemsRequest {
-                    source_id,
-                    type_name,
-                    limit: Some(top_k),
-                    sort_order: SortOrder::Desc,
-                    ..Default::default()
-                })?;
+                let (items, _) = {
+                    let type_targets: Vec<Option<String>> = match &type_names {
+                        Some(names) => names.iter().map(|n| Some(n.clone())).collect(),
+                        None => vec![type_name.clone()],
+                    };
+                    let mut items = Vec::new();
+                    for tn in type_targets {
+                        let (page, _) = store.list_items(ListItemsRequest {
+                            source_id: source_id.clone(),
+                            type_name: tn,
+                            limit: Some(top_k),
+                            sort_order: SortOrder::Desc,
+                            ..Default::default()
+                        })?;
+                        items.extend(page);
+                    }
+                    (items, ())
+                };
                 let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
                 // For empty queries, we set retrievers to "recent"
                 for hit in &mut hits {
@@ -555,22 +582,44 @@ pub(crate) async fn search_core(
                 } else {
                     raw.clone()
                 };
-                let hits = if request.hybrid {
-                    store.search_hybrid(
-                        &query,
-                        &embedding,
-                        &sparse,
-                        candidate_top_k,
-                        source_id.as_deref(),
-                        type_name.as_deref(),
-                    )?
-                } else {
-                    store.search(
-                        &embedding,
-                        candidate_top_k,
-                        source_id.as_deref(),
-                        type_name.as_deref(),
-                    )?
+                let hits = {
+                    let type_targets: Vec<Option<String>> = match &type_names {
+                        Some(names) => names.iter().map(|n| Some(n.clone())).collect(),
+                        None => vec![type_name.clone()],
+                    };
+                    let mut hits: Vec<SearchHit> = Vec::new();
+                    for tn in &type_targets {
+                        let page = if request.hybrid {
+                            store.search_hybrid(
+                                &query,
+                                &embedding,
+                                &sparse,
+                                candidate_top_k,
+                                source_id.as_deref(),
+                                tn.as_deref(),
+                            )?
+                        } else {
+                            store.search(
+                                &embedding,
+                                candidate_top_k,
+                                source_id.as_deref(),
+                                tn.as_deref(),
+                            )?
+                        };
+                        hits.extend(page);
+                    }
+                    // Merge per-type rankings: dedup by id keeping the best
+                    // (lowest) distance, then cut to the overall candidate pool.
+                    hits.sort_by(|a, b| {
+                        a.id.cmp(&b.id).then_with(|| {
+                            a.distance
+                                .partial_cmp(&b.distance)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                    hits.dedup_by(|a, b| a.id == b.id);
+                    hits.truncate(candidate_top_k);
+                    hits
                 };
                 let mut filtered: Vec<SearchHit> = hits
                     .into_iter()

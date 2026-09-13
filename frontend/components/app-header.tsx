@@ -8,6 +8,7 @@ import { ManagerMemoryPanel } from "@/components/manager/memory-panel"
 import {
   BookOpen,
   Brain,
+  Flame,
   FolderOpen,
   FolderTree,
   GitBranch,
@@ -35,6 +36,7 @@ const navigation = [
   { name: "Entries", href: "/entries", icon: FolderOpen },
   { name: "Wiki", href: "/wiki", icon: FolderTree },
   { name: "Graph", href: "/visualize", icon: GitBranch },
+  { name: "Grill", href: "/grill", icon: Flame },
   { name: "Agents", href: "/acp", icon: Terminal },
 ]
 

@@ -9,6 +9,7 @@ pub mod dream;
 mod dreaming;
 pub mod error;
 pub mod graph;
+pub mod harness;
 pub mod health;
 mod ingest_url;
 mod integrations;
@@ -69,13 +70,26 @@ pub(crate) use state::{NoopMessages, NoopUserMemory};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::anyhow;
+    use anyhow::{Result, anyhow};
     use axum_test::TestServer;
     use serde_json::json;
     use std::{
         collections::{BTreeMap, HashMap, HashSet, VecDeque},
-        sync::Mutex,
+        sync::{Arc, Mutex},
     };
+
+    use crate::api::cms::CmsTreeResponse;
+    use crate::config::{AuthConfig, ChunkingConfig, MultimodalConfig, OpenAiChatConfig};
+    use crate::db::{
+        AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord,
+        GraphEdgeType, GraphNeighborhood, GraphStatus, ItemRecord, ListItemsRequest,
+        ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
+        MessageUpdate, NewMessage, SearchHit, SortOrder, VectorStore,
+    };
+    use crate::embedding::EmbeddingService;
+
+    use axum::http::StatusCode;
+    use serde_json::Value;
 
     struct MockEmbedder {
         embedding: Vec<f32>,
@@ -188,7 +202,7 @@ mod tests {
             _query_embedding: &[f32],
             _top_k: usize,
             source_id: Option<&str>,
-            _type_name: Option<&str>,
+            type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
             self.search_source_ids
                 .lock()
@@ -198,7 +212,10 @@ mod tests {
                 .search_results
                 .lock()
                 .expect("store mutex poisoned")
-                .clone())
+                .iter()
+                .filter(|hit| type_name.is_none_or(|tn| hit.type_name.as_deref() == Some(tn)))
+                .cloned()
+                .collect())
         }
 
         fn search_hybrid(
@@ -208,9 +225,9 @@ mod tests {
             _query_sparse: &[(u32, f32)],
             top_k: usize,
             source_id: Option<&str>,
-            _type_name: Option<&str>,
+            type_name: Option<&str>,
         ) -> Result<Vec<SearchHit>> {
-            self.search(query_embedding, top_k, source_id, None)
+            self.search(query_embedding, top_k, source_id, type_name)
         }
 
         fn distances_for_ids(
@@ -280,6 +297,11 @@ mod tests {
                 .filter(|(item, _)| {
                     if let Some(source) = &request.source_id {
                         if &item.source_id != source {
+                            return false;
+                        }
+                    }
+                    if let Some(tn) = &request.type_name {
+                        if item.type_name.as_ref() != Some(tn) {
                             return false;
                         }
                     }
@@ -1130,6 +1152,7 @@ mod tests {
                 "metadata": { "label": "match" },
                 "source_id": "memory",
                 "created_at": 1234,
+                "updated_at": 1234,
                 "distance": 0.0125
             }],
             "related": []
@@ -1545,21 +1568,24 @@ mod tests {
                     "text": "two",
                     "metadata": {"kind":"b"},
                     "source_id": "memory",
-                    "created_at": 200
+                    "created_at": 200,
+                    "updated_at": 200
                 },
                 {
                     "id": "doc-3",
                     "text": "three",
                     "metadata": {"kind":"c"},
                     "source_id": "memory",
-                    "created_at": 300
+                    "created_at": 300,
+                    "updated_at": 300
                 },
                 {
                     "id": "doc-1",
                     "text": "one",
                     "metadata": {"kind":"a"},
                     "source_id": "knowledge",
-                    "created_at": 100
+                    "created_at": 100,
+                    "updated_at": 100
                 }
             ],
             "edges": [
@@ -1569,6 +1595,7 @@ mod tests {
                     "to_item_id": "doc-1",
                     "edge_type": "manual",
                     "relation": "supports",
+                    "sort_order": crate::db::format_edge_sort_order(1024),
                     "weight": 1.0,
                     "directed": true,
                     "metadata": {"kind":"manual"},
@@ -1581,6 +1608,7 @@ mod tests {
                     "to_item_id": "doc-3",
                     "edge_type": "similarity",
                     "relation": null,
+                    "sort_order": crate::db::format_edge_sort_order(2048),
                     "weight": 0.9,
                     "directed": false,
                     "metadata": {"distance":0.2},
@@ -1792,7 +1820,8 @@ mod tests {
                 "text": "two",
                 "metadata": {"kind":"b"},
                 "source_id": "memory",
-                "created_at": 200
+                "created_at": 200,
+                "updated_at": 200
             }],
             "total_count": 1
         }));
@@ -1822,7 +1851,8 @@ mod tests {
             "text": "full content",
             "metadata": { "kind": "reference" },
             "source_id": "knowledge",
-            "created_at": 42
+            "created_at": 42,
+            "updated_at": 42
         }));
     }
 
@@ -1867,13 +1897,14 @@ mod tests {
             .await;
 
         response.assert_status_ok();
-        response.assert_json(&json!({
-            "id": "doc-1",
-            "text": "new text",
-            "metadata": { "kind": "new" },
-            "source_id": "memory",
-            "created_at": 123
-        }));
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        assert_eq!(body["created_at"], 123);
+        assert_eq!(body["id"], "doc-1");
+        assert_eq!(body["text"], "new text");
+        assert_eq!(body["metadata"], json!({ "kind": "new" }));
+        assert_eq!(body["source_id"], "memory");
+        assert!(body["updated_at"].is_i64());
 
         let stored = store.stored.lock().expect("store mutex poisoned");
         assert_eq!(stored[0].0.source_id, "memory");
@@ -2951,5 +2982,280 @@ mod tests {
         assert_eq!(body["response_types_supported"], json!(["code"]));
         assert_eq!(body["code_challenge_methods_supported"], json!(["S256"]));
         assert!(body["authorization_endpoint"].is_string());
+    }
+
+    #[tokio::test]
+    async fn harness_tree_route_assembles_nodes_badges_and_edges() {
+        let plan = ItemRecord {
+            id: "plan-1".to_owned(),
+            text: "Embedding cache plan".to_owned(),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 10,
+            updated_at: 10,
+            path: None,
+            type_name: Some("harness_plan".to_owned()),
+            data: Some(json!({"title": "Embedding cache plan", "state": "PROPOSED"})),
+            analysis: None,
+        };
+        let sprint = ItemRecord {
+            id: "sprint-1".to_owned(),
+            text: "Sprint body".to_owned(),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 11,
+            updated_at: 11,
+            path: None,
+            type_name: Some("harness_sprint".to_owned()),
+            data: Some(
+                json!({"plan_id": "plan-1", "cadence": "weekly", "goal": "Cache", "state": "ACTIVE"}),
+            ),
+            analysis: None,
+        };
+        let todo = ItemRecord {
+            id: "todo-1".to_owned(),
+            text: "Implement LRU cache".to_owned(),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 12,
+            updated_at: 12,
+            path: None,
+            type_name: Some("harness_todo".to_owned()),
+            data: Some(
+                json!({"sprint_id": "sprint-1", "title": "Implement LRU cache", "action_spec": {"tool": "edit"}, "state": "PENDING", "sequence_order": 1}),
+            ),
+            analysis: None,
+        };
+        let doc = ItemRecord {
+            id: "adr-1".to_owned(),
+            text: "Cache must be process-local".to_owned(),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 13,
+            updated_at: 13,
+            path: None,
+            type_name: Some("harness_doc".to_owned()),
+            data: Some(
+                json!({"doc_type": "ADR", "title": "ADR 7 process-local cache", "version": "1.1", "status": "ACTIVE"}),
+            ),
+            analysis: None,
+        };
+        let audit = ItemRecord {
+            id: "audit-1".to_owned(),
+            text: "audit verdict".to_owned(),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 20,
+            updated_at: 20,
+            path: None,
+            type_name: Some("harness_audit".to_owned()),
+            data: Some(json!({
+                "target_id": "todo-1",
+                "target_type": "harness_todo",
+                "passed": true,
+                "score": 0.92,
+                "violations": [],
+                "unanchored_assumptions": [],
+                "audited_at": 500
+            })),
+            analysis: None,
+        };
+        let edges = vec![
+            GraphEdgeRecord {
+                id: "e1".to_owned(),
+                from_item_id: "plan-1".to_owned(),
+                to_item_id: "sprint-1".to_owned(),
+                edge_type: GraphEdgeType::Manual,
+                relation: Some("BREAKS_INTO".to_owned()),
+                sort_order: "0".to_owned(),
+                weight: 1.0,
+                directed: true,
+                metadata: json!({}),
+                created_at: 1,
+                updated_at: 1,
+            },
+            GraphEdgeRecord {
+                id: "e2".to_owned(),
+                from_item_id: "sprint-1".to_owned(),
+                to_item_id: "todo-1".to_owned(),
+                edge_type: GraphEdgeType::Manual,
+                relation: Some("CONTAINS_TODO".to_owned()),
+                sort_order: "0".to_owned(),
+                weight: 1.0,
+                directed: true,
+                metadata: json!({}),
+                created_at: 1,
+                updated_at: 1,
+            },
+            GraphEdgeRecord {
+                id: "e3".to_owned(),
+                from_item_id: "todo-1".to_owned(),
+                to_item_id: "adr-1".to_owned(),
+                edge_type: GraphEdgeType::Manual,
+                relation: Some("ENFORCES_DOC".to_owned()),
+                sort_order: "0".to_owned(),
+                weight: 1.0,
+                directed: true,
+                metadata: json!({}),
+                created_at: 1,
+                updated_at: 1,
+            },
+            GraphEdgeRecord {
+                id: "e4".to_owned(),
+                from_item_id: "audit-1".to_owned(),
+                to_item_id: "todo-1".to_owned(),
+                edge_type: GraphEdgeType::Manual,
+                relation: Some("AUDITED".to_owned()),
+                sort_order: "0".to_owned(),
+                weight: 1.0,
+                directed: true,
+                metadata: json!({}),
+                created_at: 1,
+                updated_at: 1,
+            },
+            // Outside the harness set: must be filtered from the response.
+            GraphEdgeRecord {
+                id: "e5".to_owned(),
+                from_item_id: "plan-1".to_owned(),
+                to_item_id: "some-memory-item".to_owned(),
+                edge_type: GraphEdgeType::Manual,
+                relation: Some("is_a".to_owned()),
+                sort_order: "0".to_owned(),
+                weight: 1.0,
+                directed: false,
+                metadata: json!({}),
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+        let store = Arc::new(MockStore::seed_graph(
+            vec![plan, sprint, todo, doc, audit],
+            edges,
+        ));
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
+
+        let response = server.get("/api/harness/tree").await;
+
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        let nodes = body["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 5);
+
+        let todo_node = nodes
+            .iter()
+            .find(|n| n["id"] == "todo-1")
+            .expect("todo node present");
+        assert_eq!(todo_node["badge"], "green");
+        assert_eq!(todo_node["verdict"]["audit_id"], "audit-1");
+        assert_eq!(todo_node["verdict"]["score"], 0.92);
+        assert_eq!(todo_node["title"], "Implement LRU cache");
+
+        let plan_node = nodes.iter().find(|n| n["id"] == "plan-1").unwrap();
+        assert_eq!(plan_node["badge"], "yellow");
+        assert_eq!(plan_node["title"], "Embedding cache plan");
+
+        let doc_node = nodes.iter().find(|n| n["id"] == "adr-1").unwrap();
+        assert_eq!(doc_node["badge"], serde_json::Value::Null);
+
+        assert!(nodes.iter().all(|n| n["type_name"] != "harness_agent"));
+
+        let edges_out = body["edges"].as_array().unwrap();
+        assert_eq!(edges_out.len(), 4);
+        assert!(edges_out.iter().all(|e| e["id"] != "e5"));
+    }
+
+    #[tokio::test]
+    async fn harness_tree_route_filters_by_source_id() {
+        let item = ItemRecord {
+            id: "plan-x".to_owned(),
+            text: "Other namespace plan".to_owned(),
+            metadata: json!({}),
+            source_id: "other".to_owned(),
+            created_at: 10,
+            updated_at: 10,
+            path: None,
+            type_name: Some("harness_plan".to_owned()),
+            data: Some(json!({"title": "Other plan", "state": "PROPOSED"})),
+            analysis: None,
+        };
+        let store = Arc::new(MockStore::seed(vec![item]));
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
+        let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
+
+        let response = server.get("/api/harness/tree?source_id=harness").await;
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 0);
+
+        let response = server.get("/api/harness/tree?source_id=other").await;
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_route_merges_type_names_results() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let hit = |id: &str, tn: &str, distance: f32| SearchHit {
+            id: id.to_owned(),
+            text: format!("text {id}"),
+            metadata: json!({}),
+            source_id: "harness".to_owned(),
+            created_at: 1,
+            updated_at: 1,
+            distance,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: None,
+            type_name: Some(tn.to_owned()),
+            tags: Vec::new(),
+            analysis: None,
+        };
+        // Duplicate id at two distances: the merge must keep the best one.
+        let store = Arc::new(MockStore::with_results(vec![
+            hit("plan-1", "harness_plan", 0.3),
+            hit("plan-1", "harness_plan", 0.1),
+            hit("todo-1", "harness_todo", 0.2),
+            hit("note-1", "note", 0.05),
+        ]));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
+
+        let response = server
+            .post("/api/search")
+            .json(&json!({
+                "query": "cache",
+                "top_k": 5,
+                "type_names": ["harness_plan", "harness_todo"]
+            }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        let results = body["results"].as_array().unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["plan-1", "todo-1"]);
+        assert_eq!(results[0]["type_name"], "harness_plan");
+
+        // Single-type filter still wins over type_names when both are set.
+        let response = server
+            .post("/api/search")
+            .json(&json!({
+                "query": "cache",
+                "top_k": 5,
+                "type": "harness_todo",
+                "type_names": ["harness_plan"]
+            }))
+            .await;
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["id"], "todo-1");
     }
 }

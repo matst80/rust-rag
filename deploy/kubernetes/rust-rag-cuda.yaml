@@ -91,17 +91,13 @@ data:
   ## individual message delete/update. ApiKey + Disabled auth paths are
   ## already unrestricted; this knob covers session-cookie users.
   RAG_ADMIN_SUBJECTS: "369527412653951321"
-  RAG_OPENAI_API_BASE_URL: "http://llama-cpp-server.llm.svc.cluster.local/v1"
-  RAG_OPENAI_MODEL: "Opus4.7-Distill-GODsGhost-Codex-4B-Q4_K_M.gguf"
+  RAG_OPENAI_API_BASE_URL: "https://openrouter.ai/api/v1"
+  RAG_OPENAI_MODEL: "inclusionai/ling-3.0-flash-vl:free"
   RAG_CDP_URL: "http://10.10.3.27:9222"
-  ## LLM-on-store analysis pass. Probe-verified config: bare-metal
-  ## llama.cpp at 10.10.11.135:8082 serving unsloth/Qwen3.5-4B-GGUF
-  ## with thinking disabled via chat_template_kwargs (llama.cpp build
-  ## ignores reasoning_effort + thinking_budget — must be hard-off).
-  ## Falls back to RAG_OPENAI_* if any of these are unset.
+  ## LLM-on-store analysis pass and ontology extraction configured via OpenRouter.
   RAG_ANALYSIS_ENABLED: "true"
-  RAG_ANALYSIS_BASE_URL: "http://10.10.11.135:8082/v1"
-  RAG_ANALYSIS_MODEL: "unsloth/Qwen3.5-4B-GGUF"
+  RAG_ANALYSIS_BASE_URL: "https://openrouter.ai/api/v1"
+  RAG_ANALYSIS_MODEL: "inclusionai/ling-3.0-flash-vl:free"
   RAG_ANALYSIS_TIMEOUT_SECS: "60"
   RAG_ANALYSIS_MAX_NEIGHBORS: "4"
   RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.6"
@@ -142,9 +138,9 @@ data:
   RAG_OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-debug-service.monitoring.svc.cluster.local:4317"
   OTEL_SERVICE_NAME: "rust-rag"
-  ZITADEL_ISSUER: "https://auth.k6n.net"
-  ZITADEL_CLIENT_ID: "369530153681881434@rag"
-  ZITADEL_SCOPES: "openid profile email"
+  ZITADEL_ISSUER: "https://users.k6n.net"
+  ZITADEL_CLIENT_ID: "rust-rag"
+  ZITADEL_SCOPES: "openid profile email offline_access"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

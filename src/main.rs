@@ -488,7 +488,6 @@ async fn main() -> Result<()> {
                 embedder_handle.mark_failed(error.to_string());
             }
         }
-
     });
 
     let state_for_shutdown = state.clone();

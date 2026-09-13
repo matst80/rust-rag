@@ -820,17 +820,23 @@ mod tests {
             .unwrap()
             .edges;
         assert_eq!(edges.len(), 2);
-        assert_eq!(edges[0].relation.as_ref().map(|r| r.as_ref()), Some("is_a"));
-        assert!((edges[0].weight - 0.95).abs() < 0.001);
-        assert!(edges[0].directed);
-        assert_eq!(edges[0].metadata["status"], "confirmed");
+        // Edges come back in a deterministic but implementation-defined order;
+        // match them up by predicate.
+        let is_a = edges
+            .iter()
+            .find(|e| e.relation.as_ref().map(|r| r.as_ref()) == Some("is_a"))
+            .expect("is_a edge present");
+        let depends_on = edges
+            .iter()
+            .find(|e| e.relation.as_ref().map(|r| r.as_ref()) == Some("depends_on"))
+            .expect("depends_on edge present");
+        assert!((is_a.weight - 0.95).abs() < 0.001);
+        assert!(is_a.directed);
+        assert_eq!(is_a.metadata["status"], "confirmed");
+        assert_eq!(is_a.metadata["reasoning"], "HashMap is a data structure.");
+        assert_eq!(depends_on.metadata["status"], "suggested");
         assert_eq!(
-            edges[0].metadata["reasoning"],
-            "HashMap is a data structure."
-        );
-        assert_eq!(edges[1].metadata["status"], "suggested");
-        assert_eq!(
-            edges[1].metadata["reasoning"],
+            depends_on.metadata["reasoning"],
             "HashMap depends on hashing."
         );
     }

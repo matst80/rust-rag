@@ -1,6 +1,5 @@
 use axum::{
-    Router,
-    middleware,
+    Router, middleware,
     routing::{delete, get, post},
 };
 use tower_http::{
@@ -13,8 +12,9 @@ use super::auth;
 use super::auth_guard::require_api_key;
 use super::state::AppState;
 use super::{
-    acp, analysis, attachments, cms, dream, graph, health, ingest_url, integrations, items,
-    map, messages, multimodal, ontology, openai, push, query, schemas, store_search, whisper,
+    acp, analysis, attachments, cms, dream, graph, harness, health, ingest_url, integrations,
+    items, map, messages, multimodal, ontology, openai, push, query, schemas, store_search,
+    whisper,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -35,7 +35,12 @@ pub fn router(state: AppState) -> Router {
         .route("/graph/edges", get(graph::list_graph_edges))
         .route("/api/graph/edges", get(graph::list_graph_edges))
         .route("/graph/neighborhood/{id}", get(graph::graph_neighborhood))
-        .route("/api/graph/neighborhood/{id}", get(graph::graph_neighborhood))
+        .route(
+            "/api/graph/neighborhood/{id}",
+            get(graph::graph_neighborhood),
+        )
+        .route("/harness/tree", get(harness::harness_tree))
+        .route("/api/harness/tree", get(harness::harness_tree))
         .route("/api/cms/tree/{id}", get(cms::get_cms_tree))
         .route("/api/map", get(map::get_map))
         .route("/admin/map/rebuild", post(map::rebuild_map))
@@ -49,7 +54,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(items::delete_item),
         )
         .route("/admin/items/{id}/reanalyze", post(items::reanalyze_item))
-        .route("/admin/items/{id}/rechunk", post(store_search::rechunk_item))
+        .route(
+            "/admin/items/{id}/rechunk",
+            post(store_search::rechunk_item),
+        )
         .route(
             "/admin/items/{id}/llm-rechunk",
             post(store_search::llm_rechunk_item),

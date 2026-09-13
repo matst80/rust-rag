@@ -26,6 +26,7 @@ import type {
   UpdateEdgeRequest,
   MapPoint,
   DriveSearchResult,
+  HarnessTreeResponse,
 } from "./types"
 
 // Categories hooks
@@ -275,5 +276,13 @@ export function useDriveSearch(query: string, mimeType?: string) {
     query ? ["drive-search", query, mimeType] : null,
     () => api.integrations.google.drive.search(query, mimeType),
     { revalidateOnFocus: false }
+  )
+}
+
+// Harness (Grill) hooks
+export function useHarnessTree(sourceId?: string | null) {
+  return useSWR<HarnessTreeResponse>(
+    ["harness-tree", sourceId ?? null],
+    ([, sid]) => api.harness.tree((sid as string | null) ?? undefined)
   )
 }

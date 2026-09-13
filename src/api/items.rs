@@ -213,15 +213,16 @@ pub(crate) async fn get_item(
 ) -> Result<Json<AdminItemPayload>, ApiError> {
     let store = state.store.clone();
     let id_for_lookup = id.clone();
-    let (item, analysis, neighborhood) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let item = store.get_item(&id_for_lookup)?;
-        let analysis = store.get_item_analysis(&id_for_lookup)?;
-        let neighborhood = store.graph_neighborhood(&id_for_lookup, 1, 10, None).ok();
-        Ok((item, analysis, neighborhood))
-    })
-    .await
-    .map_err(ApiError::TaskJoin)?
-    .map_err(ApiError::Internal)?;
+    let (item, analysis, neighborhood) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let item = store.get_item(&id_for_lookup)?;
+            let analysis = store.get_item_analysis(&id_for_lookup)?;
+            let neighborhood = store.graph_neighborhood(&id_for_lookup, 1, 10, None).ok();
+            Ok((item, analysis, neighborhood))
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
     let item = item.ok_or_else(|| ApiError::NotFound("item not found".to_owned()))?;
     let mut payload: AdminItemPayload = item.into();
     if let Some(a) = analysis {

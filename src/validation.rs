@@ -163,3 +163,33 @@ pub fn seed_bundled_schemas(store: &dyn VectorStore) -> anyhow::Result<usize> {
     }
     Ok(loaded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every bundled schema file must compile as JSON Schema — a broken file
+    /// would otherwise be silently skipped at seed time.
+    #[test]
+    fn bundled_schema_files_compile() {
+        let dir = std::path::Path::new("assets/schemas");
+        assert!(dir.is_dir(), "assets/schemas missing");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let file = entry.unwrap().path();
+            if file.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&file).unwrap();
+            let bundled: BundledSchema = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("invalid schema file {file:?}: {e}"));
+            validate_meta_schema(&bundled.schema)
+                .unwrap_or_else(|e| panic!("schema {} invalid: {e}", bundled.type_name));
+            count += 1;
+        }
+        assert!(
+            count >= 16,
+            "expected the full bundled schema set, got {count}"
+        );
+    }
+}

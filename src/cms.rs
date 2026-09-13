@@ -183,8 +183,16 @@ impl CmsRuntime {
 
     fn fetch_adjacency(&self, node_id: &str) -> Result<CmsAdjacency> {
         let edges =
-            self.store
-                .list_graph_edges(Some(node_id), Some(GraphEdgeType::Manual), None)?;
+            match self
+                .store
+                .list_graph_edges(Some(node_id), Some(GraphEdgeType::Manual), None)
+            {
+                Ok(edges) => edges,
+                // Graph-less deployments have no structural adjacency; treat the
+                // node as a leaf instead of failing the store/update path.
+                Err(e) if e.to_string().contains("graph support is disabled") => Vec::new(),
+                Err(e) => return Err(e),
+            };
         let mut children = Vec::new();
         let mut parents = HashSet::new();
 

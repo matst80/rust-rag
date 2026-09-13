@@ -94,11 +94,11 @@ RAG_CUDA_MEM_LIMIT_MB ?= 4096
 RAG_CUDA_DEVICE_ID ?= 0
 API_URL ?= https://127.0.0.1:$(RAG_PORT)
 RAG_CDP_URL ?= ws://10.10.3.27:9222
-ZITADEL_ISSUER ?= https://auth.k6n.net
-ZITADEL_CLIENT_ID ?= 369530153681881434@rag
-ZITADEL_CLIENT_SECRET ?= U8opCVRn3hrFNcyXDJpb7DLQAa5aHEikjuQn2Rr5KwG7RiofvzKifxdTB3yEO0ID
+ZITADEL_ISSUER ?= https://users.k6n.net
+ZITADEL_CLIENT_ID ?= rust-rag
+ZITADEL_CLIENT_SECRET ?= TWScILAlAEHsaeKmBi9advIfpsj870v1unGQSLj7HwM
 ZITADEL_REDIRECT_URI ?= http://localhost:3000/auth/callback
-ZITADEL_SCOPES ?= openid profile email
+ZITADEL_SCOPES ?= openid profile email offline_access
 
 # Google integration (Phase 1). The redirect URI must be registered on the
 # OAuth client in the GCP console — the prod URL lives on the
@@ -251,6 +251,10 @@ test:
 verify:
 	cargo fmt --check
 	cargo test
+
+# Postgres-backed integration tests (require Docker); skipped by `cargo test`.
+test-integration:
+	cargo test --test harness_postgres -- --ignored
 
 check-env: fetch-assets
 	@test -f "$(RAG_MODEL_PATH)" || { echo "missing model at $(RAG_MODEL_PATH)"; exit 1; }

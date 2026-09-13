@@ -54,6 +54,8 @@ import type {
   CodeFileDetail,
   CodeSearchHit,
   CodeSearchRequest,
+  HarnessTreeResponse,
+  TokenCountResponse,
 } from "./types"
 
 const API_BASE_URL = ""
@@ -869,6 +871,19 @@ export async function rebuildMap(): Promise<{ status: string }> {
 }
 
 // Export API client as object
+// Harness (Grill) graph
+export async function getHarnessTree(sourceId?: string): Promise<HarnessTreeResponse> {
+  const qs = sourceId ? `?source_id=${encodeURIComponent(sourceId)}` : ""
+  return request<HarnessTreeResponse>(`/api/harness/tree${qs}`)
+}
+
+export async function countTokens(text: string): Promise<TokenCountResponse> {
+  return request<TokenCountResponse>("/admin/tokens/count", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  })
+}
+
 export const api = {
   categories: {
     list: getCategories,
@@ -885,6 +900,12 @@ export const api = {
   },
   graph: {
     status: getGraphStatus,
+  },
+  harness: {
+    tree: getHarnessTree,
+  },
+  tokens: {
+    count: countTokens,
   },
   items: {
     list: getItems,

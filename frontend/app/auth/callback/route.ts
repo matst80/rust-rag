@@ -43,8 +43,9 @@ export async function GET(request: NextRequest) {
 			discovery.token_endpoint
 		)
 
+		const tokenToVerify = tokenResponse.id_token || tokenResponse.access_token
 		const user = await verifyIdToken(
-			tokenResponse.id_token,
+			tokenToVerify,
 			discovery.jwks_uri,
 			discovery.issuer,
 			config.clientId

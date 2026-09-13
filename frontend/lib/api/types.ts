@@ -687,3 +687,79 @@ export interface CodeSearchRequest {
   path_prefix?: string;
   limit?: number;
 }
+
+// --- Harness (Grill) graph domain ---
+
+export type HarnessBadge = "green" | "yellow" | "red";
+
+export const HARNESS_NODE_TYPES = [
+  "harness_doc",
+  "harness_plan",
+  "harness_sprint",
+  "harness_todo",
+  "harness_agent",
+  "harness_stream",
+  "harness_audit",
+  "harness_repo",
+  "harness_poc",
+  "harness_decision",
+  "harness_risk",
+  "harness_compliance",
+  "harness_resource",
+  "harness_scaling",
+  "harness_validation",
+  "harness_rollout",
+] as const;
+
+export type HarnessNodeType = (typeof HARNESS_NODE_TYPES)[number];
+
+export interface HarnessAuditViolation {
+  doc_id: string;
+  title: string;
+  violation_reason: string;
+  severity: "BLOCKING" | "WARNING";
+}
+
+export interface HarnessSuggestedEdit {
+  doc_id: string;
+  suggestion: string;
+}
+
+export interface HarnessAuditVerdict {
+  audit_id: string;
+  passed: boolean;
+  score: number;
+  violations: HarnessAuditViolation[];
+  unanchored_assumptions: string[];
+  suggested_edits?: HarnessSuggestedEdit[];
+  audited_at: number;
+}
+
+export interface HarnessTreeNode {
+  id: string;
+  type_name: HarnessNodeType | string;
+  title: string;
+  state: string | null;
+  source_id: string;
+  created_at: number;
+  updated_at: number;
+  badge: HarnessBadge | null;
+  verdict?: HarnessAuditVerdict | null;
+}
+
+export interface HarnessTreeEdge {
+  id: string;
+  from_item_id: string;
+  to_item_id: string;
+  relation: string | null;
+}
+
+export interface HarnessTreeResponse {
+  nodes: HarnessTreeNode[];
+  edges: HarnessTreeEdge[];
+}
+
+export interface TokenCountResponse {
+  token_count: number;
+  char_count: number;
+}

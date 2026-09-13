@@ -18,9 +18,9 @@ data:
   RAG_GRAPH_MAX_DISTANCE: "0.75"
   RAG_GRAPH_CROSS_SOURCE: "false"
   RAG_AUTH_ENABLED: "true"
-  ZITADEL_ISSUER: "https://auth.k6n.net"
-  ZITADEL_CLIENT_ID: "369530153681881434@rag"
-  ZITADEL_SCOPES: "openid profile email"
+  ZITADEL_ISSUER: "https://users.k6n.net"
+  ZITADEL_CLIENT_ID: "rust-rag"
+  ZITADEL_SCOPES: "openid profile email offline_access"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

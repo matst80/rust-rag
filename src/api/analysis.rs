@@ -377,7 +377,9 @@ fn build_close_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
             preview
         ));
     }
-    out.push_str("Return JSON only. Use exact ids (no brackets). Skip unrelated neighbors entirely.");
+    out.push_str(
+        "Return JSON only. Use exact ids (no brackets). Skip unrelated neighbors entirely.",
+    );
     out
 }
 
@@ -385,7 +387,9 @@ fn build_loose_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
     let mut out = String::new();
     out.push_str("NEW ENTRY:\n");
     out.push_str(new_text.trim());
-    out.push_str("\n\nLOOSELY-SIMILAR NEIGHBORS (embedding distance is moderate; many will be unrelated):\n");
+    out.push_str(
+        "\n\nLOOSELY-SIMILAR NEIGHBORS (embedding distance is moderate; many will be unrelated):\n",
+    );
     for (i, hit) in neighbors.iter().enumerate() {
         let preview: String = hit
             .text
@@ -398,7 +402,9 @@ fn build_loose_prompt(new_text: &str, neighbors: &[SearchHit]) -> String {
             i, hit.id, hit.source_id, hit.distance, preview
         ));
     }
-    out.push_str("Return JSON only. Empty suggested_edges is the right answer when nothing connects.");
+    out.push_str(
+        "Return JSON only. Empty suggested_edges is the right answer when nothing connects.",
+    );
     out
 }
 

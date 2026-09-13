@@ -798,10 +798,7 @@ async fn handle_incoming(inner: &Arc<Mutex<InnerState>>, cap: usize, text: &str)
         if let Some(sid) = &session_id {
             g.live_sessions.remove(sid);
             g.live_terminals.retain(|_, terminal| {
-                terminal
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    != Some(sid.as_str())
+                terminal.get("session_id").and_then(Value::as_str) != Some(sid.as_str())
             });
             g.pending_permissions
                 .retain(|_, ev| ev.session_id.as_deref() != Some(sid.as_str()));

@@ -288,5 +288,4 @@ mod tests {
         assert_eq!(resp.actions.len(), 1);
         assert_eq!(resp.actions[0].action, "promote");
     }
-
 }

@@ -665,7 +665,9 @@ mod tests {
         assert!(!is_private_ip(&"8.8.8.8".parse::<IpAddr>().unwrap()));
         assert!(!is_private_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
         // A standard IPv6 public address
-        assert!(!is_private_ip(&"2001:4860:4860::8888".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(
+            &"2001:4860:4860::8888".parse::<IpAddr>().unwrap()
+        ));
     }
 
     #[tokio::test]
@@ -674,25 +676,35 @@ mod tests {
         let res = safe_fetch("http://127.0.0.1/test", 1000).await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+        assert!(
+            err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed")
+        );
 
         // Private range IPv4
         let res = safe_fetch("http://10.0.0.1/test", 1000).await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+        assert!(
+            err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed")
+        );
 
         // Loopback IPv6
         let res = safe_fetch("http://[::1]/test", 1000).await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed"));
+        assert!(
+            err_msg.contains("private/loopback address") || err_msg.contains("dns lookup failed")
+        );
     }
 
     #[tokio::test]
     async fn test_safe_fetch_invalid_scheme() {
         let res = safe_fetch("ftp://example.com/test", 1000).await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("scheme 'ftp' not allowed"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("scheme 'ftp' not allowed")
+        );
     }
 }
