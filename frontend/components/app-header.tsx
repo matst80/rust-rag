@@ -28,6 +28,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { HeaderSearch } from "@/components/header-search"
 
 // const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
 
@@ -113,7 +114,9 @@ export function AppHeader() {
           </div>
 
           {/* Right side */}
-          <div className="hidden sm:flex items-center">
+          <div className="flex items-center gap-2">
+            <HeaderSearch />
+            <div className="hidden sm:flex items-center">
             {navigationRight.map((item) => {
               const isActive = pathname.startsWith(item.href)
               return (
@@ -170,6 +173,7 @@ export function AppHeader() {
               </a>
             ) : null}
             <ThemeToggle />
+            </div>
           </div>
         </div>
       </header>

@@ -489,6 +489,11 @@ pub async fn chat_completion_text(
         .post(format!("{base_url}/chat/completions"))
         .timeout(std::time::Duration::from_secs(req.timeout_secs.max(1)))
         .json(&payload);
+    if base_url.contains("openrouter.ai") {
+        http_req = http_req
+            .header("HTTP-Referer", "https://rag.k6n.net")
+            .header("X-Title", "rust-rag");
+    }
     if let Some(key) = req.api_key {
         http_req = http_req.bearer_auth(key);
     }
@@ -602,7 +607,7 @@ pub(crate) async fn call_llm(
             user_prompt,
             max_tokens: 2000,
             temperature: 0.05,
-            response_format_json: true,
+            response_format_json: false,
         },
     )
     .await

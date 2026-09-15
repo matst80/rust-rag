@@ -17,6 +17,8 @@ import type {
   LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
+  ShareResponse,
+  CreateShareRequest,
   Attachment,
   EntriesTreeResponse,
   EntriesPathsResponse,
@@ -27,6 +29,9 @@ import type {
   MapPoint,
   DriveSearchResult,
   HarnessTreeResponse,
+  Message,
+  SendMessageRequest,
+  MessagesResponse,
 } from "./types"
 
 // Categories hooks
@@ -88,6 +93,35 @@ export function useLlmRechunkItem(id: string) {
   return useSWRMutation<RechunkResponse, Error, string, LlmRechunkRequest>(
     `llm-rechunk-${id}`,
     (_, { arg }) => api.items.llmRechunk(id, arg)
+  )
+}
+
+// Shares
+export function useItemShare(itemId: string | null) {
+  return useSWR<ShareResponse | null>(
+    itemId ? ["item-share", itemId] : null,
+    ([, id]) => api.items.getShare(id as string)
+  )
+}
+
+export function useCreateShare(itemId: string) {
+  return useSWRMutation<ShareResponse, Error, string[], CreateShareRequest | undefined>(
+    ["item-share", itemId],
+    (_, { arg }) => api.items.createShare(itemId, arg)
+  )
+}
+
+export function useRevokeShare(itemId: string) {
+  return useSWRMutation<void, Error, string[]>(
+    ["item-share", itemId],
+    () => api.items.revokeShare(itemId)
+  )
+}
+
+export function usePublicEntry(token: string | null) {
+  return useSWR<Entry>(
+    token ? ["public-entry", token] : null,
+    ([, t]) => api.public.getEntry(t as string)
   )
 }
 
@@ -284,5 +318,28 @@ export function useHarnessTree(sourceId?: string | null) {
   return useSWR<HarnessTreeResponse>(
     ["harness-tree", sourceId ?? null],
     ([, sid]) => api.harness.tree((sid as string | null) ?? undefined)
+  )
+}
+
+// Messages & Comments hooks
+export function useChannelMessages(channel: string | null) {
+  return useSWR<MessagesResponse>(
+    channel ? ["channel-messages", channel] : null,
+    () => api.messages.list({ channel: channel!, limit: 100 }),
+    { refreshInterval: 5000 }
+  )
+}
+
+export function useSendMessage() {
+  return useSWRMutation<Message, Error, string, SendMessageRequest>(
+    "channel-messages",
+    (_, { arg }) => api.messages.send(arg)
+  )
+}
+
+export function useDeleteMessage() {
+  return useSWRMutation<void, Error, string, string>(
+    "channel-messages",
+    (_, { arg }) => api.messages.delete(arg)
   )
 }

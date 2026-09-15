@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/command";
 import { EmbeddedGraph } from "../graph/embedded-graph";
 import { RELATION_STYLES } from "../graph/relation-item";
-import { cn } from "@/lib/utils";
+import { cn, edgeEndpointTitle, entryTitle } from "@/lib/utils";
 import {
   useGraphStatus,
   useSearch,
@@ -263,10 +263,10 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
                           className="w-full text-left p-3 rounded-xl border border-border bg-card hover:border-primary/40 hover:bg-primary/5 transition-all group"
                         >
                           <div className="flex flex-col gap-0.5">
-                            <span className="font-mono text-[10px] text-muted-foreground group-hover:text-primary transition-colors">
-                              {result.id.substring(0, 16)}...
+                            <span className="text-sm font-semibold line-clamp-1 group-hover:text-primary transition-colors">
+                              {entryTitle(result)}
                             </span>
-                            <span className="text-sm font-medium line-clamp-1">
+                            <span className="font-mono text-[10px] text-muted-foreground line-clamp-1">
                               {result.text.substring(0, 100)}
                             </span>
                           </div>
@@ -457,10 +457,13 @@ export function EntryGraphPanel({ id, edges }: EntryGraphPanelProps) {
 
                         <Link
                           href={`/entries/${encodeURIComponent(targetId)}`}
-                          className="font-mono text-xs text-foreground/80 hover:text-primary transition-colors truncate font-medium underline-offset-4 hover:underline"
+                          className="text-sm text-foreground/80 hover:text-primary transition-colors truncate font-medium underline-offset-4 hover:underline"
                           title={targetId}
                         >
-                          {targetId}
+                          {edgeEndpointTitle(
+                            targetId,
+                            edge.source_id === id ? edge.target_title : edge.source_title,
+                          )}
                         </Link>
                         {isManual && (
                           <div className="flex items-center gap-2 pt-1">

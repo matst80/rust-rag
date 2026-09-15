@@ -11,12 +11,14 @@ import {
   Terminal,
   Clock,
   History,
+  Share2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ComboButton } from "@/components/ui/combo-button";
 import { EntryTag } from "../ui/entry-tag";
 import { WikiPathPicker } from "./wiki-path-picker";
-import { formatRelativeTime } from "@/lib/utils";
+import { ShareModal } from "./share-modal";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import { toast } from "sonner";
 
 import { Entry } from "@/lib/api";
@@ -25,6 +27,7 @@ interface EntryHeaderProps {
   entry: Entry;
   isEditing: boolean;
   isDataValid: boolean;
+  isDirty?: boolean;
   onSave: () => Promise<void>;
   onStartEdit: () => void;
   onCancelEdit: () => void;
@@ -35,12 +38,14 @@ export function EntryHeader({
   entry,
   isEditing,
   isDataValid,
+  isDirty,
   onSave,
   onStartEdit,
   onCancelEdit,
   onDelete,
 }: EntryHeaderProps) {
   const [idCopied, setIdCopied] = useState(false);
+  const [isShareOpen, setIsShareOpen] = useState(false);
 
   const handleCopyId = async () => {
     try {
@@ -53,9 +58,28 @@ export function EntryHeader({
   };
 
   return (
-    <div className="flex h-12 shrink-0 items-center justify-between border-b border-border px-4 bg-background">
+    <div
+      className={cn(
+        "flex h-12 shrink-0 items-center justify-between border-b px-4 bg-background transition-colors",
+        isEditing ? "border-primary/30 bg-primary/[0.02]" : "border-border",
+      )}
+    >
       <div className="flex items-center gap-3 min-w-0">
-        <Button variant="ghost" size="icon" className="size-8 shrink-0" asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 shrink-0"
+          onClick={(e) => {
+            if (isDirty) {
+              e.preventDefault();
+              if (window.confirm("Discard unsaved changes?")) {
+                onCancelEdit();
+                window.location.href = "/entries";
+              }
+            }
+          }}
+          asChild
+        >
           <Link href="/entries">
             <ArrowLeft className="size-4" />
           </Link>
@@ -123,10 +147,32 @@ export function EntryHeader({
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
+        {isEditing && (
+          <span
+            className={cn(
+              "text-xs font-medium mr-1 hidden sm:inline transition-opacity",
+              isDirty ? "text-primary opacity-100" : "text-muted-foreground opacity-70",
+            )}
+          >
+            {isDirty ? "Unsaved changes" : "No changes"}
+          </span>
+        )}
+        {!isEditing && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="font-mono text-[10px] uppercase tracking-[1.5px] h-8 text-muted-foreground hover:text-foreground"
+            onClick={() => setIsShareOpen(true)}
+            title="Share entry publicly"
+          >
+            <Share2 className="size-3.5 mr-1.5" />
+            Share
+          </Button>
+        )}
         <Button
           variant={isEditing ? "default" : "outline"}
           size="sm"
-          className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
+          className="h-8"
           onClick={isEditing ? onSave : onStartEdit}
           disabled={isEditing && !isDataValid}
         >
@@ -143,17 +189,18 @@ export function EntryHeader({
           )}
         </Button>
         {isEditing && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="font-mono text-[10px] uppercase tracking-[1.5px] h-8"
-            onClick={onCancelEdit}
-          >
+          <Button variant="ghost" size="sm" className="h-8" onClick={onCancelEdit}>
             Cancel
           </Button>
         )}
         <ComboButton onConfirm={onDelete} className="size-8" />
       </div>
+
+      <ShareModal
+        itemId={entry.id}
+        isOpen={isShareOpen}
+        onClose={() => setIsShareOpen(false)}
+      />
     </div>
   );
 }

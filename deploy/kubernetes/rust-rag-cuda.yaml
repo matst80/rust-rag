@@ -121,10 +121,8 @@ data:
   ## Uses xAI Grok Fast Reasoning over the public API; api key lands via
   ## RAG_MANAGER_API_KEY in the rust-rag-frontend-auth Secret.
   RAG_MANAGER_ENABLED: "true"
-  RAG_MANAGER_API_BASE_URL: "https://api.x.ai/v1"
-  ## Live was manually pinned to grok-4.3 after the fast-reasoning variant
-  ## (2026-09: moved off it). Keep in sync with the cluster before applying.
-  RAG_MANAGER_MODEL: "grok-4.3"
+  RAG_MANAGER_API_BASE_URL: "https://openrouter.ai/api/v1"
+  RAG_MANAGER_MODEL: "inclusionai/ling-3.0-flash-vl:free"
   RAG_MANAGER_CHANNEL: "manager"
   RAG_MANAGER_MENTION: "@manager"
   RAG_MANAGER_INTERVAL_SECS: "300"

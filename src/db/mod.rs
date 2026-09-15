@@ -65,6 +65,15 @@ pub struct SchemaRecord {
     pub updated_at: i64,
 }
 
+/// Public share for an item, granting read-only access without authentication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PublicShareRecord {
+    pub token: String,
+    pub item_id: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+}
+
 /// Persisted LLM-on-store analysis for an entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemAnalysisRecord {
@@ -377,6 +386,104 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
             created_at: now,
             updated_at: now,
         },
+        // Harness-domain predicates (`src/api/harness.rs`): audit/POC lifecycle
+        // relations with no generic-knowledge-graph equivalent, so they stay
+        // UPPER_SNAKE rather than being force-fit into the canonical set above.
+        // Registered here (not left as unlisted free-text) so the ontology
+        // worker and cross-agent graph traversal actually see them instead of
+        // treating harness edges as noise. See docs/harness.md.
+        OntologyPredicateRecord {
+            name: "BREAKS_INTO".to_owned(),
+            source_id: None,
+            description: "from (a plan) breaks down into to (a sprint)".to_owned(),
+            direction: "from breaks down into to".to_owned(),
+            example_from: Some("harness_plan".to_owned()),
+            example_to: Some("harness_sprint".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "ENFORCES_DOC".to_owned(),
+            source_id: None,
+            description: "from is anchored to and must comply with governing doc to".to_owned(),
+            direction: "from is anchored to to".to_owned(),
+            example_from: Some("harness_plan".to_owned()),
+            example_to: Some("harness_doc".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "DELEGATES_TO".to_owned(),
+            source_id: None,
+            description: "from (a todo) assigns execution to sub-agent to".to_owned(),
+            direction: "from delegates execution to to".to_owned(),
+            example_from: Some("harness_todo".to_owned()),
+            example_to: Some("harness_agent".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "MUTATES_STREAM".to_owned(),
+            source_id: None,
+            description: "from (a todo) writes to event stream to".to_owned(),
+            direction: "from mutates to".to_owned(),
+            example_from: Some("harness_todo".to_owned()),
+            example_to: Some("harness_stream".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "AUDITED".to_owned(),
+            source_id: None,
+            description: "from (an audit verdict) is the latest audit result for to".to_owned(),
+            direction: "from audited to".to_owned(),
+            example_from: Some("harness_audit".to_owned()),
+            example_to: Some("harness_todo".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "HAD_POC".to_owned(),
+            source_id: None,
+            description: "from (a repo) had a POC/research session to run against it".to_owned(),
+            direction: "from had POC session to".to_owned(),
+            example_from: Some("harness_repo".to_owned()),
+            example_to: Some("harness_poc".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "RAISED".to_owned(),
+            source_id: None,
+            description: "from (a POC session) raised promoted memory to (decision/risk/…)"
+                .to_owned(),
+            direction: "from raised to".to_owned(),
+            example_from: Some("harness_poc".to_owned()),
+            example_to: Some("harness_risk".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "ADDRESSED_BY".to_owned(),
+            source_id: None,
+            description: "from (a risk) is mitigated or covered by validation to".to_owned(),
+            direction: "from is addressed by to".to_owned(),
+            example_from: Some("harness_risk".to_owned()),
+            example_to: Some("harness_validation".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "EVIDENCED_BY".to_owned(),
+            source_id: None,
+            description: "from (a todo) is motivated by session evidence to (a POC or promoted memory)"
+                .to_owned(),
+            direction: "from is evidenced by to".to_owned(),
+            example_from: Some("harness_todo".to_owned()),
+            example_to: Some("harness_poc".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
     ]
 }
 
@@ -669,6 +776,9 @@ pub struct ListItemsRequest {
     pub path_prefix: Option<String>,
     /// Restrict to entries whose `type` equals this value.
     pub type_name: Option<String>,
+    /// `Some(true)` restricts to entries with a wiki path set; `Some(false)`
+    /// restricts to entries with no path (unorganized). `None` is unfiltered.
+    pub has_path: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1054,6 +1164,20 @@ pub trait VectorStore: Send + Sync {
     /// promotion. Does not re-embed. Returns true when the item exists.
     fn merge_item_tags(&self, _id: &str, _tags: &[String]) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Public shares
+    fn create_public_share(&self, _item_id: &str, _token: &str, _expires_at: Option<i64>) -> Result<PublicShareRecord> {
+        anyhow::bail!("public shares not supported by this store")
+    }
+    fn get_public_share(&self, _token: &str) -> Result<Option<PublicShareRecord>> {
+        anyhow::bail!("public shares not supported by this store")
+    }
+    fn get_public_share_for_item(&self, _item_id: &str) -> Result<Option<PublicShareRecord>> {
+        anyhow::bail!("public shares not supported by this store")
+    }
+    fn revoke_public_shares_for_item(&self, _item_id: &str) -> Result<bool> {
+        anyhow::bail!("public shares not supported by this store")
     }
 }
 
@@ -2486,6 +2610,90 @@ impl VectorStore for SqliteVectorStore {
         )?;
         Ok(true)
     }
+
+    fn create_public_share(&self, item_id: &str, token: &str, expires_at: Option<i64>) -> Result<PublicShareRecord> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let now = current_timestamp_millis()?;
+        // Revoke any prior shares for this item first so there's at most one active share per item
+        connection.execute(
+            "DELETE FROM public_shares WHERE item_id = ?1",
+            params![item_id],
+        )?;
+        connection.execute(
+            "INSERT INTO public_shares (token, item_id, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![token, item_id, now, expires_at],
+        )?;
+        Ok(PublicShareRecord {
+            token: token.to_owned(),
+            item_id: item_id.to_owned(),
+            created_at: now,
+            expires_at,
+        })
+    }
+
+    fn get_public_share(&self, token: &str) -> Result<Option<PublicShareRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let now = current_timestamp_millis()?;
+        let mut stmt = connection.prepare(
+            "SELECT token, item_id, created_at, expires_at
+             FROM public_shares
+             WHERE token = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+        )?;
+        let mut rows = stmt.query(params![token, now])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(PublicShareRecord {
+                token: row.get(0)?,
+                item_id: row.get(1)?,
+                created_at: row.get(2)?,
+                expires_at: row.get(3)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_public_share_for_item(&self, item_id: &str) -> Result<Option<PublicShareRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let now = current_timestamp_millis()?;
+        let mut stmt = connection.prepare(
+            "SELECT token, item_id, created_at, expires_at
+             FROM public_shares
+             WHERE item_id = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+        )?;
+        let mut rows = stmt.query(params![item_id, now])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(PublicShareRecord {
+                token: row.get(0)?,
+                item_id: row.get(1)?,
+                created_at: row.get(2)?,
+                expires_at: row.get(3)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn revoke_public_shares_for_item(&self, item_id: &str) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let n = connection.execute(
+            "DELETE FROM public_shares WHERE item_id = ?1",
+            params![item_id],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 impl UserMemoryStore for SqliteVectorStore {
@@ -3247,6 +3455,14 @@ fn list_items_internal(
         sql_params.push(Box::new(type_name.clone()));
     }
 
+    if let Some(has_path) = request.has_path {
+        where_clauses.push(if has_path {
+            "(path IS NOT NULL AND path != '')".to_string()
+        } else {
+            "(path IS NULL OR path = '')".to_string()
+        });
+    }
+
     let where_sql = if where_clauses.is_empty() {
         "".to_string()
     } else {
@@ -3559,6 +3775,64 @@ mod tests {
     }
 
     #[test]
+    fn filters_by_has_path() {
+        let store = test_store();
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "filed-1".to_owned(),
+                    text: "filed".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 1000,
+                    updated_at: 1000,
+                    path: Some("team/handbook".to_owned()),
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .unwrap();
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "loose-1".to_owned(),
+                    text: "loose".to_owned(),
+                    metadata: json!({}),
+                    source_id: "memory".to_owned(),
+                    created_at: 2000,
+                    updated_at: 2000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                },
+                &[0.9, 0.1, 0.0],
+            )
+            .unwrap();
+
+        let (organized, total_organized) = store
+            .list_items(ListItemsRequest {
+                has_path: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total_organized, 1);
+        assert_eq!(organized[0].id, "filed-1");
+
+        let (unorganized, total_unorganized) = store
+            .list_items(ListItemsRequest {
+                has_path: Some(false),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total_unorganized, 1);
+        assert_eq!(unorganized[0].id, "loose-1");
+    }
+
+    #[test]
     fn filters_by_type() {
         let store = test_store();
 
@@ -3836,6 +4110,96 @@ mod tests {
         assert_eq!(status.edge_count, 2);
         assert_eq!(status.similarity_edge_count, 1);
         assert_eq!(status.manual_edge_count, 1);
+    }
+
+    #[test]
+    fn rebuild_similarity_graph_adjusts_distance_for_repo() {
+        let store = test_store_with_graph(GraphConfig {
+            enabled: true,
+            build_on_startup: false,
+            similarity_top_k: 5,
+            similarity_max_distance: 1.0,
+            cross_source: true,
+        });
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "base".to_owned(),
+                    text: "base doc".to_owned(),
+                    metadata: json!({"repo": "my-repo"}),
+                    source_id: "default".to_owned(),
+                    created_at: 1000,
+                    updated_at: 1000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .unwrap();
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "same-repo".to_owned(),
+                    text: "same repo doc".to_owned(),
+                    metadata: json!({"repo": "my-repo"}),
+                    source_id: "default".to_owned(),
+                    created_at: 2000,
+                    updated_at: 2000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                },
+                &[0.9, 0.1, 0.0],
+            )
+            .unwrap();
+
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: "diff-repo".to_owned(),
+                    text: "diff repo doc".to_owned(),
+                    metadata: json!({"repo": "other-repo"}),
+                    source_id: "default".to_owned(),
+                    created_at: 3000,
+                    updated_at: 3000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                },
+                &[0.9, 0.1, 0.0],
+            )
+            .unwrap();
+
+        let rebuilt = store.rebuild_similarity_graph().unwrap();
+        assert!(rebuilt >= 2);
+
+        let edges = store.list_graph_edges(None, None, None).unwrap();
+        let same_edge = edges
+            .iter()
+            .find(|e| (e.from_item_id == "base" && e.to_item_id == "same-repo") || (e.from_item_id == "same-repo" && e.to_item_id == "base"))
+            .expect("expected similarity edge between base and same-repo");
+        let diff_edge = edges
+            .iter()
+            .find(|e| (e.from_item_id == "base" && e.to_item_id == "diff-repo") || (e.from_item_id == "diff-repo" && e.to_item_id == "base"))
+            .expect("expected similarity edge between base and diff-repo");
+
+        assert_eq!(same_edge.metadata.get("same_repo").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(diff_edge.metadata.get("same_repo").and_then(|v| v.as_bool()), Some(false));
+
+        let same_raw = same_edge.metadata.get("raw_distance").and_then(|v| v.as_f64()).unwrap();
+        let same_dist = same_edge.metadata.get("distance").and_then(|v| v.as_f64()).unwrap();
+        let diff_raw = diff_edge.metadata.get("raw_distance").and_then(|v| v.as_f64()).unwrap();
+        let diff_dist = diff_edge.metadata.get("distance").and_then(|v| v.as_f64()).unwrap();
+
+        assert!((same_dist - same_raw * 0.80).abs() < 1e-4, "same_repo should have 20% distance discount");
+        assert!((diff_dist - diff_raw * 1.15).abs() < 1e-4, "diff_repo should have 15% distance penalty");
+        assert!(same_dist < diff_dist);
     }
 
     #[test]

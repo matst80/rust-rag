@@ -296,7 +296,7 @@ export function AuditPanel({
               No grill audit recorded for this node yet.
               {node.badge === "yellow" && (
                 <span className="text-amber-500">
-                  Unanchored: no GOVERNED_BY / ENFORCES_DOC edge found.
+                  Unanchored: no ENFORCES_DOC edge found.
                 </span>
               )}
             </div>

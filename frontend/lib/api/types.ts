@@ -33,6 +33,7 @@ export interface EntryNeighbor {
   relationship?: string | null;
   source_type?: string | null;
   thumbnail?: string | null;
+  repo?: string | null;
 }
 
 export interface SchemaDefinition {
@@ -169,6 +170,8 @@ export interface SearchResult {
   retrievers?: string[];
   /** Typed-entry schema name (e.g. harness_risk). Null for untyped entries. */
   type_name?: string | null;
+  /** Repository name if specified. */
+  repo?: string | null;
 }
 
 export interface RelatedResult extends SearchResult {
@@ -190,6 +193,10 @@ export interface Edge {
   id: string;
   source_id: string;
   target_id: string;
+  /** Extracted display title of `source_id`'s entry, when it still resolves. */
+  source_title?: string | null;
+  /** Extracted display title of `target_id`'s entry, when it still resolves. */
+  target_title?: string | null;
   relationship: string;
   edge_type: string;
   sort_order: string;
@@ -282,6 +289,8 @@ export interface SearchRequest {
   type?: string;
   /** Restrict to several typed-entry schemas at once (merged per type before the top-K cut). Ignored when `type` is set. */
   type_names?: string[];
+  /** Repository name filter (e.g. matst80/rust-rag). */
+  repo?: string;
 }
 
 export interface UpdateItemRequest {
@@ -302,6 +311,10 @@ export interface ListItemsRequest {
   sort_order?: SortOrder;
   path_prefix?: string;
   type?: string;
+  /** true = only entries with a wiki path; false = only entries with no path (unorganized). */
+  has_path?: boolean;
+  /** Exact-match filters on metadata fields (e.g. { author: "mats", repo: "rust-rag" }). */
+  metadata?: Record<string, string>;
 }
 
 export interface RechunkRequest {
@@ -706,14 +719,16 @@ export const HARNESS_NODE_TYPES = [
   "harness_audit",
   "harness_repo",
   "harness_poc",
-  "harness_decision",
+  // harness_decision folded into the generic `decision` type.
+  "decision",
   "harness_risk",
   "harness_compliance",
   "harness_resource",
   "harness_scaling",
   "harness_validation",
   "harness_rollout",
-  "harness_fact",
+  // harness_fact renamed harness_evidence (collided with the generic `fact` type).
+  "harness_evidence",
 ] as const;
 
 export type HarnessNodeType = (typeof HARNESS_NODE_TYPES)[number];
@@ -764,7 +779,7 @@ export interface HarnessTreeEdge {
 /**
  * Session memory joined into the tree via harness_poc.session_id ===
  * memory.source_id. Not a `node`; join to a POC via `poc_id` and onward to
- * sprints/todos via DERIVES_FROM / EVIDENCED_BY edges.
+ * sprints/todos via depends_on / EVIDENCED_BY edges.
  */
 export interface HarnessTreeMemory {
   id: string;
@@ -787,4 +802,16 @@ export interface HarnessTreeResponse {
 export interface TokenCountResponse {
   token_count: number;
   char_count: number;
+}
+
+export interface ShareResponse {
+  token: string;
+  item_id: string;
+  created_at: number;
+  expires_at: number | null;
+  url: string;
+}
+
+export interface CreateShareRequest {
+  expires_in_seconds?: number;
 }

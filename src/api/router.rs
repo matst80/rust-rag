@@ -12,7 +12,7 @@ use super::auth;
 use super::auth_guard::require_api_key;
 use super::state::AppState;
 use super::{
-    acp, analysis, attachments, cms, dream, graph, harness, health, ingest_url, integrations,
+    acp, analysis, attachments, cms, collab, dream, graph, harness, health, ingest_url, integrations,
     items, map, messages, multimodal, ontology, openai, openapi, push, query, schemas,
     store_search, whisper,
 };
@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/harness/tree", get(harness::harness_tree))
         .route("/api/harness/tree", get(harness::harness_tree))
+        .route("/api/harness/docs", post(harness::ingest_harness_doc))
         .route("/api/cms/tree/{id}", get(cms::get_cms_tree))
         .route("/api/map", get(map::get_map))
         .route("/admin/map/rebuild", post(map::rebuild_map))
@@ -52,6 +53,18 @@ pub fn router(state: AppState) -> Router {
             get(items::get_item)
                 .put(items::update_item)
                 .delete(items::delete_item),
+        )
+        .route(
+            "/admin/items/{id}/share",
+            get(items::get_item_share)
+                .post(items::create_item_share)
+                .delete(items::revoke_item_share),
+        )
+        .route(
+            "/api/items/{id}/share",
+            get(items::get_item_share)
+                .post(items::create_item_share)
+                .delete(items::revoke_item_share),
         )
         .route("/admin/items/{id}/reanalyze", post(items::reanalyze_item))
         .route(
@@ -111,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/acp/register", post(acp::register_acp_instance))
         .route("/api/acp/heartbeat", post(acp::heartbeat_acp_instance))
         .route("/api/acp/ws", get(acp::acp_ws_proxy))
+        .route("/api/collab/ws", get(collab::collab_ws_handler))
         .route("/api/whisper/ws", get(whisper::whisper_proxy))
         .route(
             "/api/acp/register/{name}",
@@ -183,6 +197,7 @@ pub fn router(state: AppState) -> Router {
         .route("/openapi.json", get(openapi::openapi_endpoint))
         .route("/api/openapi.json", get(openapi::openapi_endpoint))
         .route("/api/docs", get(openapi::swagger_ui_endpoint))
+        .route("/api/public/entries/{token}", get(items::get_public_entry))
         .nest_service("/assets", ServeDir::new(&upload_path))
         .merge(auth::public_routes())
         .merge(auth::session_routes(state.clone()))

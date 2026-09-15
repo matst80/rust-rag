@@ -13,16 +13,17 @@ use crate::{
         GraphEdgesResponse, GraphNeighborhoodQuery, GraphNeighborhoodResponse,
         GraphRebuildResponse, GraphStatusResponse, HealthResponse, ListGraphEdgesQuery,
         ListItemsQuery, MessagePayload, SearchRequest, SearchResponse, SearchResultPayload,
-        StoreRequest, StoreResponse, UpdateItemRequest, metadata_schema, search_core,
-        store_entry_core,
+        StoreRequest, StoreResponse, UpdateItemRequest, edge_payload, metadata_schema,
+        search_core, store_entry_core, titles_for_edges,
     },
     db::{
-        GraphEdgeType, GraphNeighborhood, ItemRecord, ListItemsRequest, ManualEdgeInput,
-        MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
+        GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, ItemRecord, ListItemsRequest,
+        ManualEdgeInput, MessageQuery, MessageSenderKind, MessageUpdate, NewMessage, SortOrder,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use rmcp::{
     RoleServer, ServerHandler,
     handler::server::{
@@ -99,10 +100,21 @@ fn build_memory_conventions() -> serde_json::Value {
             "how": "Call `store_entry` with `type` set to one of the registered schemas and `data` carrying the structured payload. Validation is enforced server-side via JSON Schema. Discover schemas with `list_schemas` / `get_schema`.",
             "default_schemas": {
                 "decision": "ADR-style record: context, decision, consequences, status (proposed/accepted/superseded/rejected).",
+                "harness_doc": "Governing repository document (ADR, SPEC, INVARIANT, OVERVIEW, ARCHITECTURE, GUIDE). Fields: repo, repo_path, doc_type, title, version, status, summary, sections, invariants, source_files, parent_doc_id, supersedes. Use `ingest_doc` tool for automatic ingestion & linking.",
                 "fact": "Atomic claim with `source` and `confidence` (0-1). Optional `expires_at` for staleness.",
                 "todo": "Single task with `status` (open/in_progress/done/cancelled) and optional `priority`/`due`.",
                 "incident": "Operational incident: timeline, severity, root_cause, resolution.",
                 "note": "Lightweight titled prose with optional `tags` / `links` — fallback when no better schema fits."
+            },
+            "repo_documentation": {
+                "tool": "ingest_doc",
+                "id_format": "doc:<repo>:<doc_type_lower>:<slug>",
+                "linking": [
+                    "`(:harness_repo)-[:contains]->(:harness_doc)` links repo root to doc.",
+                    "`(:harness_doc {ADR/spec})-[:part_of]->(:harness_doc {overview})` links component specs to overview.",
+                    "`(:harness_doc {overview})-[:contains]->(:harness_doc {ADR/spec})` enables tree nesting in Grill cockpit.",
+                    "`(:harness_doc)-[:supersedes]->(:harness_doc)` tracks architectural evolution."
+                ]
             },
             "tip": "If your content fits a schema, prefer typed storage — it composes with `search_entries.type` filtering and the analyze pipeline."
         },
@@ -699,41 +711,87 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
 
         if let Some(nbh) = neighborhood {
             let center_id = id.clone();
-            let neighbors: Vec<EntryNeighbor> = nbh
-                .nodes
-                .into_iter()
-                .filter_map(|n| {
-                    if n.id == center_id {
-                        return None;
+            let mut neighbors_with_edges: Vec<(ItemRecord, &GraphEdgeRecord)> = Vec::new();
+            for n in nbh.nodes {
+                if n.id == center_id {
+                    continue;
+                }
+                // Find the "best" edge for this neighbor to determine inclusion and relationship
+                let best_edge = nbh.edges.iter().find(|e| {
+                    let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
+                        || (e.from_item_id == center_id && e.to_item_id == n.id);
+                    if !is_connected {
+                        return false;
                     }
-                    // Find the "best" edge for this neighbor to determine inclusion and relationship
-                    let best_edge = nbh.edges.iter().find(|e| {
-                        let is_connected = (e.from_item_id == n.id && e.to_item_id == center_id)
-                            || (e.from_item_id == center_id && e.to_item_id == n.id);
-                        if !is_connected {
-                            return false;
-                        }
 
-                        match e.edge_type {
-                            GraphEdgeType::Manual => {
-                                let status = e.metadata.get("status").and_then(|v| v.as_str());
-                                let confidence = e
-                                    .metadata
-                                    .get("confidence")
-                                    .and_then(|v| v.as_f64())
-                                    .unwrap_or(1.0);
-                                // Include confirmed edges or manual overrides with decent confidence
-                                status == Some("confirmed")
-                                    || (status.is_none() && confidence >= 0.7)
-                            }
-                            GraphEdgeType::Similarity => {
-                                // "really close" threshold (approx distance < 0.25)
-                                e.weight >= 0.8
-                            }
+                    match e.edge_type {
+                        GraphEdgeType::Manual => {
+                            let status = e.metadata.get("status").and_then(|v| v.as_str());
+                            let confidence = e
+                                .metadata
+                                .get("confidence")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(1.0);
+                            // Include confirmed edges or manual overrides with decent confidence
+                            status == Some("confirmed")
+                                || (status.is_none() && confidence >= 0.7)
                         }
-                    })?;
+                        GraphEdgeType::Similarity => {
+                            // "really close" threshold (approx distance < 0.25)
+                            e.weight >= 0.8
+                        }
+                    }
+                });
 
-                    Some(EntryNeighbor {
+                if let Some(edge) = best_edge {
+                    neighbors_with_edges.push((n, edge));
+                }
+            }
+
+            // Sort: Manual edges first, then Similarity edges (preferring same_repo, then by weight)
+            neighbors_with_edges.sort_by(|a, b| {
+                let type_a = a.1.edge_type;
+                let type_b = b.1.edge_type;
+                if type_a != type_b {
+                    if type_a == GraphEdgeType::Manual {
+                        return std::cmp::Ordering::Less;
+                    } else {
+                        return std::cmp::Ordering::Greater;
+                    }
+                }
+                if type_a == GraphEdgeType::Manual {
+                    return a
+                        .1
+                        .sort_order
+                        .cmp(&b.1.sort_order)
+                        .then_with(|| a.1.id.cmp(&b.1.id));
+                }
+                let same_repo_a = a.1.metadata.get("same_repo").and_then(|v| v.as_bool()).unwrap_or(false);
+                let same_repo_b = b.1.metadata.get("same_repo").and_then(|v| v.as_bool()).unwrap_or(false);
+                if same_repo_a != same_repo_b {
+                    if same_repo_a {
+                        return std::cmp::Ordering::Less;
+                    } else {
+                        return std::cmp::Ordering::Greater;
+                    }
+                }
+                b.1.weight
+                    .partial_cmp(&a.1.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let neighbors: Vec<EntryNeighbor> = neighbors_with_edges
+                .into_iter()
+                .map(|(n, best_edge)| {
+                    let repo = n
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("repo").and_then(Value::as_str))
+                        .or_else(|| n.metadata.get("repo").and_then(Value::as_str))
+                        .or_else(|| n.metadata.get("data").and_then(|d| d.get("repo")).and_then(Value::as_str))
+                        .map(|s| s.to_string());
+
+                    EntryNeighbor {
                         id: n.id,
                         title: n
                             .metadata
@@ -754,7 +812,8 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_owned()),
                         thumbnail: None,
-                    })
+                        repo,
+                    }
                 })
                 .collect();
             if !neighbors.is_empty() {
@@ -762,7 +821,12 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                 for neighbor in neighbors {
                     let title = neighbor.title.as_deref().unwrap_or("untitled");
                     let rel = neighbor.relationship.as_deref().unwrap_or("similar");
-                    let _ = writeln!(text, "- `{}` ({}) — [{}]", neighbor.id, title, rel);
+                    let repo_str = neighbor
+                        .repo
+                        .as_deref()
+                        .map(|r| format!(" [repo: {r}]"))
+                        .unwrap_or_default();
+                    let _ = writeln!(text, "- `{}` ({}) — [{rel}]{repo_str}", neighbor.id, title);
                 }
             }
         }
@@ -809,6 +873,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             max_created_at: query.max_created_at,
             path_prefix,
             type_name: query.type_name,
+            has_path: query.has_path,
         };
         let (items, total) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -1270,18 +1335,23 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     ) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            store.list_graph_edges(
+            let edges = store.list_graph_edges(
                 query.item_id.as_deref(),
                 query.edge_type,
                 query.status.as_deref(),
+            )?;
+            let titles = titles_for_edges(store.as_ref(), &edges);
+            Ok::<_, anyhow::Error>(
+                edges
+                    .into_iter()
+                    .map(|e| edge_payload(e, &titles))
+                    .collect::<Vec<_>>(),
             )
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        Ok(Json(GraphEdgesResponse {
-            edges: edges.into_iter().map(Into::into).collect(),
-        }))
+        Ok(Json(GraphEdgesResponse { edges }))
     }
 
     #[tool(description = "Return the graph neighborhood around a center item id.")]
@@ -1326,6 +1396,19 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             .map_err(stringify_api_error)
     }
 
+    #[tool(
+        description = "Automatically ingest and structure a repository document (Architecture Overview, ADR, Spec, Invariant, or Guide) into the harness graph. Automatically provisions the harness_repo root node if missing, extracts markdown sections and summaries, enforces the harness_doc schema, and creates the appropriate manual graph edges (repo contains doc, doc part_of parent, parent contains doc, doc supersedes previous)."
+    )]
+    async fn ingest_doc(
+        &self,
+        Parameters(req): Parameters<crate::api::harness::IngestDocRequest>,
+    ) -> Result<Json<crate::api::harness::IngestDocResponse>, String> {
+        crate::api::harness::ingest_doc_core(&self.state, req)
+            .await
+            .map(Json)
+            .map_err(stringify_api_error)
+    }
+
     #[tool(description = "Rebuild similarity edges across the graph.")]
     async fn rebuild_graph(&self) -> Result<Json<GraphRebuildResponse>, String> {
         let store = self.state.store.clone();
@@ -1354,17 +1437,21 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
             directed: request.directed.unwrap_or(false),
             metadata: request.metadata,
         };
-        let edge = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?;
+        let edge = tokio::task::spawn_blocking(move || {
+            let edge = store.add_manual_edge(input)?;
+            let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+            Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
         crate::api::invalidate_cms_nodes(
             &self.state,
             [edge.from_item_id.clone(), edge.to_item_id.clone()],
         )
         .await
         .map_err(stringify_api_error)?;
-        Ok(Json(edge.into()))
+        Ok(Json(edge))
     }
 
     #[tool(description = "Delete a graph edge by id.")]
@@ -1410,7 +1497,9 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         let metadata = params.metadata;
         let sort_order = params.sort_order;
         let edge = tokio::task::spawn_blocking(move || {
-            store.update_graph_edge(&id, relation, metadata, sort_order)
+            let edge = store.update_graph_edge(&id, relation, metadata, sort_order)?;
+            let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+            Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
         })
         .await
         .map_err(|error| error.to_string())?
@@ -1421,7 +1510,7 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
         )
         .await
         .map_err(stringify_api_error)?;
-        Ok(Json(edge.into()))
+        Ok(Json(edge))
     }
 
     #[tool(
@@ -1430,14 +1519,19 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
     async fn list_ontology_reviews(&self) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))
+            let edges = store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))?;
+            let titles = titles_for_edges(store.as_ref(), &edges);
+            Ok::<_, anyhow::Error>(
+                edges
+                    .into_iter()
+                    .map(|e| edge_payload(e, &titles))
+                    .collect::<Vec<_>>(),
+            )
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        Ok(Json(GraphEdgesResponse {
-            edges: edges.into_iter().map(Into::into).collect(),
-        }))
+        Ok(Json(GraphEdgesResponse { edges }))
     }
 
     #[tool(
@@ -1462,13 +1556,16 @@ DIRECTED defaults to false — set to true when the predicate's direction is mea
                 serde_json::Value::String("confirmed".to_string()),
             );
 
-            store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata), None)
+            let edge =
+                store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata), None)?;
+            let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+            Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
 
-        Ok(Json(edge.into()))
+        Ok(Json(edge))
     }
 
     #[tool(description = "Reject a suggested graph edge by deleting it.")]
@@ -3169,6 +3266,7 @@ fn format_search_markdown(response: &SearchResponse, query: &str) -> String {
                 path: None,
                 analysis: None,
                 type_name: None,
+                repo: related.repo.clone(),
             };
             write_result_entry(&mut out, index + 1, &hit, related.relation.as_deref());
         }
@@ -3188,6 +3286,11 @@ fn write_result_entry(
         Some(r) => format!(" — relation: {r}"),
         None => String::new(),
     };
+    let repo_str = hit
+        .repo
+        .as_deref()
+        .map(|r| format!(" [repo: {r}]"))
+        .unwrap_or_default();
     let path_str = hit
         .path
         .as_deref()
@@ -3195,7 +3298,7 @@ fn write_result_entry(
         .unwrap_or_default();
     let _ = writeln!(
         out,
-        "\n### {index}. `{id}` — {relevance}% [{source}]{path_str}{suffix}",
+        "\n### {index}. `{id}` — {relevance}% [{source}]{repo_str}{path_str}{suffix}",
         id = hit.id,
         source = hit.source_id,
     );

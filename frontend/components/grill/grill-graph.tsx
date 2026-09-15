@@ -22,7 +22,7 @@ const TYPE_COLORS: Record<string, string> = {
   harness_audit: "#94a3b8",
   harness_repo: "#e879f9",
   harness_poc: "#f472b6",
-  harness_decision: "#60a5fa",
+  decision: "#60a5fa",
   harness_risk: "#ef4444",
   harness_compliance: "#fbbf24",
   harness_resource: "#a3e635",
@@ -88,7 +88,11 @@ function GrillGraphInner({
         target: edge.target_id,
         label: edge.relationship,
         size: 1.5,
-        fill: edge.relationship === "CONFLICTS_WITH" ? "#ef4444" : undefined,
+        // CONFLICTS_WITH was folded into the canonical `contradicts` predicate.
+        fill:
+          edge.relationship === "CONFLICTS_WITH" || edge.relationship === "contradicts"
+            ? "#ef4444"
+            : undefined,
       })
     }
     return out

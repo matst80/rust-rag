@@ -26,7 +26,7 @@ export function SearchPage({
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const [isAssisted, setIsAssisted] = useState(defaultAssisted);
   const [isHybrid, setIsHybrid] = useState(true);
-  const [isRerank, setIsRerank] = useState(true);
+  const [isRerank, setIsRerank] = useState(false);
   const [typeFilter, setTypeFilter] = useState<string | null>(null);
 
   const router = useRouter();

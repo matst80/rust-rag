@@ -1,5 +1,5 @@
 import type { Metadata } from 'next'
-import { Geist, JetBrains_Mono } from 'next/font/google'
+import { Geist, JetBrains_Mono, Source_Serif_4 } from 'next/font/google'
 import { Providers } from '@/components/providers'
 import './globals.css'
 
@@ -7,6 +7,10 @@ const _geist = Geist({ subsets: ["latin"] })
 const _jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
+})
+const _sourceSerif = Source_Serif_4({
+  subsets: ["latin"],
+  variable: "--font-source-serif",
 })
 
 export const metadata: Metadata = {
@@ -32,7 +36,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${_jetbrainsMono.variable} font-sans antialiased bg-background`}>
+      <body className={`${_jetbrainsMono.variable} ${_sourceSerif.variable} font-sans antialiased bg-background`}>
         <Providers>
           {children}
         </Providers>

@@ -14,8 +14,8 @@ use super::{
     MessageQuery, MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth,
     NewMcpToken, NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord,
     OAuthCredentialsRecord, OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow,
-    PushStore, PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder, UpsertOAuthCredentials,
-    UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
+    PublicShareRecord, PushStore, PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder,
+    UpsertOAuthCredentials, UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -186,6 +186,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0016_graph_edge_sort_order",
         include_str!("../../migrations/0016_graph_edge_sort_order.sql"),
+    ),
+    (
+        "0017_public_shares",
+        include_str!("../../migrations/0017_public_shares.sql"),
     ),
 ];
 
@@ -678,11 +682,15 @@ impl VectorStore for PostgresVectorStore {
 
         // Reciprocal Rank Fusion over per-document scores.
         //
-        // For each retriever (dense, sparse) we rank all chunks by similarity,
-        // sum 1/(60 + rank) per document so a document with multiple
-        // mid-rank chunks beats a single best-chunk doc, and full-outer-join
-        // the per-doc scores. Final ordering applies an exponential recency
-        // decay using `documents.updated_at`.
+        // For each retriever (dense, sparse) we rank all chunks by similarity
+        // and take MAX(1/(60 + rank)) per document — i.e. a doc's score is
+        // driven by its single best-matching chunk, not the sum across every
+        // matched chunk. Summing previously let large, many-chunk documents
+        // dominate results (lots of mediocre-rank chunks outscoring a single
+        // sharply relevant chunk in a small doc) — especially visible once
+        // the cross-encoder reranker, which had been masking this, is
+        // disabled. Full-outer-join the per-doc scores, then apply an
+        // exponential recency decay using `documents.updated_at`.
         //
         // The 60 constant is the canonical RRF k. We pull 200 chunks per
         // retriever — enough to form a stable per-doc fusion at top_k≤50,
@@ -731,11 +739,11 @@ impl VectorStore for PostgresVectorStore {
                     LIMIT $5
                 ),
                 dense_doc AS (
-                    SELECT document_id, SUM(1.0 / ($6::float + rank)) AS score
+                    SELECT document_id, MAX(1.0 / ($6::float + rank)) AS score
                     FROM dense GROUP BY document_id
                 ),
                 sparse_doc AS (
-                    SELECT document_id, SUM(1.0 / ($6::float + rank)) AS score
+                    SELECT document_id, MAX(1.0 / ($6::float + rank)) AS score
                     FROM sparse GROUP BY document_id
                 ),
                 dense_best AS (
@@ -868,6 +876,7 @@ impl VectorStore for PostgresVectorStore {
         let max_created = request.max_created_at.map(ms_to_ts);
         let path_prefix = request.path_prefix.clone().filter(|p| !p.is_empty());
         let type_filter = request.type_name.clone().filter(|t| !t.is_empty());
+        let has_path = request.has_path;
 
         self.block(async move {
             let client = pool.get().await?;
@@ -877,9 +886,10 @@ impl VectorStore for PostgresVectorStore {
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
-                   AND ($5::text IS NULL OR type = $5)";
+                   AND ($5::text IS NULL OR type = $5) \
+                   AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = '')))";
             let total: i64 = client
-                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter])
+                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path])
                 .await?
                 .get(0);
 
@@ -890,13 +900,14 @@ impl VectorStore for PostgresVectorStore {
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
                    AND ($5::text IS NULL OR type = $5) \
+                   AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = ''))) \
                  ORDER BY created_at {order} \
-                 LIMIT $6 OFFSET $7"
+                 LIMIT $7 OFFSET $8"
             );
             let rows = client
                 .query(
                     &sql,
-                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &limit, &offset],
+                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &limit, &offset],
                 )
                 .await?;
             let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
@@ -1429,38 +1440,68 @@ impl VectorStore for PostgresVectorStore {
             // can keep showing a meaningful number; pairs that only matched
             // via sparse get NULL dense_distance (and `retrievers='sparse'`).
             let sql = format!(
-                "WITH dense_pairs AS ( \
+                "WITH doc_repos AS ( \
+                     SELECT id, LOWER(COALESCE(data->>'repo', metadata->>'repo', metadata->'data'->>'repo')) AS repo \
+                     FROM documents \
+                 ), \
+                 dense_pairs AS ( \
                      SELECT da.id AS from_id, db.id AS to_id, \
-                            MIN(ca.dense_embedding <=> cb.dense_embedding)::REAL AS distance \
+                            (MIN(ca.dense_embedding <=> cb.dense_embedding)::REAL * \
+                             CASE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo = rb.repo THEN 0.80::REAL \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo != rb.repo THEN 1.15::REAL \
+                                 ELSE 1.0::REAL \
+                             END) AS distance, \
+                            MIN(ca.dense_embedding <=> cb.dense_embedding)::REAL AS raw_distance, \
+                            (CASE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo = rb.repo THEN TRUE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo != rb.repo THEN FALSE \
+                                 ELSE NULL \
+                             END) AS same_repo \
                      FROM chunks ca \
                      JOIN documents da ON da.id = ca.document_id \
+                     JOIN doc_repos ra ON ra.id = da.id \
                      JOIN chunks cb ON cb.document_id > ca.document_id \
                      JOIN documents db ON db.id = cb.document_id \
+                     JOIN doc_repos rb ON rb.id = db.id \
                      WHERE ca.dense_embedding IS NOT NULL \
                        AND cb.dense_embedding IS NOT NULL \
                        {source_filter} \
-                     GROUP BY da.id, db.id \
+                     GROUP BY da.id, db.id, ra.repo, rb.repo \
                  ), \
                  sparse_pairs AS ( \
                      SELECT da.id AS from_id, db.id AS to_id, \
-                            MIN(ca.sparse_embedding <=> cb.sparse_embedding)::REAL AS distance \
+                            (MIN(ca.sparse_embedding <=> cb.sparse_embedding)::REAL * \
+                             CASE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo = rb.repo THEN 0.80::REAL \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo != rb.repo THEN 1.15::REAL \
+                                 ELSE 1.0::REAL \
+                             END) AS distance, \
+                            MIN(ca.sparse_embedding <=> cb.sparse_embedding)::REAL AS raw_distance, \
+                            (CASE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo = rb.repo THEN TRUE \
+                                 WHEN ra.repo IS NOT NULL AND rb.repo IS NOT NULL AND ra.repo != rb.repo THEN FALSE \
+                                 ELSE NULL \
+                             END) AS same_repo \
                      FROM chunks ca \
                      JOIN documents da ON da.id = ca.document_id \
+                     JOIN doc_repos ra ON ra.id = da.id \
                      JOIN chunks cb ON cb.document_id > ca.document_id \
                      JOIN documents db ON db.id = cb.document_id \
+                     JOIN doc_repos rb ON rb.id = db.id \
                      WHERE ca.sparse_embedding IS NOT NULL \
                        AND cb.sparse_embedding IS NOT NULL \
                        {source_filter} \
-                     GROUP BY da.id, db.id \
+                     GROUP BY da.id, db.id, ra.repo, rb.repo \
                  ), \
                  ranked_dense AS ( \
-                     SELECT from_id, to_id, distance, \
+                     SELECT from_id, to_id, distance, raw_distance, same_repo, \
                             ROW_NUMBER() OVER (PARTITION BY from_id ORDER BY distance ASC, to_id ASC) AS rk_a, \
                             ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY distance ASC, from_id ASC) AS rk_b \
                      FROM dense_pairs WHERE distance <= $1 \
                  ), \
                  ranked_sparse AS ( \
-                     SELECT from_id, to_id, distance, \
+                     SELECT from_id, to_id, distance, raw_distance, same_repo, \
                             ROW_NUMBER() OVER (PARTITION BY from_id ORDER BY distance ASC, to_id ASC) AS rk_a, \
                             ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY distance ASC, from_id ASC) AS rk_b \
                      FROM sparse_pairs \
@@ -1469,7 +1510,10 @@ impl VectorStore for PostgresVectorStore {
                      SELECT COALESCE(d.from_id, s.from_id) AS from_id, \
                             COALESCE(d.to_id,   s.to_id)   AS to_id, \
                             d.distance AS dense_distance, \
+                            d.raw_distance AS dense_raw_distance, \
                             s.distance AS sparse_distance, \
+                            s.raw_distance AS sparse_raw_distance, \
+                            COALESCE(d.same_repo, s.same_repo) AS same_repo, \
                             (COALESCE(1.0/(60 + LEAST(d.rk_a, d.rk_b)), 0.0) \
                               + COALESCE(1.0/(60 + LEAST(s.rk_a, s.rk_b)), 0.0))::FLOAT8 AS rrf_score, \
                             (d.distance IS NOT NULL) AS matched_dense, \
@@ -1483,8 +1527,8 @@ impl VectorStore for PostgresVectorStore {
                             ROW_NUMBER() OVER (PARTITION BY to_id   ORDER BY rrf_score DESC) AS rk_b \
                      FROM fused \
                  ) \
-                 SELECT from_id, to_id, dense_distance, sparse_distance, rrf_score, \
-                        matched_dense, matched_sparse \
+                 SELECT from_id, to_id, dense_distance, dense_raw_distance, sparse_distance, sparse_raw_distance, \
+                        same_repo, rrf_score, matched_dense, matched_sparse \
                  FROM ranked \
                  WHERE LEAST(rk_a, rk_b) <= $2 \
                  ORDER BY from_id, rrf_score DESC, to_id"
@@ -1500,7 +1544,10 @@ impl VectorStore for PostgresVectorStore {
                 let from_id: String = row.try_get("from_id")?;
                 let to_id: String = row.try_get("to_id")?;
                 let dense_distance: Option<f32> = row.try_get("dense_distance")?;
+                let dense_raw_distance: Option<f32> = row.try_get("dense_raw_distance")?;
                 let sparse_distance: Option<f32> = row.try_get("sparse_distance")?;
+                let sparse_raw_distance: Option<f32> = row.try_get("sparse_raw_distance")?;
+                let same_repo: Option<bool> = row.try_get("same_repo")?;
                 let rrf_score: f64 = row.try_get("rrf_score")?;
                 let matched_dense: bool = row.try_get("matched_dense")?;
                 let matched_sparse: bool = row.try_get("matched_sparse")?;
@@ -1511,12 +1558,17 @@ impl VectorStore for PostgresVectorStore {
                 let mut retrievers: Vec<&'static str> = Vec::with_capacity(2);
                 if matched_dense  { retrievers.push("dense");  }
                 if matched_sparse { retrievers.push("sparse"); }
-                let metadata = serde_json::json!({
+                let mut metadata = serde_json::json!({
                     "dense_distance": dense_distance,
+                    "dense_raw_distance": dense_raw_distance,
                     "sparse_distance": sparse_distance,
+                    "sparse_raw_distance": sparse_raw_distance,
                     "rrf_score": rrf_score,
                     "retrievers": retrievers,
                 });
+                if let Some(sr) = same_repo {
+                    metadata["same_repo"] = serde_json::json!(sr);
+                }
                 let edge_id = format!("similarity:{from_id}:{to_id}");
                 tx.execute(
                     "INSERT INTO graph_edges \
@@ -2162,6 +2214,105 @@ impl VectorStore for PostgresVectorStore {
             .await?;
             tx.commit().await?;
             Ok(true)
+        })
+    }
+
+    fn create_public_share(
+        &self,
+        item_id: &str,
+        token: &str,
+        expires_at: Option<i64>,
+    ) -> Result<PublicShareRecord> {
+        let pool = self.pool.clone();
+        let item_id = item_id.to_owned();
+        let token = token.to_owned();
+        let expires_dt = expires_at.map(ms_to_ts);
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            // Revoke any prior share
+            tx.execute("DELETE FROM public_shares WHERE item_id = $1", &[&item_id])
+                .await?;
+            let row = tx
+                .query_one(
+                    "INSERT INTO public_shares (token, item_id, created_at, expires_at) \
+                     VALUES ($1, $2, now(), $3) \
+                     RETURNING created_at",
+                    &[&token, &item_id, &expires_dt],
+                )
+                .await?;
+            let created_at_dt: DateTime<Utc> = row.get(0);
+            tx.commit().await?;
+            Ok(PublicShareRecord {
+                token,
+                item_id,
+                created_at: ts_to_ms(created_at_dt),
+                expires_at,
+            })
+        })
+    }
+
+    fn get_public_share(&self, token: &str) -> Result<Option<PublicShareRecord>> {
+        let pool = self.pool.clone();
+        let token = token.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT token, item_id, created_at, expires_at \
+                     FROM public_shares \
+                     WHERE token = $1 AND (expires_at IS NULL OR expires_at > now())",
+                    &[&token],
+                )
+                .await?;
+            Ok(row.map(|r| {
+                let created: DateTime<Utc> = r.get("created_at");
+                let expires: Option<DateTime<Utc>> = r.get("expires_at");
+                PublicShareRecord {
+                    token: r.get("token"),
+                    item_id: r.get("item_id"),
+                    created_at: ts_to_ms(created),
+                    expires_at: expires.map(ts_to_ms),
+                }
+            }))
+        })
+    }
+
+    fn get_public_share_for_item(&self, item_id: &str) -> Result<Option<PublicShareRecord>> {
+        let pool = self.pool.clone();
+        let item_id = item_id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let row = client
+                .query_opt(
+                    "SELECT token, item_id, created_at, expires_at \
+                     FROM public_shares \
+                     WHERE item_id = $1 AND (expires_at IS NULL OR expires_at > now())",
+                    &[&item_id],
+                )
+                .await?;
+            Ok(row.map(|r| {
+                let created: DateTime<Utc> = r.get("created_at");
+                let expires: Option<DateTime<Utc>> = r.get("expires_at");
+                PublicShareRecord {
+                    token: r.get("token"),
+                    item_id: r.get("item_id"),
+                    created_at: ts_to_ms(created),
+                    expires_at: expires.map(ts_to_ms),
+                }
+            }))
+        })
+    }
+
+    fn revoke_public_shares_for_item(&self, item_id: &str) -> Result<bool> {
+        let pool = self.pool.clone();
+        let item_id = item_id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let n = client
+                .execute("DELETE FROM public_shares WHERE item_id = $1", &[&item_id])
+                .await?;
+            Ok(n > 0)
         })
     }
 }

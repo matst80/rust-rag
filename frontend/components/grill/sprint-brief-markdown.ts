@@ -45,7 +45,7 @@ export function collectSprintContext(tree: HarnessTreeResponse, sprint: HarnessT
   const governingDocs: HarnessTreeNode[] = []
   const risks: HarnessTreeNode[] = []
   for (const anchor of [plan?.id, sprint.id].filter(Boolean) as string[]) {
-    governingDocs.push(...childrenOf(anchor, ["GOVERNED_BY"]))
+    governingDocs.push(...childrenOf(anchor, ["GOVERNED_BY", "ENFORCES_DOC"]))
     risks.push(...childrenOf(anchor, ["RAISED"]).filter((n) => n.type_name === "harness_risk"))
   }
   for (const todo of todos) governingDocs.push(...childrenOf(todo.id, ["ENFORCES_DOC"]))

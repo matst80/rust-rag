@@ -93,8 +93,14 @@ pub struct SearchRequest {
     /// overall top-K is cut, so every requested type gets a fair shot.
     #[serde(default, rename = "type_names")]
     pub type_names: Option<Vec<String>>,
+    /// Restrict results to entries belonging to this repository.
+    /// Matched against `metadata.repo` or `data.repo`.
+    #[serde(default)]
+    pub repo: Option<String>,
 
-    /// Optional toggle for hybrid search (Vector + Keyword). Defaults to true.
+    /// Optional toggle for hybrid search (Vector + Keyword). Defaults to false
+    /// (dense-only) — hybrid's per-doc RRF sum favors large multi-chunk
+    /// docs; enable explicitly once that's fixed for your use case.
     #[serde(default = "default_hybrid")]
     pub hybrid: bool,
     /// When `Some(true)`, run the cross-encoder reranker on the top-N
@@ -110,7 +116,7 @@ pub struct SearchRequest {
 }
 
 fn default_hybrid() -> bool {
-    true
+    false
 }
 
 fn default_top_k() -> usize {
@@ -174,6 +180,9 @@ pub struct SearchResultPayload {
     /// entries.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub type_name: Option<String>,
+    /// Repository slug if specified in metadata or data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -186,6 +195,9 @@ pub struct RelatedResultPayload {
     pub created_at: i64,
     pub distance: f32,
     pub relation: Option<String>,
+    /// Repository slug if specified in metadata or data.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -197,6 +209,19 @@ pub struct SearchResponse {
 
 impl From<SearchHit> for SearchResultPayload {
     fn from(value: SearchHit) -> Self {
+        let repo = value
+            .metadata
+            .get("repo")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                value
+                    .metadata
+                    .get("data")
+                    .and_then(|d| d.get("repo"))
+                    .and_then(Value::as_str)
+            })
+            .map(|s| s.to_string());
+
         Self {
             id: value.id,
             text: value.text,
@@ -211,6 +236,7 @@ impl From<SearchHit> for SearchResultPayload {
             path: value.path,
             analysis: value.analysis,
             type_name: value.type_name,
+            repo,
         }
     }
 }
@@ -230,6 +256,53 @@ pub(crate) async fn search(
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     search_core(&state, request, session.0).await.map(Json)
+}
+
+pub(crate) fn build_contextual_embed_prefix(
+    metadata: &Value,
+    data: Option<&Value>,
+    path: Option<&str>,
+    type_name: Option<&str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    let repo = data
+        .and_then(|d| d.get("repo").and_then(Value::as_str))
+        .or_else(|| metadata.get("repo").and_then(Value::as_str));
+    if let Some(r) = repo {
+        let r = r.trim();
+        if !r.is_empty() {
+            parts.push(format!("repo:{}", r));
+        }
+    }
+    let repo_path = data
+        .and_then(|d| d.get("repo_path").and_then(Value::as_str))
+        .or_else(|| metadata.get("repo_path").and_then(Value::as_str))
+        .or(path);
+    if let Some(p) = repo_path {
+        let p = p.trim();
+        if !p.is_empty() {
+            parts.push(format!("path:{}", p));
+        }
+    }
+    let doc_type = data
+        .and_then(|d| d.get("doc_type").and_then(Value::as_str))
+        .or_else(|| metadata.get("doc_type").and_then(Value::as_str));
+    if let Some(dt) = doc_type {
+        let dt = dt.trim();
+        if !dt.is_empty() {
+            parts.push(format!("doc_type:{}", dt));
+        }
+    } else if let Some(tn) = type_name {
+        let tn = tn.trim();
+        if !tn.is_empty() {
+            parts.push(format!("type:{}", tn));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("[{}] ", parts.join(" ")))
+    }
 }
 
 pub(crate) async fn store_entry_core(
@@ -263,6 +336,13 @@ pub(crate) async fn store_entry_core(
         ));
     }
 
+    let embed_prefix = build_contextual_embed_prefix(
+        &request.metadata,
+        request.data.as_ref(),
+        path.as_deref(),
+        request.type_name.as_deref(),
+    );
+
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
     let created_at = current_timestamp_millis()?;
@@ -287,11 +367,15 @@ pub(crate) async fn store_entry_core(
                 data: request.data.clone(),
                 analysis: None,
             };
-            let embed_text = slices
+            let base_embed_text = slices
                 .into_iter()
                 .next()
                 .map(|s| s.embed_text)
                 .unwrap_or_else(|| request.text.clone());
+            let embed_text = match &embed_prefix {
+                Some(p) => format!("{p}{base_embed_text}"),
+                None => base_embed_text,
+            };
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 let embedding = embedder.embed(&embed_text)?;
                 store.upsert_item(item, &embedding)?;
@@ -329,7 +413,10 @@ pub(crate) async fn store_entry_core(
                     data: None,
                     analysis: None,
                 };
-                let embed_text = slice.embed_text;
+                let embed_text = match &embed_prefix {
+                    Some(p) => format!("{p}{}", slice.embed_text),
+                    None => slice.embed_text,
+                };
                 let emb = embedder.clone();
                 let st = store.clone();
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -366,7 +453,11 @@ pub(crate) async fn store_entry_core(
             }
             let mut embedded = Vec::with_capacity(chunks.len());
             for c in chunks {
-                let (embedding, sparse) = embedder.embed_both(&c.content)?;
+                let embed_content = match &embed_prefix {
+                    Some(p) => format!("{p}{}", c.content),
+                    None => c.content.clone(),
+                };
+                let (embedding, sparse) = embedder.embed_both(&embed_content)?;
                 let sparse = if sparse.is_empty() {
                     None
                 } else {
@@ -401,8 +492,12 @@ pub(crate) async fn store_entry_core(
             data: request.data.clone(),
             analysis: None,
         };
+        let embed_text = match &embed_prefix {
+            Some(p) => format!("{p}{}", item.text),
+            None => item.text.clone(),
+        };
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let embedding = embedder.embed(&item.text)?;
+            let embedding = embedder.embed(&embed_text)?;
             store.upsert_item(item, &embedding)?;
             Ok(())
         })
@@ -514,6 +609,12 @@ pub(crate) async fn search_core(
         request.type_names.filter(|t| !t.is_empty())
     };
     let max_distance = request.max_distance;
+    let repo_filter = request
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
     let now_ms = current_timestamp_millis()?;
     // Reranker is **opt-in**: the cross-encoder adds noticeable latency
     // (seconds on consumer GPUs without tensor cores), so we run it only
@@ -558,6 +659,21 @@ pub(crate) async fn search_core(
                     (items, ())
                 };
                 let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
+                if let Some(ref target_repo) = repo_filter {
+                    hits.retain(|hit| {
+                        let hit_repo = hit
+                            .metadata
+                            .get("repo")
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                hit.metadata
+                                    .get("data")
+                                    .and_then(|d| d.get("repo"))
+                                    .and_then(Value::as_str)
+                            });
+                        hit_repo.map(|r| r.to_lowercase()) == Some(target_repo.clone())
+                    });
+                }
                 // For empty queries, we set retrievers to "recent"
                 for hit in &mut hits {
                     hit.retrievers = vec!["recent".to_owned()];
@@ -625,6 +741,22 @@ pub(crate) async fn search_core(
                     .into_iter()
                     .filter(|hit| hit.distance <= max_distance)
                     .collect();
+
+                if let Some(ref target_repo) = repo_filter {
+                    filtered.retain(|hit| {
+                        let hit_repo = hit
+                            .metadata
+                            .get("repo")
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                hit.metadata
+                                    .get("data")
+                                    .and_then(|d| d.get("repo"))
+                                    .and_then(Value::as_str)
+                            });
+                        hit_repo.map(|r| r.to_lowercase()) == Some(target_repo.clone())
+                    });
+                }
 
                 // Cross-encoder reranking. Replaces `distance` with
                 // (1 - score) so existing percentage UIs keep working
@@ -831,14 +963,28 @@ pub(crate) async fn search_core(
         results: result_payloads,
         related: related
             .into_iter()
-            .map(|(hit, relation)| RelatedResultPayload {
-                id: hit.id,
-                text: hit.text,
-                metadata: hit.metadata,
-                source_id: hit.source_id,
-                created_at: hit.created_at,
-                distance: hit.distance,
-                relation,
+            .map(|(hit, relation)| {
+                let repo = hit
+                    .metadata
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        hit.metadata
+                            .get("data")
+                            .and_then(|d| d.get("repo"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(|s| s.to_string());
+                RelatedResultPayload {
+                    id: hit.id,
+                    text: hit.text,
+                    metadata: hit.metadata,
+                    source_id: hit.source_id,
+                    created_at: hit.created_at,
+                    distance: hit.distance,
+                    relation,
+                    repo,
+                }
             })
             .collect(),
     })

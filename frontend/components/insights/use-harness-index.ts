@@ -30,7 +30,14 @@ export function ancestorChain(
   for (;;) {
     const parents = index.parentsOf.get(current) ?? []
     const next = parents.find(
-      (p) => p.relation === "RAISED" || p.relation === "HAD_POC" || p.relation === "BREAKS_INTO" || p.relation === "CONTAINS_TODO"
+      (p) =>
+        p.relation === "RAISED" ||
+        p.relation === "HAD_POC" ||
+        p.relation === "BREAKS_INTO" ||
+        // CONTAINS_TODO was folded into the canonical `contains` predicate;
+        // kept for edges stored under the old name.
+        p.relation === "CONTAINS_TODO" ||
+        p.relation === "contains"
     )
     if (!next || seen.has(next.from)) break
     const node = index.byId.get(next.from)
@@ -52,8 +59,9 @@ export function repoOf(index: HarnessIndex, nodeId: string): HarnessTreeNode | n
 
 /**
  * POC nodes a sprint-domain node inherits evidence from: explicit
- * DERIVES_FROM / EVIDENCED_BY edges upward, so a sprint or todo resolves to
- * the sessions that motivated it.
+ * depends_on / EVIDENCED_BY edges upward, so a sprint or todo resolves to
+ * the sessions that motivated it. DERIVES_FROM was folded into the
+ * canonical `depends_on` predicate; kept for edges stored under the old name.
  */
 export function evidencePocsOf(index: HarnessIndex, nodeId: string): HarnessTreeNode[] {
   const pocs: HarnessTreeNode[] = []
@@ -61,7 +69,7 @@ export function evidencePocsOf(index: HarnessIndex, nodeId: string): HarnessTree
   let current = nodeId
   for (;;) {
     const next = (index.parentsOf.get(current) ?? []).find(
-      (p) => p.relation === "DERIVES_FROM" || p.relation === "EVIDENCED_BY"
+      (p) => p.relation === "DERIVES_FROM" || p.relation === "EVIDENCED_BY" || p.relation === "depends_on"
     )
     if (!next || seen.has(next.from)) break
     const node = index.byId.get(next.from)

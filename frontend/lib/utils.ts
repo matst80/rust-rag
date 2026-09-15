@@ -1,8 +1,32 @@
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+
+interface TitledEntry {
+  id: string
+  text: string
+  metadata?: { title?: unknown } | null
+}
+
+/** Short human label for an entry: metadata.title, else first line of text, else id. */
+export function entryTitle(entry: TitledEntry, maxLength = 60): string {
+  const metaTitle = entry.metadata?.title
+  if (typeof metaTitle === 'string' && metaTitle.trim()) return metaTitle.trim()
+  const firstLine = entry.text
+    .split('\n')
+    .find((l) => l.trim())
+    ?.trim()
+    .replace(/^#+\s*/, '')
+  if (firstLine) return firstLine.length > maxLength ? firstLine.slice(0, maxLength) + '…' : firstLine
+  return entry.id
+}
+
+/** Label for a graph-edge endpoint we only have an id (and maybe a server-resolved title) for. */
+export function edgeEndpointTitle(id: string, title?: string | null): string {
+  if (title && title.trim()) return title.trim()
+  return id.length > 24 ? id.slice(0, 24) + '…' : id
 }
 
 export function formatRelativeTime(timestamp: number): string {

@@ -35,46 +35,93 @@ against it.
 |---|---|
 | `harness_repo` | `name`, `url?`, `default_branch?` |
 | `harness_poc` | `repo`, `summary`, `session_id?` (source session id — join key for session memories), `rollout_recommendation?`, `timestamp` (epoch ms) |
-| `harness_decision` | `title`, `supersedes?`, `status?` (proposed\|accepted\|rejected) |
+| `decision` *(generic, not harness-prefixed)* | `title`, `context`, `decision`, `consequences`, `status` (proposed\|accepted\|superseded\|rejected), `supersedes?`, `superseded_by?`, `deciders?[]`, `decided_at?`. Link to the raising POC with a `RAISED` edge — no `poc_id` data field. **Replaces the old `harness_decision` type** (was a thinner duplicate: title + status only, no context/consequences/deciders). |
 | `harness_risk` | `title`, `severity` (low\|medium\|high\|critical), `mitigation?` |
 | `harness_compliance` | `title`, `framework` (GDPR, SOC2, …), `requirement?` |
 | `harness_resource` | `title`, `kind`, `provisioned?` |
 | `harness_scaling` | `title`, `bottleneck?`, `measured_metric?` |
 | `harness_validation` | `title`, `status` (needed\|done), `how?`, `result?` |
 | `harness_rollout` | `title`, `phases[]` ({name, description?, gate?}), `prerequisites[]` |
-| `harness_fact` | `statement` — free-form session-evidence note agents store while working; appears in the tree as evidence, carries no hierarchy |
+| `harness_evidence` | `statement` — free-form session-evidence note agents store while working; appears in the tree as evidence, carries no hierarchy. **Renamed from `harness_fact`** — that name collided with the generic, structured `fact` type (claim/source/confidence); this is an unstructured blob, not a citeable claim. No schema file (validation-exempt by design, same as before). |
+
+### Node-type consolidation (migration notes)
+
+Two harness node types duplicated a generic type that already existed for
+the same concept. Both were fixed by dropping the harness-only type in favor
+of the generic one, same principle as the edge-predicate fold above:
+
+| old type | new type | what changed for callers |
+|---|---|---|
+| `harness_decision` | `decision` | Now **requires** `context`, `decision`, `consequences` in `data` (not just `title`/`status`) — the shared schema is stricter. `poc_id` was never a data field; keep linking via the `RAISED` edge from the `harness_poc`. `supersedes`/`superseded_by` can be set as data-field ids on `decision` in addition to (or instead of) a `supersedes` graph edge — both are valid, the edge is what the tree/timeline UI actually walks. |
+| `harness_fact` | `harness_evidence` | Pure rename, same shape (`{"statement": "..."}`, no schema, no required fields). Update the `type` string only. |
+
+`HARNESS_NODE_TYPES` in `src/api/harness.rs` still has 17 entries — `decision`
+replaced `harness_decision` in place, so it still gets fetched into every
+`harness_tree` call. One tradeoff worth knowing: when `harness_tree` is
+called **without** `source_id` (a global/cross-project query), it now pulls
+in *every* `decision`-typed entry store-wide, not just POC-raised ones —
+`decision` is a shared, non-namespaced type. This mirrors how the other
+harness types already behave on an unscoped call (global pull is the
+existing design), just extended to one more type. Scope `source_id` on the
+call if that matters for a given use case.
 
 ## Edge relations (manual directed edges)
 
 Structural relationships are manual directed graph edges (`directed: true`),
-created via `POST /admin/graph/edges` (or MCP `create_manual_edge`):
+created via `POST /admin/graph/edges` (or MCP `create_manual_edge`).
+
+Harness relations used to keep a full parallel UPPER_SNAKE vocabulary next to
+the canonical lowercase predicates the ontology worker emits (`is_a`,
+`part_of`, `caused_by`, `works_for`, `contradicts`, `depends_on`, `contains`,
+`implemented_by`, `supersedes` — see `list_memory_conventions`). Several were
+exact duplicates in disguise, which made harness edges invisible to the
+ontology worker and to any other agent walking the graph by predicate name.
+Those have been folded into the canonical predicate; what's left below is
+genuinely harness-domain (audit/POC lifecycle) with no canonical equivalent:
 
 ```
-(:harness_plan)-[:GOVERNED_BY]->(:harness_doc)
+(:harness_plan)-[:ENFORCES_DOC]->(:harness_doc)
 (:harness_plan)-[:BREAKS_INTO]->(:harness_sprint)
-(:harness_sprint)-[:CONTAINS_TODO]->(:harness_todo)
+(:harness_sprint)-[:contains]->(:harness_todo)
 (:harness_todo)-[:ENFORCES_DOC]->(:harness_doc)
 (:harness_todo)-[:DELEGATES_TO]->(:harness_agent)
 (:harness_todo)-[:MUTATES_STREAM]->(:harness_stream)
-(:harness_doc)-[:CONFLICTS_WITH]->(:harness_doc)
+(:harness_doc)-[:contradicts]->(:harness_doc)
 (:harness_audit)-[:AUDITED]->(:harness_plan | harness_sprint | harness_todo | harness_doc)
 
 (:harness_repo)-[:HAD_POC]->(:harness_poc)
-(:harness_poc)-[:RAISED]->(:harness_decision | harness_risk | harness_compliance | harness_scaling | harness_validation | harness_rollout)
+(:harness_poc)-[:RAISED]->(:decision | harness_risk | harness_compliance | harness_scaling | harness_validation | harness_rollout)
 (:harness_risk)-[:ADDRESSED_BY]->(:harness_validation)
-(:harness_rollout)-[:REQUIRES]->(:harness_resource)
-(:harness_decision)-[:SUPERSEDES]->(:harness_decision)
+(:harness_rollout)-[:depends_on]->(:harness_resource)
+(:decision)-[:supersedes]->(:decision)
 
-(:harness_repo)-[:HAS_PLAN]->(:harness_plan)
-(:harness_sprint)-[:DERIVES_FROM]->(:harness_poc)
+(:harness_repo)-[:contains]->(:harness_plan)
+(:harness_sprint)-[:depends_on]->(:harness_poc)
 (:harness_todo)-[:EVIDENCED_BY]->(:harness_poc | <promoted memory node>)
 ```
 
-The last three bridge the sprint domain to the POC/memory domain:
-`HAS_PLAN` scopes planned work to a repo, `DERIVES_FROM` points a sprint at
-the session that motivated it, and `EVIDENCED_BY` ties a todo (or promoted
-memory) to session evidence. Raw session memories need no edges of their own —
-they join by id: `harness_poc.session_id == memory.source_id`.
+Folded (old name → canonical, in `src/api/harness.rs`):
+
+| old harness relation | canonical predicate |
+|---|---|
+| `GOVERNED_BY` | `ENFORCES_DOC` (the two were duplicate "anchored to doc" relations; `ENFORCES_DOC` won) |
+| `CONTAINS_TODO`, `HAS_PLAN` | `contains` |
+| `CONFLICTS_WITH` | `contradicts` |
+| `REQUIRES`, `DERIVES_FROM` | `depends_on` (direction unchanged: both already read "from depends on to") |
+| `SUPERSEDES` (upper-case) | `supersedes` (lower-case, was a pure case duplicate) |
+
+Reading old data: edges written before this consolidation may still carry the
+old names — the frontend (`plan-tree.tsx`, `use-harness-index.ts`,
+`decision-timeline.tsx`, `grill-graph.tsx`) matches both old and new names, so
+nothing needs a migration. New edges should always use the canonical name.
+
+Remaining harness-only relations (no canonical equivalent — genuinely
+domain-specific lifecycle, not generic knowledge-graph semantics):
+`BREAKS_INTO`, `ENFORCES_DOC`, `DELEGATES_TO`, `MUTATES_STREAM`, `AUDITED`,
+`HAD_POC`, `RAISED`, `ADDRESSED_BY`, `EVIDENCED_BY`. `HAD_POC` links a repo to
+its POC sessions, and `EVIDENCED_BY` ties a todo (or promoted memory) to the
+session evidence that motivated it. Raw session memories need no edges of
+their own — they join by id: `harness_poc.session_id == memory.source_id`.
 
 ## Posting grill audits
 
@@ -144,7 +191,7 @@ evidence onto sprints/todos without extra requests:
 ```
 
 `text` is truncated at 2,000 chars (`truncated: true` marks that). Typical
-use: pick a sprint that `DERIVES_FROM` a POC and show that POC's memories as
+use: pick a sprint that `depends_on` a POC and show that POC's memories as
 the evidence behind the sprint's todos.
 
 ## Grill Cockpit UI
@@ -174,7 +221,7 @@ is computed client-side from `GET /api/harness/tree` (nodes + edges + typed
   severity distribution (from `data.severity`), POC session of origin
   (reverse `RAISED` walk), and validation state via `ADDRESSED_BY`
   (`done` / `needed` / unaddressed), sorted worst-first.
-- **Decision timeline**: chronological per POC session; `SUPERSEDES` chains
+- **Decision timeline**: chronological per POC session; `supersedes` chains
   render as struck-through history ("superseded by ...") so a later POC's
   decision replaces, not drowns, the earlier one.
 - **Explore**: semantic search over promoted memories scoped by node type
@@ -183,6 +230,39 @@ is computed client-side from `GET /api/harness/tree` (nodes + edges + typed
   detail panel (framework, severity, phases, ...).
 
 Selecting any node deep-links into the Grill cockpit (`/grill?node=<id>`).
+
+## Documenting changes / summaries (no new node type)
+
+There is no `harness_changelog` type and none should be added. A code
+change, decision writeup, or session summary is a **regular entry**,
+distinguished by convention, not schema:
+
+- **`type`**: `"note"` for a plain summary, `"decision"` if it's an actual
+  architectural choice (use the `decision` schema — `list_schemas` for
+  fields). Never a new bespoke type.
+- **`source_id`**: `project:<slug>:knowledge` (e.g. `project:rust-rag:knowledge`).
+- **`path`**: `changes/<YYYY-MM-DD>-<slug>`, e.g. `changes/2026-09-14-harness-relation-consolidation`.
+  This gives chronological + topical browsing via the existing wiki-path tree
+  for free — no separate index to maintain.
+- **`tags`**: always include `changelog`, plus an area tag (`harness`,
+  `graph`, `frontend`, …).
+- **Body**: what changed and why — the summarization — not a diff dump (git
+  already has the diff). One or two paragraphs, written for someone with no
+  session context.
+- **Edges**: link the note to what it touches using canonical predicates —
+  `implemented_by` (spec/decision entry → the code that realizes it),
+  `depends_on` (this change → the decision/plan it fulfills or the entry it
+  builds on). If a `harness_todo`/`harness_plan` motivated the change, add
+  `EVIDENCED_BY` (todo → this note) — already in the harness vocabulary for
+  exactly this case.
+- **Amending**: `update_item` on the same entry id rather than storing a new
+  one, if the change note is being corrected/extended rather than
+  superseded. Use `supersedes` (entry → entry) if it genuinely replaces an
+  earlier change note (e.g. a revised plan).
+
+This reuses the exact `store_entry` / `create_manual_edge` calls used for
+everything else in this store; the only thing that makes it a "change doc" is
+the `type: note` + `changelog` tag + `changes/...` path convention.
 
 ## Tests
 

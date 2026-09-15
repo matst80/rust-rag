@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
+  GripVertical,
 } from "lucide-react";
 import { memo, useState } from "react";
 import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils";
@@ -213,6 +214,26 @@ function EntryCardInner({
                   e.stopPropagation();
                 }}
               >
+                <div
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData(
+                      "application/json",
+                      JSON.stringify({
+                        id: entry.id,
+                        source_id: entry.source_id,
+                        path: entry.path,
+                      })
+                    );
+                    e.dataTransfer.setData("text/plain", entry.id);
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  className="size-7 flex items-center justify-center rounded cursor-grab active:cursor-grabbing text-muted-foreground/30 hover:text-primary hover:bg-primary/5 transition-colors"
+                  title="Drag to organize into Wiki folder"
+                >
+                  <GripVertical className="size-3.5" />
+                </div>
+
                 <Button
                   variant="ghost"
                   size="icon"

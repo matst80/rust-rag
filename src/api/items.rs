@@ -57,6 +57,9 @@ pub struct ListItemsQuery {
     /// Restrict to entries whose `type` equals this value. See StoreRequest.type.
     #[serde(default, rename = "type")]
     pub type_name: Option<String>,
+    /// `true` restricts to entries with a wiki path set; `false` restricts to
+    /// entries with no path (unorganized). Omit for unfiltered.
+    pub has_path: Option<bool>,
     /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
     #[serde(flatten)]
     pub metadata: HashMap<String, String>,
@@ -119,6 +122,8 @@ pub struct EntryNeighbor {
     pub relationship: Option<String>,
     pub source_type: Option<String>,
     pub thumbnail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -194,6 +199,7 @@ pub(crate) async fn list_items(
         max_created_at: query.max_created_at,
         path_prefix,
         type_name: query.type_name,
+        has_path: query.has_path,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -271,7 +277,7 @@ pub(crate) async fn get_item(
             }
         }
 
-        // Sort: Manual edges first, then Similarity edges (by weight)
+        // Sort: Manual edges first, then Similarity edges (preferring same_repo, then by weight)
         neighbors_with_edges.sort_by(|a, b| {
             let type_a = a.1.edge_type;
             let type_b = b.1.edge_type;
@@ -288,6 +294,15 @@ pub(crate) async fn get_item(
                     .sort_order
                     .cmp(&b.1.sort_order)
                     .then_with(|| a.1.id.cmp(&b.1.id));
+            }
+            let same_repo_a = a.1.metadata.get("same_repo").and_then(|v| v.as_bool()).unwrap_or(false);
+            let same_repo_b = b.1.metadata.get("same_repo").and_then(|v| v.as_bool()).unwrap_or(false);
+            if same_repo_a != same_repo_b {
+                if same_repo_a {
+                    return std::cmp::Ordering::Less;
+                } else {
+                    return std::cmp::Ordering::Greater;
+                }
             }
             b.1.weight
                 .partial_cmp(&a.1.weight)
@@ -310,6 +325,13 @@ pub(crate) async fn get_item(
                 } else {
                     None
                 };
+                let repo = n
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("repo").and_then(Value::as_str))
+                    .or_else(|| n.metadata.get("repo").and_then(Value::as_str))
+                    .or_else(|| n.metadata.get("data").and_then(|d| d.get("repo")).and_then(Value::as_str))
+                    .map(|s| s.to_string());
 
                 EntryNeighbor {
                     id: n.id,
@@ -328,6 +350,7 @@ pub(crate) async fn get_item(
                     relationship: e.relation.clone(),
                     source_type,
                     thumbnail,
+                    repo,
                 }
             })
             .collect();
@@ -462,6 +485,13 @@ pub(crate) async fn update_item(
 
     invalidate_cms_nodes(&state, [updated.id.clone()]).await?;
 
+    super::analysis::spawn_analysis(
+        state.clone(),
+        updated.id.clone(),
+        updated.text.clone(),
+        updated.source_id.clone(),
+    );
+
     Ok(Json(updated.into()))
 }
 
@@ -484,4 +514,135 @@ pub(crate) async fn delete_item(
     }
 
     Ok(Json(super::store_search::DeleteResponse { id, deleted }))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct CreateShareRequest {
+    /// Optional expiration duration in seconds from now, or timestamp in millis
+    pub expires_in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ShareResponse {
+    pub token: String,
+    pub item_id: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub url: String,
+}
+
+pub(crate) async fn create_item_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Option<CreateShareRequest>>,
+) -> Result<Json<ShareResponse>, ApiError> {
+    let store = state.store.clone();
+    let id_for_lookup = id.clone();
+    
+    // Ensure item exists
+    let exists = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let id = id_for_lookup.clone();
+        move || store.get_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    if exists.is_none() {
+        return Err(ApiError::NotFound(format!("item {id} not found")));
+    }
+
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let expires_at = payload
+        .and_then(|p| p.expires_in_seconds)
+        .map(|sec| chrono::Utc::now().timestamp_millis() + sec * 1000);
+
+    let share = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let id = id.clone();
+        let token = token.clone();
+        move || store.create_public_share(&id, &token, expires_at)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    Ok(Json(ShareResponse {
+        token: share.token.clone(),
+        item_id: share.item_id,
+        created_at: share.created_at,
+        expires_at: share.expires_at,
+        url: format!("/public/{}", share.token),
+    }))
+}
+
+pub(crate) async fn get_item_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Option<ShareResponse>>, ApiError> {
+    let store = state.store.clone();
+    let share = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let id = id.clone();
+        move || store.get_public_share_for_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    Ok(Json(share.map(|s| ShareResponse {
+        token: s.token.clone(),
+        item_id: s.item_id,
+        created_at: s.created_at,
+        expires_at: s.expires_at,
+        url: format!("/public/{}", s.token),
+    })))
+}
+
+pub(crate) async fn revoke_item_share(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<super::store_search::DeleteResponse>, ApiError> {
+    let store = state.store.clone();
+    let deleted = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let id = id.clone();
+        move || store.revoke_public_shares_for_item(&id)
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    Ok(Json(super::store_search::DeleteResponse { id, deleted }))
+}
+
+/// Unauthenticated public entry view
+pub(crate) async fn get_public_entry(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<AdminItemPayload>, ApiError> {
+    let store = state.store.clone();
+    let token_clone = token.clone();
+    let (item, analysis) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let share = store.get_public_share(&token_clone)?;
+        let Some(share) = share else {
+            return Ok((None, None));
+        };
+        let item = store.get_item(&share.item_id)?;
+        let analysis = store.get_item_analysis(&share.item_id)?;
+        Ok((item, analysis))
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    let item = item.ok_or_else(|| ApiError::NotFound("Shared entry not found or link has expired".to_owned()))?;
+    let mut payload: AdminItemPayload = item.into();
+    if let Some(a) = analysis {
+        payload.analysis = Some(a.analysis);
+        payload.analysis_at = Some(a.analysis_at);
+        payload.analysis_model = Some(a.analysis_model);
+    }
+    Ok(Json(payload))
 }

@@ -7,6 +7,8 @@ import type {
   SearchRequest,
   StoreRequest,
   UpdateItemRequest,
+  ShareResponse,
+  CreateShareRequest,
   Edge,
   CreateEdgeRequest,
   EntryMetadata,
@@ -82,6 +84,7 @@ interface RawSearchResult {
   section_path?: string[]
   retrievers?: string[]
   type_name?: string | null
+  repo?: string | null
 }
 
 interface RawRelatedResult extends RawSearchResult {
@@ -105,6 +108,8 @@ interface RawEdge {
   metadata: EntryMetadata
   created_at: number
   updated_at: number
+  from_title?: string | null
+  to_title?: string | null
 }
 
 interface GraphEdgesResponse {
@@ -145,6 +150,7 @@ function toSearchResult(result: RawSearchResult): SearchResult {
     section_path: result.section_path,
     retrievers: result.retrievers,
     type_name: result.type_name ?? null,
+    repo: result.repo ?? null,
   }
 }
 
@@ -160,6 +166,8 @@ function toEdge(edge: RawEdge): Edge {
     id: edge.id,
     source_id: edge.from_item_id,
     target_id: edge.to_item_id,
+    source_title: edge.from_title,
+    target_title: edge.to_title,
     relationship: edge.relation ?? edge.edge_type,
     edge_type: edge.edge_type,
     sort_order: edge.sort_order,
@@ -436,6 +444,12 @@ export async function getItems(
   if (options.sort_order) params.append("sort_order", options.sort_order)
   if (options.path_prefix) params.append("path_prefix", options.path_prefix)
   if (options.type) params.append("type", options.type)
+  if (options.has_path !== undefined) params.append("has_path", String(options.has_path))
+  if (options.metadata) {
+    for (const [key, value] of Object.entries(options.metadata)) {
+      if (key && value) params.append(key, value)
+    }
+  }
 
   const queryString = params.toString() ? `?${params.toString()}` : ""
   const response = await request<ItemsResponse>(`/admin/items${queryString}`)
@@ -636,6 +650,30 @@ export async function deleteItem(id: string): Promise<void> {
   })
 }
 
+export async function createItemShare(
+  id: string,
+  data?: CreateShareRequest
+): Promise<ShareResponse> {
+  return request<ShareResponse>(`/admin/items/${encodeURIComponent(id)}/share`, {
+    method: "POST",
+    body: JSON.stringify(data ?? {}),
+  })
+}
+
+export async function getItemShare(id: string): Promise<ShareResponse | null> {
+  return request<ShareResponse | null>(`/admin/items/${encodeURIComponent(id)}/share`)
+}
+
+export async function revokeItemShare(id: string): Promise<void> {
+  await request<void>(`/admin/items/${encodeURIComponent(id)}/share`, {
+    method: "DELETE",
+  })
+}
+
+export async function getPublicEntry(token: string): Promise<Entry> {
+  return request<Entry>(`/api/public/entries/${encodeURIComponent(token)}`)
+}
+
 // Search API
 export async function search(data: SearchRequest): Promise<SearchResultsBundle> {
   const response = await request<SearchResponse>("/api/search", {
@@ -649,6 +687,7 @@ export async function search(data: SearchRequest): Promise<SearchResultsBundle> 
       ...(data.rerank !== undefined && { rerank: data.rerank }),
       ...(data.type && { type: data.type }),
       ...(data.type_names && { type_names: data.type_names }),
+      ...(data.repo && { repo: data.repo }),
     }),
   })
   return {
@@ -921,6 +960,12 @@ export const api = {
     reanalyze: reanalyzeItem,
     uploadImage,
     ingestUrl,
+    createShare: createItemShare,
+    getShare: getItemShare,
+    revokeShare: revokeItemShare,
+  },
+  public: {
+    getEntry: getPublicEntry,
   },
   attachments: {
     upload: uploadAttachment,

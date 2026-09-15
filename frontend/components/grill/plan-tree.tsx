@@ -19,14 +19,16 @@ const TYPE_LABELS: Record<string, string> = {
   harness_audit: "AUDIT",
   harness_repo: "REPO",
   harness_poc: "POC",
-  harness_decision: "DECISION",
+  // harness_decision was folded into the generic `decision` type.
+  decision: "DECISION",
   harness_risk: "RISK",
   harness_compliance: "COMPLIANCE",
   harness_resource: "RESOURCE",
   harness_scaling: "SCALING",
   harness_validation: "VALIDATION",
   harness_rollout: "ROLLOUT",
-  harness_fact: "FACT",
+  // harness_fact renamed harness_evidence (collided with the generic `fact` type).
+  harness_evidence: "EVIDENCE",
 }
 
 function Badge({ node }: { node: HarnessTreeNode }) {
@@ -168,8 +170,13 @@ function BranchRows({
  */
 const CHILD_RELATIONS = new Set([
   "BREAKS_INTO",
+  // CONTAINS_TODO/GOVERNED_BY/REQUIRES/upper-case SUPERSEDES were folded
+  // into the canonical contains/ENFORCES_DOC/depends_on/supersedes
+  // predicates — kept here (plus lower-case forms) so old and new edges
+  // both render regardless of which call site upper-cases the relation.
   "CONTAINS_TODO",
   "CONTAINS",
+  "contains",
   "IMPLEMENTED_BY",
   "GOVERNED_BY",
   "ENFORCES_DOC",
@@ -179,7 +186,10 @@ const CHILD_RELATIONS = new Set([
   "RAISED",
   "ADDRESSED_BY",
   "REQUIRES",
+  "DEPENDS_ON",
+  "depends_on",
   "SUPERSEDES",
+  "supersedes",
 ])
 
 function buildBranches(
@@ -222,13 +232,13 @@ export function PlanTree({
   selectedId: string | null
   onSelect: (id: string) => void
 }) {
-  const { planBranches, pocBranches, facts, unlinked } = useMemo(() => {
+  const { planBranches, docBranches, pocBranches, evidence, unlinked } = useMemo(() => {
     const byId = new Map<string, HarnessTreeNode>()
     const childrenByParent = new Map<string, HarnessTreeEdge[]>()
-    const seenEdges = new Set<string>()
     const planIds: string[] = []
     const repoIds: string[] = []
-    if (!tree) return { planBranches: [], pocBranches: [], facts: [], unlinked: [] }
+    const docIds: string[] = []
+    if (!tree) return { planBranches: [], docBranches: [], pocBranches: [], evidence: [], unlinked: [] }
 
     for (const node of tree.nodes) byId.set(node.id, node)
     for (const edge of tree.edges) {
@@ -244,23 +254,32 @@ export function PlanTree({
     for (const node of tree.nodes) {
       if (node.type_name === "harness_plan") planIds.push(node.id)
       if (node.type_name === "harness_repo") repoIds.push(node.id)
+      if (node.type_name === "harness_doc") {
+        const isChildDoc = tree.edges.some(
+          (e) =>
+            e.to_item_id === node.id &&
+            e.relation?.toLowerCase() === "contains" &&
+            byId.get(e.from_item_id)?.type_name === "harness_doc"
+        )
+        if (!isChildDoc) docIds.push(node.id)
+      }
     }
-    // Render order matters: plans first, then repos/POCs; a node reached via
-    // two roots only renders under the first one.
+    // Render order matters: plans first, then governing docs, then repos/POCs.
     const rendered = new Set<string>()
     const planBranches = buildBranches(planIds, byId, childrenByParent, rendered)
+    const docBranches = buildBranches(docIds, byId, childrenByParent, rendered)
     const pocBranches = buildBranches(repoIds, byId, childrenByParent, rendered)
-    const facts = tree.nodes.filter((n) => n.type_name === "harness_fact" && !rendered.has(n.id))
+    const evidence = tree.nodes.filter((n) => n.type_name === "harness_evidence" && !rendered.has(n.id))
     const unlinked = tree.nodes.filter(
       (n) =>
         !rendered.has(n.id) &&
         n.type_name !== "harness_audit" &&
-        n.type_name !== "harness_fact"
+        n.type_name !== "harness_evidence"
     )
-    return { planBranches, pocBranches, facts, unlinked }
+    return { planBranches, docBranches, pocBranches, evidence, unlinked }
   }, [tree])
 
-  const empty = planBranches.length === 0 && pocBranches.length === 0
+  const empty = planBranches.length === 0 && docBranches.length === 0 && pocBranches.length === 0
 
   return (
     <div className="flex h-full flex-col">
@@ -300,6 +319,19 @@ export function PlanTree({
             depth={0}
           />
         ))}
+        {docBranches.length > 0 && (
+          <Section label={`Governing Documents (${docBranches.length})`}>
+            {docBranches.map((branch) => (
+              <BranchRows
+                key={branch.node.id}
+                branch={branch}
+                selectedId={selectedId}
+                onSelect={onSelect}
+                depth={0}
+              />
+            ))}
+          </Section>
+        )}
         {pocBranches.length > 0 && (
           <Section label={`POC sessions (${pocBranches.length})`}>
             {pocBranches.map((branch) => (
@@ -313,9 +345,9 @@ export function PlanTree({
             ))}
           </Section>
         )}
-        {facts.length > 0 && (
-          <Section label={`Session facts (${facts.length})`}>
-            {facts.map((node) => (
+        {evidence.length > 0 && (
+          <Section label={`Session evidence (${evidence.length})`}>
+            {evidence.map((node) => (
               <NodeRow
                 key={node.id}
                 node={node}

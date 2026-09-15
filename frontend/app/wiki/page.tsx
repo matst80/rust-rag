@@ -9,7 +9,8 @@ function WikiInner() {
   const params = useSearchParams()
   const sourceId = params.get("source_id") || "knowledge"
   const path = params.get("path") || undefined
-  return <EntryTree sourceId={sourceId} prefix={path} />
+  const entryId = params.get("entry") || undefined
+  return <EntryTree sourceId={sourceId} prefix={path} selectedEntryId={entryId} />
 }
 
 export default function WikiPage() {

@@ -1,11 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, X, Save, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import dynamic from "next/dynamic";
+const EntryCodeMirrorEditor = dynamic(
+  () => import("./entry-codemirror-editor").then((m) => m.EntryCodeMirrorEditor),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-[220px] rounded-xl border border-border bg-card flex items-center justify-center p-8">
+        <div className="size-6 animate-spin rounded-full border-2 border-border border-t-primary" />
+      </div>
+    ),
+  }
+);
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +78,19 @@ export function EntryForm({
     entry?.type ?? initialData?.type_name ?? "",
   );
   const [data, setData] = useState<any>(entry?.data ?? initialData?.data ?? {});
+
+  // Sync state when entry loads asynchronously
+  useEffect(() => {
+    if (entry) {
+      setId(entry.id);
+      setText(entry.text);
+      setSourceId(entry.source_id);
+      setPath(entry.path ?? "");
+      setMetadata(entry.metadata ?? {});
+      setTypeName(entry.type ?? "");
+      setData(entry.data ?? {});
+    }
+  }, [entry]);
 
   const { data: schemas } = useSchemas();
   const isMutating = isCreating || isUpdating;
@@ -218,12 +242,11 @@ export function EntryForm({
               <AiRefineButton content={text} onAccept={setText} />
             </div>
           </div>
-          <Textarea
-            id="text"
+          <EntryCodeMirrorEditor
+            id={id || "new"}
             value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Enter the entry content..."
-            className="min-h-32"
+            onChange={setText}
+            className="min-h-[220px]"
           />
         </div>
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, params};
-use std::collections::HashSet;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     DuplicateEdgeGroup, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNodeDistance,
@@ -136,6 +137,36 @@ pub(super) fn list_pairwise_distances_for_ids(
     Ok(distances)
 }
 
+fn extract_repo_from_row(metadata_str: Option<&str>, data_str: Option<&str>) -> Option<String> {
+    if let Some(ds) = data_str {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(ds) {
+            if let Some(repo) = map.get("repo").and_then(Value::as_str) {
+                let repo = repo.trim();
+                if !repo.is_empty() {
+                    return Some(repo.to_lowercase());
+                }
+            }
+        }
+    }
+    if let Some(ms) = metadata_str {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(ms) {
+            if let Some(repo) = map.get("repo").and_then(Value::as_str) {
+                let repo = repo.trim();
+                if !repo.is_empty() {
+                    return Some(repo.to_lowercase());
+                }
+            }
+            if let Some(repo) = map.get("data").and_then(|d| d.get("repo")).and_then(Value::as_str) {
+                let repo = repo.trim();
+                if !repo.is_empty() {
+                    return Some(repo.to_lowercase());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(super) fn rebuild_similarity_graph_locked(
     connection: &mut Connection,
     graph_config: GraphConfig,
@@ -146,16 +177,30 @@ pub(super) fn rebuild_similarity_graph_locked(
 
     let mut item_statement = connection.prepare(
         "
-        SELECT items.id
+        SELECT items.id, items.metadata, items.data
         FROM items
         JOIN vec_items ON vec_items.id = items.id
         ORDER BY items.id ASC
         ",
     )?;
-    let item_ids = item_statement
-        .query_map([], |row| row.get::<_, String>(0))?
+    let item_rows = item_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(item_statement);
+
+    let mut item_ids = Vec::with_capacity(item_rows.len());
+    let mut item_repos: HashMap<String, Option<String>> = HashMap::with_capacity(item_rows.len());
+    for (id, meta, data) in item_rows {
+        let repo = extract_repo_from_row(meta.as_deref(), data.as_deref());
+        item_repos.insert(id.clone(), repo);
+        item_ids.push(id);
+    }
 
     let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM graph_edges WHERE edge_type = 'similarity'", [])?;
@@ -164,7 +209,9 @@ pub(super) fn rebuild_similarity_graph_locked(
     let timestamp = current_timestamp_millis()?;
     let mut inserted = 0usize;
 
-    for item_id in item_ids {
+    for item_id in &item_ids {
+        let base_repo = item_repos.get(item_id).and_then(|r| r.as_ref());
+        let candidate_limit = (graph_config.similarity_top_k * 2).max(graph_config.similarity_top_k + 10);
         let candidates = {
             let mut statement = transaction.prepare(
                 "
@@ -185,29 +232,44 @@ pub(super) fn rebuild_similarity_graph_locked(
                 params![
                     item_id,
                     bool_to_sqlite(graph_config.cross_source),
-                    graph_config.similarity_top_k as i64
+                    candidate_limit as i64
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?)),
             )?;
 
             let mut candidates = Vec::new();
             for row in rows {
-                candidates.push(row?);
+                let (other_id, raw_dist) = row?;
+                let other_repo = item_repos.get(&other_id).and_then(|r| r.as_ref());
+                let (adjusted_dist, same_repo) = match (base_repo, other_repo) {
+                    (Some(b), Some(o)) if b == o => (raw_dist * 0.80, Some(true)),
+                    (Some(b), Some(o)) if b != o => (raw_dist * 1.15, Some(false)),
+                    _ => (raw_dist, None),
+                };
+                candidates.push((other_id, adjusted_dist, raw_dist, same_repo));
             }
+            candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            candidates.truncate(graph_config.similarity_top_k);
             candidates
         };
 
-        for (other_id, distance) in candidates {
+        for (other_id, distance, raw_distance, same_repo) in candidates {
             if distance > graph_config.similarity_max_distance {
                 continue;
             }
-            let (from_item_id, to_item_id) = canonical_edge_pair(&item_id, &other_id);
+            let (from_item_id, to_item_id) = canonical_edge_pair(item_id, &other_id);
             if !inserted_pairs.insert((from_item_id.clone(), to_item_id.clone())) {
                 continue;
             }
 
             let weight = 1.0 / (1.0 + distance);
-            let metadata = serde_json::json!({ "distance": distance });
+            let mut metadata = serde_json::json!({
+                "distance": distance,
+                "raw_distance": raw_distance,
+            });
+            if let Some(sr) = same_repo {
+                metadata["same_repo"] = serde_json::json!(sr);
+            }
             transaction.execute(
                 "
                 INSERT INTO graph_edges (

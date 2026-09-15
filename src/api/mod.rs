@@ -5,6 +5,7 @@ mod auth;
 pub mod auth_guard;
 mod chunking;
 pub mod cms;
+pub mod collab;
 pub mod dream;
 mod dreaming;
 pub mod error;
@@ -56,6 +57,7 @@ pub(crate) use error::{
 pub(crate) use graph::{
     CreateManualEdgeRequest, GraphEdgePayload, GraphEdgesResponse, GraphNeighborhoodQuery,
     GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse, ListGraphEdgesQuery,
+    edge_payload, titles_for_edges,
 };
 pub(crate) use health::HealthResponse;
 pub(crate) use items::{
@@ -1601,7 +1603,9 @@ mod tests {
                     "directed": true,
                     "metadata": {"kind":"manual"},
                     "created_at": 1,
-                    "updated_at": 1
+                    "updated_at": 1,
+                    "from_title": "two",
+                    "to_title": "one"
                 },
                 {
                     "id": "sim-1",
@@ -1614,7 +1618,9 @@ mod tests {
                     "directed": false,
                     "metadata": {"distance":0.2},
                     "created_at": 1,
-                    "updated_at": 1
+                    "updated_at": 1,
+                    "from_title": "two",
+                    "to_title": "three"
                 }
             ],
             "pairwise_distances": []
@@ -3243,7 +3249,6 @@ mod tests {
         assert_eq!(ids, vec!["plan-1", "todo-1"]);
         assert_eq!(results[0]["type_name"], "harness_plan");
 
-        // Single-type filter still wins over type_names when both are set.
         let response = server
             .post("/api/search")
             .json(&json!({
@@ -3258,5 +3263,63 @@ mod tests {
         let results = body["results"].as_array().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["id"], "todo-1");
+    }
+
+    #[tokio::test]
+    async fn search_route_filters_by_repo() {
+        let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2, 0.3]));
+        let hit = |id: &str, repo: &str, distance: f32| SearchHit {
+            id: id.to_owned(),
+            text: format!("text {id}"),
+            metadata: json!({"repo": repo}),
+            source_id: "default".to_owned(),
+            created_at: 1,
+            updated_at: 1,
+            distance,
+            section_path: Vec::new(),
+            retrievers: Vec::new(),
+            chunk_text: None,
+            path: None,
+            type_name: None,
+            tags: Vec::new(),
+            analysis: None,
+        };
+        let store = Arc::new(MockStore::with_results(vec![
+            hit("doc-1", "matst80/rust-rag", 0.1),
+            hit("doc-2", "other/repo", 0.15),
+        ]));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
+
+        let response = server
+            .post("/api/search")
+            .json(&json!({
+                "query": "test",
+                "repo": "matst80/rust-rag"
+            }))
+            .await;
+
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["id"], "doc-1");
+        assert_eq!(results[0]["repo"], "matst80/rust-rag");
+    }
+
+    #[test]
+    fn build_contextual_embed_prefix_formats_properly() {
+        use crate::api::store_search::build_contextual_embed_prefix;
+
+        let meta = json!({"repo": "matst80/rust-rag", "doc_type": "adr"});
+        let prefix = build_contextual_embed_prefix(&meta, None, Some("docs/adr/0001.md"), None);
+        assert_eq!(prefix, Some("[repo:matst80/rust-rag path:docs/adr/0001.md doc_type:adr] ".to_string()));
+
+        let meta_empty = json!({});
+        let prefix_none = build_contextual_embed_prefix(&meta_empty, None, None, None);
+        assert_eq!(prefix_none, None);
     }
 }

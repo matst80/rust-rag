@@ -12,6 +12,10 @@ const nextConfig = {
   outputFileTracingRoot: path.join(__dirname, '..'),
   allowedDevOrigins: ["127.0.0.1", "10.10.11.135", "rag.k6n.net"],
   transpilePackages: ["@rust-rag/llm"],
+  // Native onnxruntime-node binding resolves libonnxruntime.so.1 via a relative
+  // path; bundling it (Turbopack/webpack) breaks that lookup. Keep it (and its
+  // caller) external so it's require()'d straight from node_modules.
+  serverExternalPackages: ["@huggingface/transformers", "onnxruntime-node"],
   typescript: {
     ignoreBuildErrors: true,
   },

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use linfa::prelude::*;
 use linfa_clustering::KMeans;
 use linfa_ndarray::Array2;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -486,6 +487,28 @@ async fn generate_cluster_labels(
     };
 
     for (cluster_id, indices) in by_cluster {
+        let mut repo_counts: HashMap<String, usize> = HashMap::new();
+        for &i in indices {
+            let item = &items[i];
+            let repo = item
+                .data
+                .as_ref()
+                .and_then(|d| d.get("repo").and_then(Value::as_str))
+                .or_else(|| item.metadata.get("repo").and_then(Value::as_str))
+                .or_else(|| item.metadata.get("data").and_then(|d| d.get("repo")).and_then(Value::as_str));
+            if let Some(r) = repo {
+                let r = r.trim();
+                if !r.is_empty() {
+                    *repo_counts.entry(r.to_string()).or_default() += 1;
+                }
+            }
+        }
+        let predominant_repo = repo_counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .filter(|(_, count)| *count * 2 >= indices.len())
+            .map(|(repo, _)| repo);
+
         let samples: Vec<String> = indices
             .iter()
             .take(8)
@@ -498,13 +521,26 @@ async fn generate_cluster_labels(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| item.id.clone());
+                let repo_prefix = item
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("repo").and_then(Value::as_str))
+                    .or_else(|| item.metadata.get("repo").and_then(Value::as_str))
+                    .or_else(|| item.metadata.get("data").and_then(|d| d.get("repo")).and_then(Value::as_str))
+                    .map(|r| format!("[repo:{}] ", r.trim()))
+                    .unwrap_or_default();
                 let snippet: String = item.text.chars().take(200).collect();
-                format!("- {title}\n  {snippet}")
+                format!("- {repo_prefix}{title}\n  {snippet}")
             })
             .collect();
 
+        let repo_hint = match &predominant_repo {
+            Some(r) => format!(" The entries predominantly belong to repository/project '{r}'."),
+            None => String::new(),
+        };
+
         let user_prompt = format!(
-            "Below are {n} representative entries from one cluster of a knowledge base. \
+            "Below are {n} representative entries from one cluster of a knowledge base.{repo_hint} \
              Produce a short, specific cluster label.\n\n{samples}\n\n\
              Return JSON: {{\"name\": \"...\", \"description\": \"...\"}}. \
              `name` ≤ 4 words, title case, no quotes. `description` ≤ 16 words.",
@@ -521,7 +557,7 @@ async fn generate_cluster_labels(
             user_prompt: &user_prompt,
             max_tokens: 200,
             temperature: 0.2,
-            response_format_json: true,
+            response_format_json: false,
         };
 
         // Compute a deterministic fallback up-front: first sample's title.

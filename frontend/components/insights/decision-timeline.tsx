@@ -33,9 +33,11 @@ export function DecisionTimeline({
     // newer → older, so the *source* is the replacement).
     const supersededBy = new Map<string, HarnessTreeNode>()
     for (const node of index.byId.values()) {
-      if (node.type_name !== "harness_decision") continue
+      if (node.type_name !== "decision") continue
       for (const edge of index.childrenOf.get(node.id) ?? []) {
-        if (edge.relation === "SUPERSEDES") {
+        // SUPERSEDES folded into canonical `supersedes`; old edges may still
+        // carry the upper-case name.
+        if (edge.relation === "SUPERSEDES" || edge.relation === "supersedes") {
           const old = index.byId.get(edge.to_item_id)
           if (old) supersededBy.set(old.id, node)
         }
@@ -51,7 +53,7 @@ export function DecisionTimeline({
         .filter(
           (e) =>
             e.relation === "RAISED" &&
-            index.byId.get(e.to_item_id)?.type_name === "harness_decision"
+            index.byId.get(e.to_item_id)?.type_name === "decision"
         )
         .map((e) => index.byId.get(e.to_item_id)!)
         .filter(Boolean)

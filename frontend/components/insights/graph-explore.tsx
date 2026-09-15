@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils"
 const EXPLORE_TYPES = [
   { id: "harness_compliance", label: "Compliance" },
   { id: "harness_risk", label: "Risks" },
-  { id: "harness_decision", label: "Decisions" },
+  { id: "decision", label: "Decisions" },
   { id: "harness_scaling", label: "Scaling" },
   { id: "harness_validation", label: "Validations" },
   { id: "harness_poc", label: "POC sessions" },
@@ -38,7 +38,7 @@ export function GraphExplore({
   const [query, setQuery] = useState("")
   const [submitted, setSubmitted] = useState<{ query: string; repoId: string | null } | null>(null)
   const [types, setTypes] = useState<Set<string>>(
-    new Set(["harness_compliance", "harness_risk", "harness_decision"])
+    new Set(["harness_compliance", "harness_risk", "decision"])
   )
   const [selectedHit, setSelectedHit] = useState<string | null>(null)
   const { data: full } = useItem(selectedHit)

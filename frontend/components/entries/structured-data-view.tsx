@@ -1,7 +1,8 @@
 "use client"
 
+import type { ReactNode } from "react"
 import { Badge } from "@/components/ui/badge"
-import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User, Activity, AlertCircle, ShieldAlert, Wrench, Server, Dumbbell, Timer, Footprints, TrendingUp } from "lucide-react"
+import { Calendar, CheckCircle2, Circle, Clock, Tag, AlertTriangle, Users, Flame, Utensils, ChefHat, Gavel, ArrowRight, History, ShieldCheck, XCircle, StickyNote, Link2, User, Activity, AlertCircle, ShieldAlert, Wrench, Server, Dumbbell, Timer, Footprints, TrendingUp, BookOpen, GitBranch, FileText, Hash, GitCommitHorizontal, FolderGit2, ListChecks } from "lucide-react"
 import { EntryTagList } from "../ui/entry-tag"
 import { MarkdownView } from "./markdown-view"
 
@@ -649,6 +650,280 @@ function IncidentView({ data }: { data: any }) {
 }
 
 /**
+ * Specialized view for 'harness_doc' entries (ADR, SPEC, INVARIANT, OVERVIEW, ARCHITECTURE, GUIDE)
+ */
+function HarnessDocView({ data }: { data: any }) {
+  const docTypeConfig: Record<string, { styles: string }> = {
+    ADR: { styles: "bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-900/30 dark:text-violet-400 dark:border-violet-800" },
+    SPEC: { styles: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800" },
+    INVARIANT: { styles: "bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800" },
+    OVERVIEW: { styles: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800" },
+    ARCHITECTURE: { styles: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800" },
+    GUIDE: { styles: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800" },
+  }
+  const docType = (data.doc_type as string) || "DOC"
+  const dConfig = docTypeConfig[docType] || { styles: "bg-muted text-muted-foreground border-border" }
+  const statusConfig: Record<string, { icon: ReactNode; styles: string }> = {
+    ACTIVE: { icon: <ShieldCheck className="size-3.5" />, styles: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800" },
+    DRAFT: { icon: <Circle className="size-3.5" />, styles: "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800" },
+    SUPERSEDED: { icon: <History className="size-3.5" />, styles: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800" },
+    DEPRECATED: { icon: <XCircle className="size-3.5" />, styles: "bg-red-50 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800" },
+  }
+  const status = ((data.status as string) || "ACTIVE").toUpperCase()
+  const sConfig = statusConfig[status] || statusConfig.ACTIVE
+
+  const sections = Array.isArray(data.sections) ? data.sections : []
+  const sourceFiles = Array.isArray(data.source_files) ? data.source_files : []
+  const invariants = Array.isArray(data.invariants) ? data.invariants : []
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-6 pb-6 border-b border-border/40">
+        <div className="space-y-3 max-w-2xl">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider border ${dConfig.styles}`}>
+              <BookOpen className="size-3" />
+              {docType}
+            </div>
+            {data.version && (
+              <span className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground uppercase">
+                <Hash className="size-3" />v{data.version}
+              </span>
+            )}
+          </div>
+          <h3 className="text-2xl font-bold tracking-tight text-foreground/90">{data.title || "Untitled Document"}</h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-xs font-semibold ${sConfig.styles}`}>
+              {sConfig.icon}
+              <span className="capitalize">{status.toLowerCase()}</span>
+            </div>
+            {data.repo && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
+                <FolderGit2 className="size-3.5" />
+                {data.repo}
+                {data.repo_path && <span className="text-muted-foreground/60">/{String(data.repo_path).replace(/^\//, "")}</span>}
+              </div>
+            )}
+          </div>
+        </div>
+        {data.git_sha && (
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-muted/40 border border-border/40 font-mono text-[11px] text-muted-foreground">
+            <GitCommitHorizontal className="size-3.5" />
+            {String(data.git_sha).slice(0, 10)}
+          </div>
+        )}
+      </div>
+
+      {/* Summary */}
+      {data.summary && (
+        <div className="text-[15px] leading-relaxed text-foreground/80 italic">
+          <MarkdownView content={data.summary} />
+        </div>
+      )}
+
+      {/* ADR-style Context / Decision / Consequences */}
+      {(data.context || data.decision || data.consequences) && (
+        <div className="grid grid-cols-1 gap-8">
+          {data.context && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="size-6 rounded-md bg-muted flex items-center justify-center border border-border/60">
+                  <Clock className="size-3.5 text-muted-foreground" />
+                </div>
+                <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary/80">Context</span>
+              </div>
+              <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
+                <MarkdownView content={data.context} />
+              </div>
+            </div>
+          )}
+          {data.decision && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="size-6 rounded-md bg-primary/10 flex items-center justify-center border border-primary/20">
+                  <Gavel className="size-3.5 text-primary" />
+                </div>
+                <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary">Decision</span>
+              </div>
+              <div className="py-4 pr-4 pl-9 rounded-xl bg-primary/[0.03] border border-primary/10 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-1 h-full bg-primary/40" />
+                <div className="text-[16px] font-medium leading-relaxed text-foreground">
+                  <MarkdownView content={data.decision} />
+                </div>
+              </div>
+            </div>
+          )}
+          {data.consequences && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <div className="size-6 rounded-md bg-muted flex items-center justify-center border border-border/60">
+                  <ArrowRight className="size-3.5 text-muted-foreground" />
+                </div>
+                <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary/80">Consequences</span>
+              </div>
+              <div className="text-[15px] leading-relaxed text-foreground/80 pl-9">
+                <MarkdownView content={data.consequences} />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Table of contents from extracted sections */}
+      {sections.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="size-6 rounded-md bg-muted flex items-center justify-center border border-border/60">
+              <ListChecks className="size-3.5 text-muted-foreground" />
+            </div>
+            <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-primary/80">Sections</span>
+          </div>
+          <div className="pl-9 space-y-2">
+            {sections.map((s: any, i: number) => (
+              <a
+                key={i}
+                href={s.anchor ? `#${s.anchor}` : undefined}
+                className="group flex items-start gap-2 text-sm hover:text-primary transition-colors"
+              >
+                <span className="font-mono text-[10px] text-muted-foreground/60 mt-0.5">{(i + 1).toString().padStart(2, "0")}</span>
+                <div>
+                  <div className="font-medium text-foreground/90 group-hover:text-primary">{s.title}</div>
+                  {s.summary && <div className="text-xs text-muted-foreground line-clamp-1">{s.summary}</div>}
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Invariants */}
+      {invariants.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="size-6 rounded-md bg-red-500/10 flex items-center justify-center border border-red-500/20">
+              <ShieldAlert className="size-3.5 text-red-600" />
+            </div>
+            <span className="font-mono text-[11px] font-black uppercase tracking-[3px] text-red-600">Invariants</span>
+          </div>
+          <ul className="pl-9 space-y-1.5 list-disc marker:text-red-500/50">
+            {invariants.map((inv: any, i: number) => (
+              <li key={i} className="text-sm text-foreground/80 leading-relaxed">
+                {typeof inv === "string" ? inv : JSON.stringify(inv)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Source files */}
+      {sourceFiles.length > 0 && (
+        <div className="space-y-3 pt-4 border-t border-border/20">
+          <span className="text-[10px] font-mono font-black uppercase tracking-wider text-muted-foreground/80 flex items-center gap-1.5">
+            <FileText className="size-3" />
+            Source Files
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {sourceFiles.map((f: string, i: number) => (
+              <Badge key={i} variant="secondary" className="rounded-sm font-mono text-[10px] px-2 py-0.5 bg-muted/40">
+                {f}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Lineage */}
+      {(data.parent_doc_id || data.supersedes) && (
+        <div className="flex flex-wrap gap-8 pt-4 border-t border-border/20">
+          {data.parent_doc_id && (
+            <div className="space-y-2">
+              <span className="text-[10px] font-mono font-black uppercase tracking-wider text-muted-foreground/80">Parent Doc</span>
+              <div className="flex items-center gap-2 text-sm font-medium text-primary hover:underline cursor-pointer">
+                <GitBranch className="size-3.5" />
+                {data.parent_doc_id}
+              </div>
+            </div>
+          )}
+          {data.supersedes && (
+            <div className="space-y-2">
+              <span className="text-[10px] font-mono font-black uppercase tracking-wider text-muted-foreground/80">Supersedes</span>
+              <div className="flex items-center gap-2 text-sm font-medium text-amber-600 dark:text-amber-500 hover:underline cursor-pointer">
+                <History className="size-3.5" />
+                {data.supersedes}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Specialized view for 'harness_repo' entries (governing repository root node)
+ */
+function HarnessRepoView({ data }: { data: any }) {
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-border/40">
+        <div className="flex items-center gap-4">
+          <div className="size-12 rounded-2xl bg-primary/10 flex items-center justify-center border border-primary/20">
+            <FolderGit2 className="size-6 text-primary" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 text-primary/60">
+              <span className="font-mono text-[10px] font-black uppercase tracking-[3px]">Repository</span>
+            </div>
+            <h3 className="text-2xl font-bold tracking-tight text-foreground/90">{data.name || "Untitled Repo"}</h3>
+          </div>
+        </div>
+        {data.default_branch && (
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-muted/40 border border-border/40 font-mono text-xs text-muted-foreground">
+            <GitBranch className="size-3.5" />
+            {data.default_branch}
+          </div>
+        )}
+      </div>
+
+      {/* Any other scalar/array fields, rendered generically */}
+      {(() => {
+        const rest = Object.entries(data).filter(([k]) => k !== "name" && k !== "default_branch")
+        if (rest.length === 0) return null
+        return (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+            {rest.map(([key, val]) => (
+              <div key={key} className="space-y-1 border-l-2 border-primary/20 pl-4 py-0.5">
+                <div className="font-mono text-[10px] font-black uppercase tracking-[2px] text-primary/70">
+                  {key.replace(/_/g, " ")}
+                </div>
+                <div className="text-sm font-medium text-foreground/80">
+                  {Array.isArray(val) ? (
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {val.map((v, i) => (
+                        <Badge key={i} variant="secondary" className="text-[10px] h-5 rounded-sm px-1.5 font-mono bg-muted/50 border-none">
+                          {String(v)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : typeof val === "object" && val !== null ? (
+                    <pre className="text-[11px] font-mono text-muted-foreground bg-muted/50 p-2 rounded mt-1 overflow-x-auto">
+                      {JSON.stringify(val, null, 2)}
+                    </pre>
+                  ) : (
+                    String(val)
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+    </div>
+  )
+}
+
+/**
  * Generic Property Grid for any data type
  */
 function GenericDataView({ data }: { data: any }) {
@@ -748,6 +1023,10 @@ export function StructuredDataView({ type, data }: StructuredDataViewProps) {
           <FactView data={data} />
         ) : type === "workout" ? (
           <WorkoutView data={data} />
+        ) : type === "harness_doc" ? (
+          <HarnessDocView data={data} />
+        ) : type === "harness_repo" ? (
+          <HarnessRepoView data={data} />
         ) : type.startsWith("cms_") ? (
           <CmsTemplateView type={type} data={data} />
         ) : (

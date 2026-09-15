@@ -172,6 +172,7 @@ struct SearchEntriesArguments {
     source_id: Option<String>,
     hybrid: Option<bool>,
     max_distance: Option<f32>,
+    repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,7 +601,8 @@ fn server_tool_definitions() -> Vec<ChatToolDefinition> {
                         "top_k": { "type": "integer", "minimum": 1, "maximum": 25, "default": 5 },
                         "source_id": { "type": "string" },
                         "hybrid": { "type": "boolean", "default": true },
-                        "max_distance": { "type": "number", "default": 0.8 }
+                        "max_distance": { "type": "number", "default": 0.8 },
+                        "repo": { "type": "string", "description": "Filter results to entries belonging to this repository or codebase name." }
                     },
                     "required": ["query"],
                     "additionalProperties": false
@@ -973,6 +975,12 @@ async fn search_entries_tool(
 
     let max_distance = arguments.max_distance.unwrap_or(0.8);
     let hybrid = arguments.hybrid.unwrap_or(true);
+    let repo_filter = arguments
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase);
 
     let embedder = state.embedder.get_ready()?;
     let store = state.store.clone();
@@ -999,11 +1007,19 @@ async fn search_entries_tool(
                 store.search(&embedding, top_k, source_id.as_deref(), None)?
             };
 
-            Ok(hits
+            let mut filtered: Vec<SearchResultPayload> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
                 .map(SearchResultPayload::from)
-                .collect())
+                .collect();
+
+            if let Some(ref target_repo) = repo_filter {
+                filtered.retain(|hit| {
+                    hit.repo.as_deref().map(str::to_lowercase) == Some(target_repo.clone())
+                });
+            }
+
+            Ok(filtered)
         })
         .await
         .map_err(ApiError::TaskJoin)?
@@ -1081,6 +1097,7 @@ async fn list_items_tool(
         max_created_at: arguments.max_created_at,
         path_prefix: None,
         type_name: None,
+        has_path: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1364,12 +1381,15 @@ async fn create_graph_edge_tool(
         metadata: arguments.metadata,
     };
 
-    let edge = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(map_graph_error)?;
+    let payload = tokio::task::spawn_blocking(move || {
+        let edge = store.add_manual_edge(input)?;
+        let titles = super::titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+        Ok::<_, anyhow::Error>(super::edge_payload(edge, &titles))
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(map_graph_error)?;
 
-    let payload: super::GraphEdgePayload = edge.into();
     Ok(serde_json::to_string(&payload).map_err(|error| ApiError::Internal(anyhow!(error)))?)
 }
 

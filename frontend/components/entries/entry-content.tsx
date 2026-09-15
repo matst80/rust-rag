@@ -3,19 +3,41 @@
 import Link from "next/link";
 import { GitBranch } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
+import dynamic from "next/dynamic";
+const EntryCodeMirrorEditor = dynamic(
+  () => import("./entry-codemirror-editor").then((m) => m.EntryCodeMirrorEditor),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-[300px] rounded-xl border border-border bg-card flex items-center justify-center p-8">
+        <div className="size-6 animate-spin rounded-full border-2 border-border border-t-primary" />
+      </div>
+    ),
+  }
+);
 import { AiRefineButton } from "../ai/ai-refine-button";
 import { StructuredDataEditor } from "./structured-data-editor";
 import { StructuredDataView } from "./structured-data-view";
 import { AnalysisPanel } from "./analysis-panel";
 import { AttachmentsPanel } from "./attachments-panel";
+import { CommentsPanel } from "./comments-panel";
 import { MarkdownView } from "./markdown-view";
 import { AiAssistPanel } from "../ai/ai-assist-panel";
 import { EntryTagList } from "../ui/entry-tag";
-import { cn } from "@/lib/utils";
+import { cn, edgeEndpointTitle, entryTitle } from "@/lib/utils";
 import { RELATION_STYLES } from "../graph/relation-item";
 import { useSchema, useSchemas } from "@/lib/api/hooks";
 import { Entry } from "@/lib/api";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useState } from "react";
+import { Eye, Pencil } from "lucide-react";
 
 interface EntryContentProps {
   id: string;
@@ -31,6 +53,8 @@ interface EntryContentProps {
   setIsDataValid: (valid: boolean) => void;
   edges: any[] | undefined;
   isMobile: boolean;
+  onSave?: () => void;
+  onAddComment?: (comment: string, quote: string) => Promise<void>;
 }
 
 export function EntryContent({
@@ -47,55 +71,92 @@ export function EntryContent({
   setIsDataValid,
   edges,
   isMobile,
+  onSave,
+  onAddComment,
 }: EntryContentProps) {
   const { data: schemas } = useSchemas();
   const { data: schema } = useSchema(editedType);
+  const [mobilePreview, setMobilePreview] = useState(false);
 
   return (
     <div className="flex h-full flex-col overflow-y-auto px-5 md:px-10 py-8 md:py-12">
       <div className="mx-auto w-full max-w-3xl space-y-16">
         {isEditing ? (
-          <div className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                Editor
-              </span>
-              <AiRefineButton content={editedText} onAccept={setEditedText} />
-            </div>
-            <Textarea
-              value={editedText}
-              onChange={(e) => setEditedText(e.target.value)}
-              className="min-h-[30vh] text-sm leading-relaxed p-4 border-border focus-visible:border-primary focus-visible:ring-0 resize-none bg-card font-mono"
-              placeholder="Write your content here... (Markdown supported)"
-            />
-
-            <div className="pt-4 border-t space-y-3">
-              <div className="flex flex-col gap-1.5">
-                <span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                  Type
-                </span>
-                <select
-                  value={editedType}
-                  onChange={(e) => {
-                    setEditedType(e.target.value);
-                    if (e.target.value && !editedData) setEditedData({});
-                  }}
-                  className="flex h-9 w-full max-w-xs rounded-md border border-border bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  <option value="">— Untyped —</option>
-                  {schemas?.map((s) => (
-                    <option key={s.type_name} value={s.type_name}>
-                      {s.type_name} {s.title ? `(${s.title})` : ""}
-                    </option>
-                  ))}
-                </select>
+          <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-300">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label className="text-sm font-semibold">Content</Label>
+                <div className="flex items-center gap-2">
+                  {isMobile && (
+                    <button
+                      type="button"
+                      onClick={() => setMobilePreview((v) => !v)}
+                      className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      {mobilePreview ? (
+                        <>
+                          <Pencil className="size-3.5" /> Edit
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="size-3.5" /> Preview
+                        </>
+                      )}
+                    </button>
+                  )}
+                  <AiRefineButton content={editedText} onAccept={setEditedText} />
+                </div>
               </div>
+              <p className="text-xs text-muted-foreground">
+                Markdown supported. Select text for AI refine or an inline comment.
+              </p>
+
+              {isMobile && mobilePreview ? (
+                <div className="rounded-xl border border-border bg-card p-4">
+                  <MarkdownView content={editedText || "*Empty note*"} />
+                </div>
+              ) : (
+                <EntryCodeMirrorEditor
+                  id={id}
+                  value={editedText}
+                  onChange={setEditedText}
+                  onSave={onSave}
+                  enableCollab={true}
+                  onAddComment={onAddComment}
+                />
+              )}
+            </div>
+
+            <div className="space-y-3 border-t border-border pt-6">
+              <div className="space-y-1.5">
+                <Label className="text-sm font-semibold">Content type</Label>
+                <p className="text-xs text-muted-foreground">
+                  Optional — attach a schema for structured fields alongside the text.
+                </p>
+              </div>
+              <Select
+                value={editedType || "__none__"}
+                onValueChange={(value) => {
+                  const next = value === "__none__" ? "" : value;
+                  setEditedType(next);
+                  if (next && !editedData) setEditedData({});
+                }}
+              >
+                <SelectTrigger className="w-full max-w-xs">
+                  <SelectValue placeholder="— Untyped —" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">— Untyped —</SelectItem>
+                  {schemas?.map((s) => (
+                    <SelectItem key={s.type_name} value={s.type_name}>
+                      {s.type_name} {s.title ? `(${s.title})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
               {editedType && schema && (
-                <div className="space-y-3 animate-in fade-in duration-300">
-                  {/*<span className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                    Structured Data ({editedType})
-                  </span>*/}
+                <div className="space-y-3 pt-2 animate-in fade-in duration-300">
                   <StructuredDataEditor
                     schema={schema.json_schema}
                     value={editedData}
@@ -110,6 +171,11 @@ export function EntryContent({
           </div>
         ) : (
           <div className="space-y-8 animate-in fade-in duration-500">
+            {/* Title */}
+            <h1 className="font-serif text-3xl md:text-4xl font-bold tracking-tight text-foreground">
+              {entryTitle(entry, 200)}
+            </h1>
+
             {/* Image preview */}
             {entry.metadata.source_type === "image" &&
               !!entry.metadata.source_file && (
@@ -129,10 +195,7 @@ export function EntryContent({
 
             {/* Content */}
             <div>
-              <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-                <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                  Content
-                </h2>
+              <div className="flex items-center justify-end mb-4 gap-3 flex-wrap">
                 <AiAssistPanel
                   label="Explain this"
                   buildPrompt={() =>
@@ -147,7 +210,7 @@ ${(entry.text ?? "").slice(0, 6000)}`
                 />
               </div>
 
-              <MarkdownView content={entry.text} />
+              <MarkdownView content={entry.text} onAddComment={onAddComment} />
             </div>
 
             {/* Typed data */}
@@ -215,8 +278,11 @@ ${(entry.text ?? "").slice(0, 6000)}`
                         )}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground group-hover:text-primary transition-colors truncate">
-                            {targetId.substring(0, 20)}...
+                          <span className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors truncate">
+                            {edgeEndpointTitle(
+                              targetId,
+                              edge.source_id === id ? edge.target_title : edge.source_title,
+                            )}
                           </span>
                           <Badge
                             variant="outline"
@@ -251,6 +317,9 @@ ${(entry.text ?? "").slice(0, 6000)}`
 
             {/* Attachments */}
             <AttachmentsPanel itemId={id} />
+
+            {/* Comments & Discussion */}
+            <CommentsPanel itemId={id} entryTitle={entry.id} />
 
             {/* Metadata */}
             {(() => {

@@ -8,18 +8,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
 
+use std::collections::HashMap;
+
 use crate::db::{
     DuplicateEdgeGroup, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
-    GraphStatus, ManualEdgeInput,
+    GraphStatus, ManualEdgeInput, VectorStore,
 };
 
 use super::error::{
     ApiError, default_metadata, map_graph_error, metadata_schema, validate_graph_depth,
     validate_graph_limit, validate_metadata, validate_non_empty,
 };
+use super::harness::display_title;
 use super::items::AdminItemPayload;
 use super::state::AppState;
 use super::store_search::{DeleteResponse, invalidate_cms_nodes};
+
+/// Look up display titles for every distinct item id referenced by `edges`.
+/// Best-effort: ids that no longer resolve to an item are simply omitted.
+pub(crate) fn titles_for_edges(
+    store: &dyn VectorStore,
+    edges: &[GraphEdgeRecord],
+) -> HashMap<String, String> {
+    let mut ids: Vec<&str> = edges
+        .iter()
+        .flat_map(|e| [e.from_item_id.as_str(), e.to_item_id.as_str()])
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+
+    ids.into_iter()
+        .filter_map(|id| {
+            let item = store.get_item(id).ok().flatten()?;
+            Some((id.to_owned(), display_title(&item)))
+        })
+        .collect()
+}
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GraphNeighborhoodQuery {
@@ -83,6 +107,10 @@ pub struct GraphEdgePayload {
     pub metadata: Value,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Extracted display title of `from_item_id`'s entry, when it still resolves.
+    pub from_title: Option<String>,
+    /// Extracted display title of `to_item_id`'s entry, when it still resolves.
+    pub to_title: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -126,30 +154,43 @@ impl From<GraphStatus> for GraphStatusResponse {
     }
 }
 
-impl From<GraphEdgeRecord> for GraphEdgePayload {
-    fn from(value: GraphEdgeRecord) -> Self {
-        Self {
-            id: value.id,
-            from_item_id: value.from_item_id,
-            to_item_id: value.to_item_id,
-            edge_type: value.edge_type,
-            relation: value.relation,
-            sort_order: value.sort_order,
-            weight: value.weight,
-            directed: value.directed,
-            metadata: value.metadata,
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-        }
+pub(crate) fn edge_payload(value: GraphEdgeRecord, titles: &HashMap<String, String>) -> GraphEdgePayload {
+    let from_title = titles.get(&value.from_item_id).cloned();
+    let to_title = titles.get(&value.to_item_id).cloned();
+    GraphEdgePayload {
+        id: value.id,
+        from_item_id: value.from_item_id,
+        to_item_id: value.to_item_id,
+        edge_type: value.edge_type,
+        relation: value.relation,
+        sort_order: value.sort_order,
+        weight: value.weight,
+        directed: value.directed,
+        metadata: value.metadata,
+        created_at: value.created_at,
+        updated_at: value.updated_at,
+        from_title,
+        to_title,
     }
 }
 
 impl From<GraphNeighborhood> for GraphNeighborhoodResponse {
     fn from(value: GraphNeighborhood) -> Self {
+        // Neighborhood nodes are already fully loaded, so titles can be
+        // derived from them directly without another store round-trip.
+        let titles: HashMap<String, String> = value
+            .nodes
+            .iter()
+            .map(|item| (item.id.clone(), display_title(item)))
+            .collect();
         Self {
             center_id: value.center_id,
             nodes: value.nodes.into_iter().map(Into::into).collect(),
-            edges: value.edges.into_iter().map(Into::into).collect(),
+            edges: value
+                .edges
+                .into_iter()
+                .map(|e| edge_payload(e, &titles))
+                .collect(),
             pairwise_distances: value
                 .pairwise_distances
                 .into_iter()
@@ -192,15 +233,20 @@ pub(crate) async fn list_graph_edges(
     let status = query.status;
 
     let edges = tokio::task::spawn_blocking(move || {
-        store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref())
+        let edges = store.list_graph_edges(item_id.as_deref(), edge_type, status.as_deref())?;
+        let titles = titles_for_edges(store.as_ref(), &edges);
+        Ok::<_, anyhow::Error>(
+            edges
+                .into_iter()
+                .map(|e| edge_payload(e, &titles))
+                .collect::<Vec<_>>(),
+        )
     })
     .await
     .map_err(ApiError::TaskJoin)?
     .map_err(map_graph_error)?;
 
-    Ok(Json(GraphEdgesResponse {
-        edges: edges.into_iter().map(Into::into).collect(),
-    }))
+    Ok(Json(GraphEdgesResponse { edges }))
 }
 
 pub(crate) async fn graph_neighborhood(
@@ -268,14 +314,18 @@ pub(crate) async fn create_manual_edge(
         metadata: request.metadata,
     };
 
-    let edge = tokio::task::spawn_blocking(move || store.add_manual_edge(input))
-        .await
-        .map_err(ApiError::TaskJoin)?
-        .map_err(map_graph_error)?;
+    let edge = tokio::task::spawn_blocking(move || {
+        let edge = store.add_manual_edge(input)?;
+        let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+        Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(map_graph_error)?;
 
     invalidate_cms_nodes(&state, [edge.from_item_id.clone(), edge.to_item_id.clone()]).await?;
 
-    Ok((StatusCode::CREATED, Json(edge.into())))
+    Ok((StatusCode::CREATED, Json(edge)))
 }
 
 pub(crate) async fn update_graph_edge(
@@ -287,7 +337,10 @@ pub(crate) async fn update_graph_edge(
 
     let store = state.store.clone();
     let edge = tokio::task::spawn_blocking(move || {
-        store.update_graph_edge(&id, request.relation, request.metadata, request.sort_order)
+        let edge =
+            store.update_graph_edge(&id, request.relation, request.metadata, request.sort_order)?;
+        let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
+        Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
     })
     .await
     .map_err(ApiError::TaskJoin)?
@@ -295,7 +348,7 @@ pub(crate) async fn update_graph_edge(
 
     invalidate_cms_nodes(&state, [edge.from_item_id.clone(), edge.to_item_id.clone()]).await?;
 
-    Ok(Json(edge.into()))
+    Ok(Json(edge))
 }
 
 pub(crate) async fn delete_graph_edge(

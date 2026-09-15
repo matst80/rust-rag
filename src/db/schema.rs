@@ -286,7 +286,16 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
              created_at INTEGER NOT NULL,
              updated_at INTEGER NOT NULL,
              PRIMARY KEY (name, source_id)
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS public_shares (
+             token TEXT PRIMARY KEY,
+             item_id TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             expires_at INTEGER,
+             FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_public_shares_item_id ON public_shares(item_id);
+         CREATE INDEX IF NOT EXISTS idx_public_shares_expires_at ON public_shares(expires_at);",
     )?;
 
     connection.execute_batch(&format!(

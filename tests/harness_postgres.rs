@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rust_rag::api::harness::{
     Badge, HARNESS_AUDIT, HARNESS_DOC, HARNESS_PLAN, HARNESS_SPRINT, HARNESS_TODO, REL_AUDITED,
-    REL_CONTAINS_TODO, REL_ENFORCES_DOC, REL_GOVERNED_BY, assemble_tree,
+    REL_CONTAINS, REL_ENFORCES_DOC, assemble_tree,
 };
 use rust_rag::db::postgres::{PostgresVectorStore, connect};
 use rust_rag::db::{
@@ -128,8 +128,8 @@ fn seed_scenario(store: &PostgresVectorStore) -> Result<()> {
 
     for (from, to, relation) in [
         ("plan-1", "sprint-1", "BREAKS_INTO"),
-        ("sprint-1", "todo-1", REL_CONTAINS_TODO),
-        ("plan-1", "doc-1", REL_GOVERNED_BY),
+        ("sprint-1", "todo-1", REL_CONTAINS),
+        ("plan-1", "doc-1", REL_ENFORCES_DOC),
         ("todo-1", "doc-1", REL_ENFORCES_DOC),
         ("audit-1", "todo-1", REL_AUDITED),
     ] {
@@ -175,7 +175,7 @@ async fn harness_nodes_edges_and_tree_on_postgres() {
         .list_graph_edges(None, Some(GraphEdgeType::Manual), None)
         .expect("listing edges");
     let relations: Vec<_> = edges.iter().filter_map(|e| e.relation.as_deref()).collect();
-    for expected in [REL_GOVERNED_BY, REL_CONTAINS_TODO, REL_ENFORCES_DOC, REL_AUDITED, "BREAKS_INTO"] {
+    for expected in [REL_CONTAINS, REL_ENFORCES_DOC, REL_AUDITED, "BREAKS_INTO"] {
         assert!(relations.contains(&expected), "missing {expected}");
     }
 

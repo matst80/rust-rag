@@ -34,6 +34,7 @@ pub struct AppState {
     pub acp_discovery: Option<crate::acp_discovery::AcpDiscoveryHandle>,
     pub presence: Arc<PresenceTracker>,
     pub tombstones: Arc<TombstoneTracker>,
+    pub collab: Arc<super::collab::CollabRegistry>,
     pub message_notify: Arc<tokio::sync::Notify>,
     /// Fan-out of every successfully persisted message. `wait_for_message`
     /// (MCP) and any future per-message subscribers can filter without
@@ -113,6 +114,7 @@ impl AppState {
             acp_discovery: None,
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
+            collab: Arc::new(super::collab::CollabRegistry::new()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(auth),
@@ -240,6 +242,7 @@ impl AppState {
             acp_discovery: None,
             presence: Arc::new(PresenceTracker::default()),
             tombstones: Arc::new(TombstoneTracker::default()),
+            collab: Arc::new(super::collab::CollabRegistry::new()),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             message_broadcast: Arc::new(tokio::sync::broadcast::channel(512).0),
             auth: Arc::new(AuthConfig::default()),
