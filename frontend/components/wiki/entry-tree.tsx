@@ -14,6 +14,7 @@ import {
   FolderPlus,
   FolderTree,
   GripVertical,
+  Inbox,
   Menu,
   X,
 } from "lucide-react"
@@ -23,26 +24,32 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
-import { Button } from "@/components/ui/button"
 import {
-  useEntriesPaths,
-  useEntriesTree,
-  getItem,
-  updateItem,
-} from "@/lib/api"
-import { useSWRConfig } from "swr"
+  Sheet,
+  SheetContent,
+  SheetTitle,
+} from "@/components/ui/sheet"
+import { Button } from "@/components/ui/button"
+import { useEntriesPaths, useEntriesTree } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useSessionState } from "@/hooks/use-session-state"
+import { useWikiMoveEntry } from "@/hooks/use-wiki-move"
+import {
+  clearEntryDrag,
+  hasEntryDragData,
+  readEntryDragData,
+  setEntryDragData,
+} from "@/lib/drag-entry"
 import { cn, entryTitle } from "@/lib/utils"
-import { toast } from "sonner"
-import type { PathRow } from "@/lib/api"
+import {
+  ancestorChain,
+  buildSourceTrees,
+  wikiHref,
+  type SourceTree,
+} from "@/lib/wiki-tree"
 import { WikiTreeNode, type TreeNodeData } from "./wiki-tree-node"
-import { GraphTree } from "./graph-tree"
-
-function buildHref(sourceId: string, path?: string) {
-  const params = new URLSearchParams({ source_id: sourceId })
-  if (path) params.set("path", path)
-  return `/wiki?${params.toString()}`
-}
+import { UnorganizedInbox } from "./unorganized-inbox"
+import { EntryDragBanner } from "./entry-drag-banner"
 
 interface EntryTreeProps {
   sourceId: string
@@ -50,90 +57,19 @@ interface EntryTreeProps {
   selectedEntryId?: string
 }
 
-interface SourceTree {
-  sourceId: string
-  totalCount: number
-  roots: TreeNodeData[]
-}
-
-/** Build per-source nested trees from a flat list of (source, path, count). */
-function buildSourceTrees(rows: PathRow[]): SourceTree[] {
-  const bySource = new Map<string, PathRow[]>()
-  for (const r of rows) {
-    if (!bySource.has(r.source_id)) bySource.set(r.source_id, [])
-    bySource.get(r.source_id)!.push(r)
-  }
-  const out: SourceTree[] = []
-  for (const [sourceId, sourceRows] of bySource) {
-    const byPath = new Map<string, TreeNodeData>()
-    const ensure = (path: string): TreeNodeData => {
-      const existing = byPath.get(path)
-      if (existing) return existing
-      const segment = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path
-      const node: TreeNodeData = {
-        segment,
-        path,
-        count: 0,
-        subtreeCount: 0,
-        children: [],
-      }
-      byPath.set(path, node)
-      return node
-    }
-    for (const r of sourceRows) {
-      const segs = r.path.split("/")
-      for (let i = 1; i <= segs.length; i++) {
-        ensure(segs.slice(0, i).join("/"))
-      }
-      ensure(r.path).count = r.count
-    }
-    for (const node of byPath.values()) {
-      const idx = node.path.lastIndexOf("/")
-      if (idx === -1) continue
-      const parentPath = node.path.slice(0, idx)
-      const parent = byPath.get(parentPath)
-      if (parent) parent.children.push(node)
-    }
-    for (const node of byPath.values()) {
-      node.children.sort((a, b) => a.segment.localeCompare(b.segment))
-    }
-    const roots = Array.from(byPath.values()).filter((n) => !n.path.includes("/"))
-    roots.sort((a, b) => a.segment.localeCompare(b.segment))
-    const fillSubtree = (n: TreeNodeData): number => {
-      n.subtreeCount = n.count + n.children.reduce((s, c) => s + fillSubtree(c), 0)
-      return n.subtreeCount
-    }
-    let total = 0
-    for (const r of roots) total += fillSubtree(r)
-    out.push({ sourceId, totalCount: total, roots })
-  }
-  out.sort((a, b) => a.sourceId.localeCompare(b.sourceId))
-  return out
-}
-
-/** Active path → set of every ancestor path along the chain (inclusive). */
-function ancestorChain(prefix?: string): Set<string> {
-  const set = new Set<string>()
-  if (!prefix) return set
-  const segs = prefix.split("/")
-  for (let i = 1; i <= segs.length; i++) {
-    set.add(segs.slice(0, i).join("/"))
-  }
-  return set
-}
-
 export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps) {
   const router = useRouter()
   const isMobile = useIsMobile()
-  const { mutate } = useSWRConfig()
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [mobileInboxOpen, setMobileInboxOpen] = useState(false)
+  const [inboxOpen, setInboxOpen] = useSessionState("wiki-inbox-open", true)
   const { data: pathsResp } = useEntriesPaths()
   const { data: tree, isLoading: treeLoading } = useEntriesTree(sourceId, prefix)
   const [activeDropTarget, setActiveDropTarget] = useState<string | null>(null)
-  const [sidebarMode, setSidebarMode] = useState<"sources" | "unorganized">("sources")
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState("")
   const [isPageDropTarget, setIsPageDropTarget] = useState(false)
+  const handleDropEntry = useWikiMoveEntry()
 
   const sourceTrees = useMemo(
     () => (pathsResp ? buildSourceTrees(pathsResp.paths) : []),
@@ -149,43 +85,6 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
     }
   }, [selectedEntryId, tree])
 
-  const handleDropEntry = async (targetSourceId: string, targetPath: string, entryId: string) => {
-    try {
-      const entry = await getItem(entryId)
-      if (!entry) {
-        toast.error("Entry not found")
-        return
-      }
-
-      await updateItem(entryId, {
-        text: entry.text,
-        source_id: targetSourceId,
-        path: targetPath || null,
-        metadata: entry.metadata ?? {},
-        type: entry.type ?? null,
-        data: entry.data ?? null,
-      })
-
-      // Invalidate SWR caches for entries and wiki trees
-      await Promise.all([
-        mutate("entries-paths"),
-        mutate("entries-paths-" + targetSourceId),
-        mutate("entries-paths-" + entry.source_id),
-        mutate(`entries-tree-${targetSourceId}-${targetPath || ""}`),
-        mutate(`entries-tree-${sourceId}-${prefix || ""}`),
-        mutate(["item", entryId]),
-        mutate("items"),
-        mutate((key) => Array.isArray(key) && key[0] === "items"),
-      ])
-
-      toast.success(
-        `Moved "${entryId.slice(0, 16)}…" to ${targetSourceId}${targetPath ? `/${targetPath}` : ""}`
-      )
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to move entry")
-    }
-  }
-
   const handleCreateFolder = () => {
     const slug = newFolderName.trim().replace(/^\/+|\/+$/g, "")
     if (!slug) return
@@ -194,40 +93,16 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
     setNewFolderName("")
     // Folders are virtual — navigating here is enough; it becomes real (and
     // shows up in the tree) the moment an entry is dropped onto it.
-    router.push(buildHref(sourceId, newPath))
+    router.push(wikiHref(sourceId, newPath))
   }
 
-  const sidebar = (
+  const wikiSidebar = (
     <div className="flex h-full flex-col bg-background">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <FolderTree className="size-4 text-primary" />
-        <div className="flex items-center gap-0.5 rounded-md bg-muted/40 p-0.5">
-          <button
-            type="button"
-            onClick={() => setSidebarMode("sources")}
-            className={cn(
-              "px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider transition-colors",
-              sidebarMode === "sources"
-                ? "bg-background text-primary shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            Sources
-          </button>
-          <button
-            type="button"
-            onClick={() => setSidebarMode("unorganized")}
-            className={cn(
-              "px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider transition-colors",
-              sidebarMode === "unorganized"
-                ? "bg-background text-primary shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title="Entries without a wiki path, clustered by their graph connections"
-          >
-            Unorganized
-          </button>
-        </div>
+        <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+          Wiki
+        </span>
         {isMobile && (
           <Button
             variant="ghost"
@@ -240,32 +115,26 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
           </Button>
         )}
       </div>
-      <div className="flex-1 overflow-y-auto py-2">
-        {sidebarMode === "unorganized" ? (
-          <GraphTree />
-        ) : (
-          <>
-            {!pathsResp && (
-              <p className="font-mono text-xs text-muted-foreground px-3">Loading…</p>
-            )}
-            {pathsResp && sourceTrees.length === 0 && (
-              <p className="font-mono text-xs text-muted-foreground px-3">
-                No entries with paths yet. Drag entries here or set a `path` on an entry to populate the wiki.
-              </p>
-            )}
-            {sourceTrees.map((s) => (
-              <SourceRoot
-                key={s.sourceId}
-                tree={s}
-                selectedSourceId={sourceId}
-                selectedPath={prefix ?? null}
-                selectedEntryId={selectedEntryId ?? null}
-                activeChain={activeChain}
-                onDropEntry={handleDropEntry}
-              />
-            ))}
-          </>
+      <div className="min-h-0 flex-1 overflow-y-auto py-2">
+        {!pathsResp && (
+          <p className="font-mono text-xs text-muted-foreground px-3">Loading…</p>
         )}
+        {pathsResp && sourceTrees.length === 0 && (
+          <p className="font-mono text-xs text-muted-foreground px-3">
+            No entries with paths yet. Drag entries here or set a `path` on an entry to populate the wiki.
+          </p>
+        )}
+        {sourceTrees.map((s) => (
+          <SourceRoot
+            key={s.sourceId}
+            tree={s}
+            selectedSourceId={sourceId}
+            selectedPath={prefix ?? null}
+            selectedEntryId={selectedEntryId ?? null}
+            activeChain={activeChain}
+            onDropEntry={handleDropEntry}
+          />
+        ))}
       </div>
     </div>
   )
@@ -274,19 +143,30 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
     <div className="flex h-full flex-col bg-background">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">
         {isMobile && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-8"
-            onClick={() => setMobileSidebarOpen(true)}
-            aria-label="Open sidebar"
-          >
-            <Menu className="size-4" />
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              onClick={() => setMobileSidebarOpen(true)}
+              aria-label="Open sidebar"
+            >
+              <Menu className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              onClick={() => setMobileInboxOpen(true)}
+              aria-label="Open unorganized inbox"
+            >
+              <Inbox className="size-4" />
+            </Button>
+          </>
         )}
         <nav className="flex items-center gap-1 font-mono text-xs flex-wrap min-w-0">
           <Link
-            href={buildHref(sourceId)}
+            href={wikiHref(sourceId)}
             className="font-bold uppercase tracking-wider text-muted-foreground hover:text-primary"
           >
             {sourceId}
@@ -301,7 +181,7 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
                   <span className="text-foreground">{seg}</span>
                 ) : (
                   <Link
-                    href={buildHref(sourceId, sub)}
+                    href={wikiHref(sourceId, sub)}
                     className="text-muted-foreground hover:text-primary"
                   >
                     {seg}
@@ -364,6 +244,7 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
           isPageDropTarget && "bg-primary/5 ring-1 ring-inset ring-primary/30",
         )}
         onDragOver={(e) => {
+          if (!hasEntryDragData(e.dataTransfer)) return
           e.preventDefault()
           e.dataTransfer.dropEffect = "move"
           if (!isPageDropTarget) setIsPageDropTarget(true)
@@ -375,13 +256,8 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
         onDrop={(e) => {
           e.preventDefault()
           setIsPageDropTarget(false)
-          let entryId = ""
-          try {
-            const raw = e.dataTransfer.getData("application/json")
-            if (raw) entryId = JSON.parse(raw).id
-          } catch {}
-          if (!entryId) entryId = e.dataTransfer.getData("text/plain")
-          if (entryId) handleDropEntry(sourceId, prefix ?? "", entryId)
+          const payload = readEntryDragData(e.dataTransfer)
+          if (payload) handleDropEntry(sourceId, prefix ?? "", payload.id)
         }}
       >
         {treeLoading && (
@@ -410,8 +286,9 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
                 return (
                   <Link
                     key={c.path}
-                    href={buildHref(sourceId, c.path)}
+                    href={wikiHref(sourceId, c.path)}
                     onDragOver={(e) => {
+                      if (!hasEntryDragData(e.dataTransfer)) return
                       e.preventDefault()
                       e.stopPropagation()
                       e.dataTransfer.dropEffect = "move"
@@ -426,13 +303,8 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
                       e.preventDefault()
                       e.stopPropagation()
                       setActiveDropTarget(null)
-                      let entryId = ""
-                      try {
-                        const raw = e.dataTransfer.getData("application/json")
-                        if (raw) entryId = JSON.parse(raw).id
-                      } catch {}
-                      if (!entryId) entryId = e.dataTransfer.getData("text/plain")
-                      if (entryId) handleDropEntry(sourceId, c.path, entryId)
+                      const payload = readEntryDragData(e.dataTransfer)
+                      if (payload) handleDropEntry(sourceId, c.path, payload.id)
                     }}
                     className={cn(
                       "flex items-center gap-3 border border-border bg-card p-3 hover:border-primary/40 transition-all",
@@ -448,6 +320,11 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
                         {c.count} entr{c.count === 1 ? "y" : "ies"}
                         {c.has_children ? " · subfolders" : ""}
                       </span>
+                      {isTarget && (
+                        <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-primary">
+                          Move here
+                        </span>
+                      )}
                     </div>
                   </Link>
                 )
@@ -479,17 +356,14 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
                       <div
                         draggable
                         onDragStart={(evt) => {
-                          evt.dataTransfer.setData(
-                            "application/json",
-                            JSON.stringify({
-                              id: e.id,
-                              source_id: e.source_id,
-                              path: e.path,
-                            })
-                          )
-                          evt.dataTransfer.setData("text/plain", e.id)
-                          evt.dataTransfer.effectAllowed = "move"
+                          setEntryDragData(evt.dataTransfer, {
+                            id: e.id,
+                            source_id: e.source_id,
+                            path: e.path,
+                            title: entryTitle(e, 80),
+                          })
                         }}
+                        onDragEnd={() => clearEntryDrag()}
                         className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-primary transition-colors p-0.5"
                         title="Drag entry to re-organize into another Wiki folder"
                       >
@@ -530,6 +404,7 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
   if (isMobile) {
     return (
       <div className="flex h-[calc(100vh-3rem)] flex-col bg-background">
+        <EntryDragBanner />
         {content}
         {mobileSidebarOpen && (
           <div className="fixed inset-0 z-50 flex">
@@ -538,22 +413,50 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
               onClick={() => setMobileSidebarOpen(false)}
             />
             <div className="relative w-72 max-w-[80%] h-full border-r border-border shadow-lg">
-              {sidebar}
+              {wikiSidebar}
             </div>
           </div>
         )}
+        <Sheet open={mobileInboxOpen} onOpenChange={setMobileInboxOpen}>
+          <SheetContent side="left" className="flex flex-col gap-0 p-0 sm:max-w-sm">
+            <SheetTitle className="sr-only">Unorganized inbox</SheetTitle>
+            <UnorganizedInbox className="min-h-0 flex-1" />
+          </SheetContent>
+        </Sheet>
       </div>
     )
   }
 
   return (
-    <div className="h-[calc(100vh-3rem)] bg-background">
-      <ResizablePanelGroup direction="horizontal" className="h-full">
-        <ResizablePanel defaultSize={22} minSize={15} maxSize={40}>
-          {sidebar}
+    <div className="flex h-[calc(100vh-3rem)] bg-background">
+      <EntryDragBanner />
+      {!inboxOpen && (
+        <button
+          type="button"
+          onClick={() => setInboxOpen(true)}
+          title="Show unorganized inbox"
+          className="flex w-9 shrink-0 flex-col items-center gap-3 border-r border-border pt-3 text-muted-foreground transition-colors hover:text-primary"
+        >
+          <Inbox className="size-4" />
+          <span className="font-mono text-[9px] font-bold uppercase tracking-widest [writing-mode:vertical-rl]">
+            Inbox
+          </span>
+        </button>
+      )}
+      <ResizablePanelGroup direction="horizontal" className="h-full min-w-0 flex-1">
+        {inboxOpen && (
+          <>
+            <ResizablePanel id="inbox" order={1} defaultSize={26} minSize={16} maxSize={45}>
+              <UnorganizedInbox onCollapse={() => setInboxOpen(false)} className="h-full" />
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+          </>
+        )}
+        <ResizablePanel id="tree" order={2} defaultSize={inboxOpen ? 20 : 24} minSize={14} maxSize={40}>
+          {wikiSidebar}
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={78} minSize={40}>
+        <ResizablePanel id="content" order={3} defaultSize={inboxOpen ? 54 : 50} minSize={40}>
           {content}
         </ResizablePanel>
       </ResizablePanelGroup>
@@ -581,42 +484,55 @@ function SourceRoot({
   const isActive = tree.sourceId === selectedSourceId
   const [open, setOpen] = useState(isActive)
   const [isDragOver, setIsDragOver] = useState(false)
+  const autoExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isSelected = isActive && (selectedPath ?? null) === null
+
+  const startAutoExpand = () => {
+    if (autoExpandTimer.current) return
+    autoExpandTimer.current = setTimeout(() => {
+      autoExpandTimer.current = null
+      setOpen(true)
+    }, 500)
+  }
+
+  const cancelAutoExpand = () => {
+    if (autoExpandTimer.current) {
+      clearTimeout(autoExpandTimer.current)
+      autoExpandTimer.current = null
+    }
+  }
+
+  useEffect(() => cancelAutoExpand, [])
 
   return (
     <div className="flex flex-col">
       <div
         className={cn(
           "flex items-center transition-colors rounded-sm",
-          isDragOver && "bg-primary/20 ring-1 ring-primary"
+          isDragOver && "bg-primary/10 ring-2 ring-primary"
         )}
         onDragOver={(e) => {
-          if (onDropEntry) {
-            e.preventDefault()
-            e.stopPropagation()
-            e.dataTransfer.dropEffect = "move"
-            if (!isDragOver) setIsDragOver(true)
-          }
+          if (!onDropEntry || !hasEntryDragData(e.dataTransfer)) return
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = "move"
+          if (!isDragOver) setIsDragOver(true)
+          startAutoExpand()
         }}
         onDragLeave={(e) => {
           e.preventDefault()
           e.stopPropagation()
           setIsDragOver(false)
+          cancelAutoExpand()
         }}
         onDrop={(e) => {
           e.preventDefault()
           e.stopPropagation()
           setIsDragOver(false)
-          let entryId = ""
-          try {
-            const raw = e.dataTransfer.getData("application/json")
-            if (raw) entryId = JSON.parse(raw).id
-          } catch {}
-          if (!entryId) entryId = e.dataTransfer.getData("text/plain")
-          if (entryId && onDropEntry) {
-            // Drop onto root of source
-            onDropEntry(tree.sourceId, "", entryId)
-          }
+          cancelAutoExpand()
+          const payload = readEntryDragData(e.dataTransfer)
+          // Drop onto root of source
+          if (payload && onDropEntry) onDropEntry(tree.sourceId, "", payload.id)
         }}
       >
         <button
@@ -632,7 +548,7 @@ function SourceRoot({
           )}
         </button>
         <Link
-          href={buildHref(tree.sourceId)}
+          href={wikiHref(tree.sourceId)}
           className={cn(
             "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs font-bold uppercase tracking-wider transition-colors hover:bg-card",
             isSelected
@@ -646,9 +562,15 @@ function SourceRoot({
             <Database className="size-3.5 text-muted-foreground shrink-0" />
           )}
           <span className="truncate">{tree.sourceId}</span>
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
-            {tree.totalCount}
-          </span>
+          {isDragOver ? (
+            <span className="ml-auto shrink-0 rounded bg-primary px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-primary-foreground">
+              Move here
+            </span>
+          ) : (
+            <span className="ml-auto font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
+              {tree.totalCount}
+            </span>
+          )}
         </Link>
       </div>
 

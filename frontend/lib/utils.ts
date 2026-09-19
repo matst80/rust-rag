@@ -10,17 +10,45 @@ interface TitledEntry {
   metadata?: { title?: unknown } | null
 }
 
-/** Short human label for an entry: metadata.title, else first line of text, else id. */
+/** "REPO: …", "Source: …", "Path: …" — key/value header lines, not titles. */
+const HEADER_KEY_LINE = /^[A-Za-z][A-Za-z0-9 _./\\-]{0,24}:\s/
+const PATH_LIKE_LINE = /^(\/|~\/|\.{1,2}\/|https?:\/\/|www\.)/
+const NOISE_LINE = /^(```|~~~|\||%|<!--|-\-\-)/
+
+function looksLikeHeaderJunk(line: string): boolean {
+  return (
+    HEADER_KEY_LINE.test(line) ||
+    PATH_LIKE_LINE.test(line) ||
+    NOISE_LINE.test(line) ||
+    line.length < 4
+  )
+}
+
+function clipTitle(text: string, maxLength: number): string {
+  return text.length > maxLength ? text.slice(0, maxLength).trimEnd() + '…' : text
+}
+
+/** Short human label for an entry: metadata.title, else a markdown heading near
+ *  the top, else the first line that actually reads like a title (skipping
+ *  "REPO:"-style headers, paths, fences), else id. */
 export function entryTitle(entry: TitledEntry, maxLength = 60): string {
   const metaTitle = entry.metadata?.title
-  if (typeof metaTitle === 'string' && metaTitle.trim()) return metaTitle.trim()
-  const firstLine = entry.text
-    .split('\n')
-    .find((l) => l.trim())
-    ?.trim()
-    .replace(/^#+\s*/, '')
-  if (firstLine) return firstLine.length > maxLength ? firstLine.slice(0, maxLength) + '…' : firstLine
-  return entry.id
+  if (typeof metaTitle === 'string' && metaTitle.trim()) return clipTitle(metaTitle.trim(), maxLength)
+  const lines = (entry.text ?? '').split('\n')
+
+  // A markdown heading within the first few lines is almost always the doc title.
+  const firstLines = lines.map((l) => l.trim()).filter(Boolean).slice(0, 4)
+  for (const line of firstLines) {
+    const heading = /^#{1,4}\s+(.{6,})$/.exec(line)
+    if (heading) return clipTitle(heading[1].trim(), maxLength)
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || looksLikeHeaderJunk(trimmed)) continue
+    return clipTitle(trimmed.replace(/^[-*•]\s+/, ''), maxLength)
+  }
+  return clipTitle(lines.find((l) => l.trim())?.trim() || entry.id, maxLength)
 }
 
 /** Label for a graph-edge endpoint we only have an id (and maybe a server-resolved title) for. */

@@ -476,7 +476,7 @@ function GraphViewContent() {
             linkStrengthIntraCluster: 0.85,
             linkStrengthInterCluster: 0.005,
           }}
-          labelType="all"
+          labelType="auto"
           selections={selectedNode ? [selectedNode] : selectedEdge ? [selectedEdge] : []}
           actives={centerNode ? [centerNode] : []}
           draggable

@@ -30,7 +30,7 @@ export function GrillCockpit() {
   )
 
   return (
-    <main className="flex-1 flex flex-col min-h-0 font-mono">
+    <div className="flex h-full min-h-0 flex-col font-mono">
       <ResizablePanelGroup direction="vertical">
         <ResizablePanel defaultSize={78} minSize={50}>
           <ResizablePanelGroup direction="horizontal">
@@ -67,6 +67,6 @@ export function GrillCockpit() {
           />
         </ResizablePanel>
       </ResizablePanelGroup>
-    </main>
+    </div>
   )
 }

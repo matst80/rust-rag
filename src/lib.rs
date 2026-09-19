@@ -1,5 +1,7 @@
 pub mod acp_discovery;
+pub mod acp_mcp;
 pub mod acp_ws;
+pub mod admin_mcp;
 pub mod api;
 pub mod chunking_md;
 pub mod cms;

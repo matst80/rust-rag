@@ -336,6 +336,10 @@ pub struct AppConfig {
     pub ort_dylib_path: Option<PathBuf>,
     pub embedding_dimension: usize,
     pub embedding_pooling: Pooling,
+    /// Second embedder used by the code-search domain. The per-repo snapshots
+    /// are embedded with all-MiniLM-L6-v2 (384-dim float32); queries must use
+    /// the same model. Disabled when either path is unset.
+    pub code_search: CodeSearchConfig,
     pub intra_threads: usize,
     pub graph_enabled: bool,
     pub graph_build_on_startup: bool,
@@ -354,6 +358,37 @@ pub struct AppConfig {
     pub google_oauth: GoogleOAuthConfig,
     pub web_push: WebPushConfig,
     pub whisper: WhisperConfig,
+}
+
+/// Second embedder used by the code-search domain. The per-repo snapshots
+/// are embedded with all-MiniLM-L6-v2 (384-dim float32); queries must use
+/// the same model. Disabled when either path is unset.
+#[derive(Debug, Clone)]
+pub struct CodeSearchConfig {
+    /// ONNX export of all-MiniLM-L6-v2 (or whatever model the per-repo
+    /// snapshots were embedded with). `None` disables code search.
+    pub model_path: Option<PathBuf>,
+    pub tokenizer_path: Option<PathBuf>,
+    /// all-MiniLM-L6-v2 is a sentence-transformers checkpoint: mean pooling.
+    pub pooling: Pooling,
+    pub intra_threads: usize,
+}
+
+impl Default for CodeSearchConfig {
+    fn default() -> Self {
+        Self {
+            model_path: None,
+            tokenizer_path: None,
+            pooling: Pooling::Mean,
+            intra_threads: 2,
+        }
+    }
+}
+
+impl CodeSearchConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.model_path.is_some() && self.tokenizer_path.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -447,6 +482,21 @@ impl AppConfig {
                     .parse()
                     .map_err(|err| anyhow!("RAG_EMBEDDING_POOLING={value:?}: {err}"))?,
                 None => Pooling::Mean,
+            },
+            code_search: CodeSearchConfig {
+                model_path: env::var_os("RAG_CODE_MODEL_PATH")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
+                tokenizer_path: env::var_os("RAG_CODE_TOKENIZER_PATH")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
+                pooling: match non_empty_var("RAG_CODE_POOLING") {
+                    Some(value) => value
+                        .parse()
+                        .map_err(|err| anyhow!("RAG_CODE_POOLING={value:?}: {err}"))?,
+                    None => Pooling::Mean,
+                },
+                intra_threads: parse_env("RAG_CODE_INTRA_THREADS", "2")?,
             },
             intra_threads: parse_env("RAG_INTRA_THREADS", "2")?,
             graph_enabled: parse_env("RAG_GRAPH_ENABLED", "false")?,

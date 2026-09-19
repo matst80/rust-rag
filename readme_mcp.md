@@ -110,7 +110,42 @@ requests must echo it back so rmcp can route to the right in-process session.
 - **Graph**: `graph_status`, `list_graph_edges`, `graph_neighborhood`,
   `rebuild_graph`, `create_manual_edge`, `delete_graph_edge`.
 
-Implementation lives in `src/mcp.rs` and reuses the same
+The ACP delegation tools (session/terminal control: `acp_spawn_session`,
+`acp_send_prompt`, `acp_delegate_task`, `acp_recent_events`,
+`acp_permission_respond`, ...) live on a **separate endpoint at `/mcp/acp`**
+(`src/acp_mcp.rs`), and graph/ontology curation + projection-map tools
+(`graph_status`, `create_manual_edge`, `list_ontology_reviews`, `map_get`,
+`map_rebuild`, ...) on **`/mcp/admin`** (`src/admin_mcp.rs`). They speak the
+same protocol and use the same bearer tokens; only the tool list differs.
+Connect extra client entries when you need those surfaces:
+
+```json
+{
+  "mcpServers": {
+    "rust-rag": {
+      "url": "https://rag.example.com/mcp",
+      "headers": { "Authorization": "Bearer rag_mcp_..." }
+    },
+    "rust-rag-acp": {
+      "url": "https://rag.example.com/mcp/acp",
+      "headers": { "Authorization": "Bearer rag_mcp_..." }
+    },
+    "rust-rag-admin": {
+      "url": "https://rag.example.com/mcp/admin",
+      "headers": { "Authorization": "Bearer rag_mcp_..." }
+    }
+  }
+}
+```
+
+Keeping the surfaces apart stops tool schemas clients never use (ACP session
+control, graph curation, projection map) from polluting their context. The
+Google Drive/Gmail integrations are intentionally **not exposed as MCP
+tools**; they stay reachable via the HTTP API (`/api/integrations/google/*`).
+Auth and Host-header guards are identical on all three endpoints.
+
+Implementation lives in `src/mcp.rs` (main surface), `src/acp_mcp.rs`
+(ACP surface), and `src/admin_mcp.rs` (admin surface); all reuse the same
 
 ## Auth endpoints
 

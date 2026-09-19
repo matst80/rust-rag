@@ -76,19 +76,19 @@ function NodeRow({
       type="button"
       onClick={() => onSelect(node.id)}
       className={cn(
-        "flex w-full items-center gap-2 py-1 pr-2 text-left text-xs hover:bg-accent/50",
+        "flex w-full items-center gap-2 py-1.5 pr-2 text-left text-sm hover:bg-accent/50",
         selected && "bg-accent border-l-2 border-primary",
         !selected && "border-l-2 border-transparent"
       )}
       style={{ paddingLeft: `${depth * 14 + 8}px` }}
     >
       <Badge node={node} />
-      <span className="text-[10px] text-muted-foreground tracking-wider">
+      <span className="text-xs text-muted-foreground tracking-wider">
         {TYPE_LABELS[node.type_name] ?? node.type_name.toUpperCase()}
       </span>
       <span className="truncate text-foreground">{node.title}</span>
       {node.state && (
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground uppercase">
+        <span className="ml-auto shrink-0 text-xs text-muted-foreground uppercase">
           {node.state}
         </span>
       )}
@@ -111,7 +111,7 @@ function Section({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1 px-2 py-1 text-[10px] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+        className="flex w-full items-center gap-1 px-2 py-1 text-xs uppercase tracking-widest text-muted-foreground hover:text-foreground"
       >
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         {label}
@@ -144,7 +144,7 @@ function BranchRows({
       <NodeRow node={branch.node} selectedId={selectedId} onSelect={onSelect} depth={depth} />
       {branch.relation && depth > 0 && (
         <div
-          className="text-[9px] uppercase tracking-widest text-muted-foreground/70"
+          className="text-[11px] uppercase tracking-widest text-muted-foreground/70"
           style={{ paddingLeft: `${depth * 14 + 24}px` }}
         >
           ↳ {branch.relation.toLowerCase()}
@@ -163,35 +163,6 @@ function BranchRows({
   )
 }
 
-/**
- * Relations that nest a child underneath its parent in the tree. Matched
- * case-insensitively: agents emit both the canonical SCREAMING_CASE relations
- * and lowercase ones (`contains`, `implemented_by`, `depends_on`, …).
- */
-const CHILD_RELATIONS = new Set([
-  "BREAKS_INTO",
-  // CONTAINS_TODO/GOVERNED_BY/REQUIRES/upper-case SUPERSEDES were folded
-  // into the canonical contains/ENFORCES_DOC/depends_on/supersedes
-  // predicates — kept here (plus lower-case forms) so old and new edges
-  // both render regardless of which call site upper-cases the relation.
-  "CONTAINS_TODO",
-  "CONTAINS",
-  "contains",
-  "IMPLEMENTED_BY",
-  "GOVERNED_BY",
-  "ENFORCES_DOC",
-  "DELEGATES_TO",
-  "MUTATES_STREAM",
-  "HAD_POC",
-  "RAISED",
-  "ADDRESSED_BY",
-  "REQUIRES",
-  "DEPENDS_ON",
-  "depends_on",
-  "SUPERSEDES",
-  "supersedes",
-])
-
 function buildBranches(
   rootIds: string[],
   byId: Map<string, HarnessTreeNode>,
@@ -205,7 +176,6 @@ function buildBranches(
     rendered.add(nodeId)
     const children: Branch[] = []
     for (const edge of childrenByParent.get(nodeId) ?? []) {
-      if (!CHILD_RELATIONS.has(edge.relation ?? "")) continue
       const child = build(edge.to_item_id, edge.relation)
       if (child) children.push(child)
     }
@@ -232,17 +202,19 @@ export function PlanTree({
   selectedId: string | null
   onSelect: (id: string) => void
 }) {
-  const { planBranches, docBranches, pocBranches, evidence, unlinked } = useMemo(() => {
+  const { planBranches, docBranches, pocBranches, evidence, unlinked, shownEdges } = useMemo(() => {
     const byId = new Map<string, HarnessTreeNode>()
     const childrenByParent = new Map<string, HarnessTreeEdge[]>()
     const planIds: string[] = []
     const repoIds: string[] = []
     const docIds: string[] = []
-    if (!tree) return { planBranches: [], docBranches: [], pocBranches: [], evidence: [], unlinked: [] }
+    if (!tree)
+      return { planBranches: [], docBranches: [], pocBranches: [], evidence: [], unlinked: [], shownEdges: 0 }
 
     for (const node of tree.nodes) byId.set(node.id, node)
+    const seenEdges = new Set<string>()
     for (const edge of tree.edges) {
-      if (!CHILD_RELATIONS.has((edge.relation ?? "").toUpperCase())) continue
+      if (!edge.nests) continue
       // Agents re-emit the same edge; dedupe on from+to+relation.
       const key = `${edge.from_item_id}|${edge.to_item_id}|${edge.relation ?? ""}`
       if (seenEdges.has(key)) continue
@@ -276,7 +248,7 @@ export function PlanTree({
         n.type_name !== "harness_audit" &&
         n.type_name !== "harness_evidence"
     )
-    return { planBranches, docBranches, pocBranches, evidence, unlinked }
+    return { planBranches, docBranches, pocBranches, evidence, unlinked, shownEdges: seenEdges.size }
   }, [tree])
 
   const empty = planBranches.length === 0 && docBranches.length === 0 && pocBranches.length === 0
@@ -287,8 +259,12 @@ export function PlanTree({
         <h2 className="text-xs font-semibold uppercase tracking-[3px]">
           Plan &amp; Invariants
         </h2>
-        <p className="text-[10px] text-muted-foreground">
-          {tree?.nodes.length ?? 0} nodes · {tree?.edges.length ?? 0} edges
+        <p
+          className="text-xs text-muted-foreground"
+          title={`${tree?.edges.length ?? 0} raw edges from the graph API; ${shownEdges} are marked "nests" by the server (contains/depends_on/supersedes/… after de-dupe) and drawn as tree lines below. The rest (contradicts, audit links, comments) aren't hierarchical, so they're not shown as nesting.`}
+        >
+          {tree?.nodes.length ?? 0} nodes · {shownEdges} edges shown
+          {tree && tree.edges.length !== shownEdges ? ` (${tree.edges.length} total)` : ""}
         </p>
       </div>
       <div className="flex-1 overflow-y-auto py-1">
@@ -305,8 +281,8 @@ export function PlanTree({
         {!isLoading && !error && empty && (
           <div className="px-3 py-4 text-xs text-muted-foreground">
             No harness plans or POC sessions yet. The harness projects nodes
-            via <code className="font-mono text-[10px]">POST /api/store</code>{" "}
-            with the <code className="font-mono text-[10px]">harness_*</code>{" "}
+            via <code className="font-mono text-xs">POST /api/store</code>{" "}
+            with the <code className="font-mono text-xs">harness_*</code>{" "}
             types.
           </div>
         )}

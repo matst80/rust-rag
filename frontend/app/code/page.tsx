@@ -1,4 +1,3 @@
-import { AppHeader } from "@/components/app-header"
 import { CodeBrowser } from "@/components/code/code-browser"
 
 export const metadata = {
@@ -9,10 +8,9 @@ export const metadata = {
 export default function CodePage() {
   return (
     <>
-      <AppHeader />
-      <main className="mx-auto max-w-7xl p-6">
+      <div className="mx-auto max-w-7xl p-6">
         <CodeBrowser />
-      </main>
+      </div>
     </>
   )
 }

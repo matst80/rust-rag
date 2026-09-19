@@ -1,12 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   deleteCodeRepo,
   getCodeFileDetail,
   listCodeFiles,
   listCodeRepos,
   searchCode,
+  uploadCodeRepo,
 } from "@/lib/api/client"
 import type {
   CodeFileDetail,
@@ -26,6 +27,9 @@ export function CodeBrowser() {
   const [filter, setFilter] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [uploadRepoName, setUploadRepoName] = useState("")
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const refreshRepos = useCallback(async () => {
     try {
@@ -101,12 +105,34 @@ export function CodeBrowser() {
     [selectedRepo, refreshRepos]
   )
 
+  const onUpload = useCallback(async () => {
+    const file = fileInputRef.current?.files?.[0]
+    const name = uploadRepoName.trim()
+    if (!file || !name) return
+    setUploading(true)
+    setError(null)
+    try {
+      await uploadCodeRepo(name, file)
+      setUploadRepoName("")
+      if (fileInputRef.current) fileInputRef.current.value = ""
+      setSelectedRepo((prev) => prev ?? name)
+      await refreshRepos()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setUploading(false)
+    }
+  }, [uploadRepoName, refreshRepos])
+
   return (
     <div className="space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Code Search</h1>
         <p className="text-sm text-muted-foreground">
-          Source-code repos ingested via the <code className="rounded bg-muted px-1 py-0.5">rust-rag-ingest</code> CLI and embedded with BGE-Code-v1.
+          Snapshots from each repo&apos;s{" "}
+          <code className="rounded bg-muted px-1 py-0.5">.codesearch/codesearch.db</code>{" "}
+          (sqlite-vec, all-MiniLM-L6-v2, 384-dim float32) merged into Postgres.
+          Queries are re-embedded server-side with the same MiniLM model.
         </p>
       </header>
 
@@ -122,12 +148,20 @@ export function CodeBrowser() {
         </div>
       )}
 
-      <IngestSnippet />
+      <UploadPanel
+        repoName={uploadRepoName}
+        onRepoNameChange={setUploadRepoName}
+        uploading={uploading}
+        onUpload={onUpload}
+        fileInputRef={fileInputRef}
+      />
 
       <section className="space-y-2">
         <h2 className="text-lg font-medium">Repos</h2>
         {repos.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No repos indexed yet. Use the CLI above.</p>
+          <p className="text-sm text-muted-foreground">
+            No repos indexed yet. Upload a snapshot below.
+          </p>
         ) : (
           <div className="grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-3">
             {repos.map((r) => (
@@ -331,31 +365,60 @@ function FileDetailPanel({ detail }: { detail: CodeFileDetail }) {
   )
 }
 
-function IngestSnippet() {
+function UploadPanel({
+  repoName,
+  onRepoNameChange,
+  uploading,
+  onUpload,
+  fileInputRef,
+}: {
+  repoName: string
+  onRepoNameChange: (v: string) => void
+  uploading: boolean
+  onUpload: () => void
+  fileInputRef: React.RefObject<HTMLInputElement | null>
+}) {
+  const [hasFile, setHasFile] = useState(false)
   return (
-    <details className="rounded border bg-muted/30 p-3 text-sm">
-      <summary className="cursor-pointer font-medium">How to ingest a repo</summary>
-      <div className="mt-3 space-y-2">
-        <p className="text-xs text-muted-foreground">
-          Run the CLI locally — it walks the repo, hashes files, and only uploads what changed.
-        </p>
-        <pre className="overflow-x-auto rounded bg-background p-2 text-xs">
-{`# preview without uploading
-rust-rag-ingest --url $RAG_URL --token $RAG_TOKEN \\
-  preview --name myrepo /path/to/repo
-
-# push (creates/updates repo, sweeps stale entries)
-rust-rag-ingest --url $RAG_URL --token $RAG_TOKEN \\
-  push --name myrepo /path/to/repo
-
-# watch + auto re-push on change
-rust-rag-ingest --url $RAG_URL --token $RAG_TOKEN \\
-  watch --name myrepo /path/to/repo`}
-        </pre>
-        <p className="text-xs text-muted-foreground">
-          Defaults already skip <code>target/</code>, <code>node_modules/</code>, lockfiles, <code>.min.js</code>, binaries &gt;1.5 MB. Add <code>--exclude</code> globs to skip more.
-        </p>
+    <section className="space-y-2">
+      <h2 className="text-lg font-medium">Upload repo snapshot</h2>
+      <p className="text-xs text-muted-foreground">
+        Push a repo&apos;s <code className="rounded bg-muted px-1 py-0.5">.codesearch/codesearch.db</code>{" "}
+        here — the server reads the symbols + embeddings and replaces that
+        repo&apos;s rows in Postgres. Re-uploading the same name refreshes it.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <input
+          value={repoName}
+          onChange={(e) => onRepoNameChange(e.target.value)}
+          placeholder="repo name, e.g. sync-up"
+          className="w-48 rounded border px-3 py-2 text-sm"
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".db,application/octet-stream"
+          onChange={(e) => setHasFile(!!e.target.files?.[0])}
+          className="rounded border px-3 py-2 text-sm file:mr-2 file:rounded file:border-0 file:bg-muted file:px-2 file:py-1 file:text-xs"
+        />
+        <button
+          disabled={uploading || !repoName.trim() || !hasFile}
+          onClick={onUpload}
+          className="rounded bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50"
+        >
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
       </div>
-    </details>
+      <details className="text-xs text-muted-foreground">
+        <summary className="cursor-pointer">…or upload from the CLI</summary>
+        <pre className="mt-2 overflow-x-auto rounded bg-background p-2 text-xs">
+{`curl -sf -X POST "$RAG_URL/api/code/upload" \\
+  -H "Authorization: Bearer $RAG_TOKEN" \\
+  -F repo=myrepo \\
+  -F root_path=/path/to/repo \\
+  -F file=@/path/to/repo/.codesearch/codesearch.db`}
+        </pre>
+      </details>
+    </section>
   )
 }

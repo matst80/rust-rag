@@ -86,6 +86,13 @@ pub struct AppState {
     pub whisper: Arc<crate::config::WhisperConfig>,
     pub projection_worker: Arc<crate::projection::ProjectionWorker>,
     pub cms_runtime: Arc<crate::cms::CmsRuntime>,
+    /// Code-search domain (per-repo snapshots merged into Postgres).
+    /// `None` without `RAG_DATABASE_URL` — the code tables are Postgres-only.
+    pub code_store: Option<Arc<crate::db::CodeStore>>,
+    /// Dedicated query embedder for code search (all-MiniLM-L6-v2). Kept
+    /// separate from `embedder`: the main store's model/dimensions differ.
+    /// `None` until `RAG_CODE_MODEL_PATH` + `RAG_CODE_TOKENIZER_PATH` are set.
+    pub code_embedder: Option<Arc<EmbedderHandle>>,
 }
 
 impl AppState {
@@ -147,7 +154,21 @@ impl AppState {
             whisper: Arc::new(crate::config::WhisperConfig::default()),
             projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
             cms_runtime: Arc::new(crate::cms::CmsRuntime::new(store.clone())),
+            code_store: None,
+            code_embedder: None,
         }
+    }
+
+    /// Wire the code-search store + query embedder. Call once during
+    /// startup; `None` values disable the `/api/code/*` routes (they 503).
+    pub fn with_code_search(
+        mut self,
+        store: Option<Arc<crate::db::CodeStore>>,
+        embedder: Option<Arc<EmbedderHandle>>,
+    ) -> Self {
+        self.code_store = store;
+        self.code_embedder = embedder;
+        self
     }
 
     /// Wire the Web Push backend + VAPID config. Call once during startup.
@@ -275,6 +296,8 @@ impl AppState {
             whisper: Arc::new(crate::config::WhisperConfig::default()),
             projection_worker: Arc::new(crate::projection::ProjectionWorker::new(store.clone())),
             cms_runtime: Arc::new(crate::cms::CmsRuntime::new(store.clone())),
+            code_store: None,
+            code_embedder: None,
         }
     }
 }

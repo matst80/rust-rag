@@ -1,4 +1,3 @@
-import { AppHeader } from "@/components/app-header"
 import { NewEntryClient } from "@/components/entries/new-entry-client"
 
 export const metadata = {
@@ -16,10 +15,7 @@ export default async function NewEntryPage({ searchParams }: PageProps) {
 
   return (
     <>
-      <AppHeader />
-      <main>
         <NewEntryClient defaultTab={defaultTab} />
-      </main>
     </>
   )
 }

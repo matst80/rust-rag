@@ -138,6 +138,50 @@ pub const HARNESS_RELATIONS: [&str; 15] = [
     REL_IMPLEMENTED_BY,
 ];
 
+/// Relations that nest `to_item_id` underneath `from_item_id` in the cockpit
+/// tree (`GET /api/harness/tree`). This is the single source of truth for
+/// "what counts as a parent/child edge" — [`HarnessTreeEdge::nests`] is
+/// computed from it server-side so the frontend never has to guess or
+/// hand-maintain a duplicate list.
+///
+/// Deliberately a *subset* of [`HARNESS_RELATIONS`]: `AUDITED` (audit
+/// verdicts are resolved onto their target's badge, not nested as a child)
+/// and `contradicts` (a peer conflict, not a hierarchy) are structural but
+/// don't nest. Also includes pre-fold legacy names (`CONTAINS_TODO`,
+/// `GOVERNED_BY`, `REQUIRES`) so edges written before those were folded into
+/// their canonical equivalents still render. Matched case-insensitively —
+/// agents emit both SCREAMING_CASE and lower_snake_case for the same relation.
+pub const NESTING_RELATIONS: [&str; 15] = [
+    REL_BREAKS_INTO,
+    REL_ENFORCES_DOC,
+    REL_DELEGATES_TO,
+    REL_MUTATES_STREAM,
+    REL_HAD_POC,
+    REL_RAISED,
+    REL_ADDRESSED_BY,
+    REL_SUPERSEDES,
+    REL_EVIDENCED_BY,
+    REL_CONTAINS,
+    REL_DEPENDS_ON,
+    REL_PART_OF,
+    REL_IMPLEMENTED_BY,
+    // Legacy pre-fold aliases (see module doc comment on REL_CONTAINS etc.).
+    "CONTAINS_TODO",
+    "GOVERNED_BY",
+];
+
+fn relation_nests(relation: Option<&str>) -> bool {
+    let Some(relation) = relation else {
+        return false;
+    };
+    NESTING_RELATIONS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(relation))
+        // REQUIRES was folded into depends_on but the name collides with
+        // nothing else, so it's safe to accept unconditionally here too.
+        || relation.eq_ignore_ascii_case("REQUIRES")
+}
+
 /// Relations that anchor a node to a governing doc. A plan/todo without any
 /// of these is "unanchored" (yellow badge when it has no audit yet).
 /// `GOVERNED_BY` was a duplicate of `ENFORCES_DOC` and was folded into it.
@@ -207,6 +251,11 @@ pub struct HarnessTreeEdge {
     pub from_item_id: String,
     pub to_item_id: String,
     pub relation: Option<String>,
+    /// Whether this edge nests `to_item_id` under `from_item_id` in the
+    /// cockpit tree — computed server-side from [`NESTING_RELATIONS`], the
+    /// canonical list. Consumers should branch on this instead of
+    /// hand-maintaining their own relation allowlist.
+    pub nests: bool,
 }
 
 /// A session memory joined into the tree via `harness_poc.session_id ==
@@ -397,6 +446,7 @@ pub fn assemble_tree(
             id: e.id,
             from_item_id: e.from_item_id,
             to_item_id: e.to_item_id,
+            nests: relation_nests(e.relation.as_deref()),
             relation: e.relation,
         })
         .collect();

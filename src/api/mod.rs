@@ -5,6 +5,7 @@ mod auth;
 pub mod auth_guard;
 mod chunking;
 pub mod cms;
+pub mod code;
 pub mod collab;
 pub mod dream;
 mod dreaming;
@@ -2107,9 +2108,9 @@ mod tests {
             .access_token
     }
 
-    async fn initialize_mcp_session(server: &TestServer, token: &str) -> Option<String> {
+    async fn initialize_mcp_session(server: &TestServer, path: &str, token: &str) -> Option<String> {
         let response = server
-            .post("/mcp")
+            .post(path)
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 format!("Bearer {token}")
@@ -2151,6 +2152,7 @@ mod tests {
 
     async fn call_mcp_tool(
         server: &TestServer,
+        path: &str,
         token: &str,
         session_id: Option<&str>,
         id: i64,
@@ -2158,7 +2160,7 @@ mod tests {
         arguments: Value,
     ) -> Value {
         let mut request = server
-            .post("/mcp")
+            .post(path)
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 format!("Bearer {token}")
@@ -2345,6 +2347,126 @@ mod tests {
         );
     }
 
+    /// `tools/list` against `path` on a fresh session (initialize + list).
+    async fn list_mcp_tools(server: &TestServer, path: &str, token: &str) -> Vec<String> {
+        let session_id = initialize_mcp_session(server, path, token).await;
+        let mut request = server
+            .post(path)
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {token}")
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            )
+            .add_header(
+                axum::http::header::HOST,
+                "localhost".parse::<axum::http::HeaderValue>().unwrap(),
+            )
+            .add_header(
+                axum::http::header::ACCEPT,
+                "application/json, text/event-stream"
+                    .parse::<axum::http::HeaderValue>()
+                    .unwrap(),
+            );
+        if let Some(session_id) = &session_id {
+            request = request.add_header(
+                axum::http::HeaderName::from_static("mcp-session-id"),
+                session_id.parse::<axum::http::HeaderValue>().unwrap(),
+            );
+        }
+        let response = request
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list"
+            }))
+            .await;
+        response.assert_status_ok();
+        let body = response.json::<Value>();
+        assert!(body.get("error").is_none(), "tools/list failed: {body:?}");
+        body["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn mcp_endpoints_partition_the_tool_surface() {
+        let (state, _store) = auth_test_state();
+        let secret = state.auth.session_secret.clone().unwrap();
+        let server = TestServer::new(router(state));
+        let token = mint_mcp_bearer(&server, &secret, "user-acp-mcp").await;
+
+        let main_tools = list_mcp_tools(&server, "/mcp", &token).await;
+        let acp_tools = list_mcp_tools(&server, "/mcp/acp", &token).await;
+        let admin_tools = list_mcp_tools(&server, "/mcp/admin", &token).await;
+
+        assert!(
+            main_tools.contains(&"store_entry".to_owned()),
+            "main endpoint keeps the memory surface: {main_tools:?}"
+        );
+        let moved = [
+            "graph_status",
+            "rebuild_graph",
+            "create_manual_edge",
+            "list_ontology_reviews",
+            "map_get",
+            "map_rebuild",
+        ];
+        assert!(
+            !main_tools.iter().any(|name| name.starts_with("acp_")
+                || name.starts_with("map_")
+                || moved.contains(&name.as_str())),
+            "main endpoint must not expose ACP/graph/map tools: {main_tools:?}"
+        );
+        for google in ["drive_search", "drive_fetch", "gmail_search", "gmail_get_thread"] {
+            assert!(
+                !main_tools.contains(&google.to_owned()),
+                "google tools are not exposed: {google}"
+            );
+        }
+
+        assert!(
+            acp_tools.iter().all(|name| name.starts_with("acp_")),
+            "ACP endpoint should expose only acp_* tools: {acp_tools:?}"
+        );
+        assert!(
+            acp_tools.contains(&"acp_delegate_task".to_owned()),
+            "ACP endpoint keeps the delegation surface: {acp_tools:?}"
+        );
+
+        let admin_only = ["graph_status", "create_manual_edge", "list_ontology_reviews", "map_get"];
+        for name in admin_only {
+            assert!(
+                admin_tools.contains(&name.to_owned()),
+                "admin endpoint keeps graph/map surface: missing {name}"
+            );
+        }
+        assert!(
+            admin_tools.iter().all(|name| name.starts_with("map_")
+                || name.starts_with("graph_")
+                || [
+                    "rebuild_graph",
+                    "list_graph_edges",
+                    "create_manual_edge",
+                    "delete_graph_edge",
+                    "update_graph_edge",
+                    "list_ontology_reviews",
+                    "accept_ontology_review",
+                    "reject_ontology_review",
+                ]
+                .contains(&name.as_str())),
+            "admin endpoint should expose only graph/map tools: {admin_tools:?}"
+        );
+        assert!(
+            !admin_tools.contains(&"store_entry".to_owned())
+                && !admin_tools.iter().any(|name| name.starts_with("acp_")),
+            "admin endpoint must not leak memory/ACP tools: {admin_tools:?}"
+        );
+    }
+
     #[tokio::test]
     async fn cms_tree_updates_when_mutated_via_mcp() {
         let page = ItemRecord {
@@ -2403,7 +2525,7 @@ mod tests {
         let secret = state.auth.session_secret.clone().unwrap();
         let server = TestServer::new(router(state));
         let token = mint_mcp_bearer(&server, &secret, "user-cms").await;
-        let session_id = initialize_mcp_session(&server, &token).await;
+        let session_id = initialize_mcp_session(&server, "/mcp/admin", &token).await;
 
         let cold_tree = server
             .get("/api/cms/tree/page-1")
@@ -2420,6 +2542,7 @@ mod tests {
 
         call_mcp_tool(
             &server,
+            "/mcp/admin",
             &token,
             session_id.as_deref(),
             2,
@@ -2436,6 +2559,7 @@ mod tests {
         .await;
         call_mcp_tool(
             &server,
+            "/mcp/admin",
             &token,
             session_id.as_deref(),
             3,
@@ -2452,6 +2576,7 @@ mod tests {
         .await;
         call_mcp_tool(
             &server,
+            "/mcp/admin",
             &token,
             session_id.as_deref(),
             4,
@@ -2495,6 +2620,7 @@ mod tests {
 
         call_mcp_tool(
             &server,
+            "/mcp",
             &token,
             session_id.as_deref(),
             5,

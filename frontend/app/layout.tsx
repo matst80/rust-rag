@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Geist, JetBrains_Mono, Source_Serif_4 } from 'next/font/google'
 import { Providers } from '@/components/providers'
+import { AppShell } from '@/components/app-shell'
 import './globals.css'
 
 const _geist = Geist({ subsets: ["latin"] })
@@ -38,7 +39,9 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${_jetbrainsMono.variable} ${_sourceSerif.variable} font-sans antialiased bg-background`}>
         <Providers>
-          {children}
+          <AppShell>
+            {children}
+          </AppShell>
         </Providers>
         <script
           dangerouslySetInnerHTML={{

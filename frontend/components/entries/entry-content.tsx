@@ -222,7 +222,7 @@ ${(entry.text ?? "").slice(0, 6000)}`
                     Data ({entry.type})
                   </span>
                 </div>
-                <StructuredDataView type={entry.type} data={entry.data} />
+                <StructuredDataView type={entry.type} data={entry.data} entryId={id} />
               </div>
             )}
 

@@ -1,4 +1,3 @@
-import { AppHeader } from "@/components/app-header"
 import { SchemasBrowser } from "@/components/schemas/schemas-browser"
 
 export const metadata = {
@@ -9,10 +8,7 @@ export const metadata = {
 export default function SchemasPage() {
   return (
     <>
-      <AppHeader />
-      <main>
         <SchemasBrowser />
-      </main>
     </>
   )
 }

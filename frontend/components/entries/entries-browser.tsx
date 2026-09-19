@@ -13,6 +13,10 @@ export function EntriesBrowser() {
     "entries-browser:category",
     null
   )
+  const [selectedPath, setSelectedPath] = useSessionState<string | null>(
+    "entries-browser:path",
+    null
+  )
 
   if (!mounted) {
     return (
@@ -28,9 +32,11 @@ export function EntriesBrowser() {
       <CategorySidebar
         selectedCategory={selectedCategory}
         onSelectCategory={setSelectedCategory}
+        selectedPath={selectedPath}
+        onSelectPath={setSelectedPath}
       />
       <div className="flex-1 overflow-y-auto">
-        <EntriesList selectedCategory={selectedCategory} />
+        <EntriesList selectedCategory={selectedCategory} selectedPath={selectedPath} />
       </div>
     </div>
   )

@@ -2,7 +2,6 @@
 
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"
-import { AppHeader } from "@/components/app-header"
 import { EntryForm } from "@/components/entries/entry-form"
 
 function ShareContent() {
@@ -31,23 +30,22 @@ function ShareContent() {
   }
 
   return (
-    <main className="container py-8">
+    <div className="container py-8">
       <div className="mb-8">
         <h2 className="text-3xl font-bold tracking-tight">Save Shared Content</h2>
         <p className="text-muted-foreground">Review and categorize the content you shared from Android.</p>
       </div>
       <EntryForm mode="create" entry={initialEntry as any} />
-    </main>
+    </div>
   )
 }
 
 export default function SharePage() {
   return (
-    <div className="min-h-screen flex flex-col">
-      <AppHeader />
+    <>
       <Suspense fallback={<div className="p-8 text-center">Loading shared content...</div>}>
         <ShareContent />
       </Suspense>
-    </div>
+    </>
   )
 }

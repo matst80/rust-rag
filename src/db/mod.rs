@@ -1,4 +1,5 @@
 mod auth;
+pub mod code_store;
 mod graph;
 mod oauth_creds;
 pub mod postgres;
@@ -25,6 +26,12 @@ use graph::{
     rebuild_similarity_graph_locked,
 };
 use schema::{initialize_schema, register_sqlite_vec};
+
+pub use code_store::{
+    CODE_EMBEDDING_DIM, CODE_EMBEDDING_MODEL, CODE_EMBEDDING_VERSION, CodeFileDetail, CodeFileMeta,
+    CodeOutlineEntry, CodeRepoSummary, CodeSearchHit, CodeStore, CodeTodoEntry, CodeUploadStats,
+    ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo, ParsedCodeSymbol, parse_codesearch_db,
+};
 
 /// Reciprocal Rank Fusion ranking constant. 60 is the value from the original
 /// RRF paper (Cormack et al.) and is the de-facto default across search systems.

@@ -35,18 +35,15 @@ data:
   RAG_TOKENIZER_PATH: "/app/assets/bge-m3/tokenizer.json"
   RAG_EMBEDDING_DIMENSION: "1024"
   RAG_EMBEDDING_POOLING: "cls"
-  ## Second embedder: BGE-Code-v1 (Qwen2.5-Coder-1.5B base, 1536-d, mean-pooled).
-  ## Used by the code-ingestion subsystem (code_repos / code_chunks / code_*
-  ## MCP + /api/code/*). Fetched from babybirdprd/bge-code-v1-onnx by the
-  ## fetch-bge-code-v1 init container; ~6.2 GB fp32, lives on its own PVC.
-  RAG_CODE_EMBEDDER_PATH: "/app/assets/bge-code-v1/model.onnx"
-  RAG_CODE_TOKENIZER_PATH: "/app/assets/bge-code-v1/tokenizer.json"
-  RAG_CODE_EMBEDDING_POOLING: "mean"
-  ## bge-code-v1 fp32 (~6 GB VRAM) does not fit alongside bge-m3 (~2 GB) +
-  ## reranker (~2 GB) on the RTX 2080's 8 GB. Pin to CPU until an fp16
-  ## export is available. Slower per-call (~1s vs ~100ms on CUDA) but only
-  ## hits the code-ingestion path, not steady-state retrieval.
-  RAG_CODE_FORCE_CPU: "true"
+  ## Second embedder: all-MiniLM-L6-v2 (384-d, mean-pooled). Query embedder
+  ## for /api/code/* — the per-repo `.codesearch/codesearch.db` snapshots
+  ## (uploaded via POST /api/code/upload) carry pre-computed 384-dim float32
+  ## MiniLM embeddings, so queries must use the same model. Loaded
+  ## CPU-pinned inside the server (with_cpu_only); ~90 MB fp32, shipped in
+  ## the image under assets/all-MiniLM-L6-v2/.
+  RAG_CODE_MODEL_PATH: "/app/assets/all-MiniLM-L6-v2/model.onnx"
+  RAG_CODE_TOKENIZER_PATH: "/app/assets/all-MiniLM-L6-v2/tokenizer.json"
+  RAG_CODE_POOLING: "mean"
   ## Header-aware chunking via `text-splitter`, sized in real bge-m3 tokens.
   RAG_CHUNK_MAX_TOKENS: "500"
   RAG_CHUNK_OVERLAP_TOKENS: "50"
@@ -103,7 +100,6 @@ data:
   RAG_ANALYSIS_TIMEOUT_SECS: "60"
   RAG_ANALYSIS_MAX_NEIGHBORS: "4"
   RAG_ANALYSIS_NEIGHBOR_THRESHOLD: "0.6"
-  RAG_CODE_ENABLED: "false"
   ## Ontology worker — pulls items with `ontology_status=pending`, embeds
   ## them, asks the analysis LLM (preferred) or the chat LLM to extract
   ## typed edges against neighbors, and writes them to the graph table.
@@ -314,20 +310,22 @@ spec:
               cpu: "1"
               memory: 3Gi
         ## BGE-Code-v1 ONNX export (Qwen2.5-Coder-1.5B base, 1536-d).
-        ## babybirdprd/bge-code-v1-onnx mirrors BAAI/bge-code-v1 with model.onnx
-        ## + model.onnx_data + tokenizer.json. ~6.2 GB fp32 weights, fetched
-        ## once into the code-models PVC. Powers the code-ingest subsystem.
-        - name: fetch-bge-code-v1
+        ## all-MiniLM-L6-v2 ONNX export (384-d, mean-pooled). Query embedder
+        ## for /api/code/*: the uploaded `.codesearch/codesearch.db` snapshots
+        ## carry pre-computed 384-dim float32 MiniLM embeddings, so queries
+        ## must use the same model. ~90 MB fp32, fetched once into the
+        ## code-models PVC.
+        - name: fetch-all-minilm-l6-v2
           image: curlimages/curl:8.10.1
           env:
             - name: HF_REPO
-              value: "https://huggingface.co/babybirdprd/bge-code-v1-onnx/resolve/main"
+              value: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
           command:
             - /bin/sh
             - -ec
             - |
               cd /models-code
-              mkdir -p bge-code-v1 && cd bge-code-v1
+              mkdir -p all-MiniLM-L6-v2 && cd all-MiniLM-L6-v2
               fetch() {
                 local name=$1
                 local url=$2
@@ -341,9 +339,8 @@ spec:
                   --output "$name.tmp" "$url"
                 mv "$name.tmp" "$name"
               }
-              fetch model.onnx       "$HF_REPO/model.onnx"       1000000
-              fetch model.onnx_data  "$HF_REPO/model.onnx_data"  6000000000
-              fetch tokenizer.json   "$HF_REPO/tokenizer.json"   1000000
+              fetch model.onnx       "$HF_REPO/onnx/model.onnx"  80000000
+              fetch tokenizer.json   "$HF_REPO/tokenizer.json"   100000
               echo "code embedder cache ready:"
               ls -lh
           volumeMounts:
@@ -410,8 +407,8 @@ spec:
               subPath: bge-reranker-base
               readOnly: true
             - name: models-code
-              mountPath: /app/assets/bge-code-v1
-              subPath: bge-code-v1
+              mountPath: /app/assets/all-MiniLM-L6-v2
+              subPath: all-MiniLM-L6-v2
               readOnly: true
           startupProbe:
             httpGet:

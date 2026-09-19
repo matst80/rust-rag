@@ -1,10 +1,16 @@
 "use client"
 
 import Link from "next/link"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen } from "lucide-react"
 import { cn, entryTitle } from "@/lib/utils"
 import { useEntriesTree } from "@/lib/api"
+import {
+  clearEntryDrag,
+  hasEntryDragData,
+  readEntryDragData,
+  setEntryDragData,
+} from "@/lib/drag-entry"
 
 export interface TreeNodeData {
   segment: string
@@ -49,6 +55,7 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
   } = props
   const [open, setOpen] = useState(activeChain.has(node.path))
   const [isDragOver, setIsDragOver] = useState(false)
+  const autoExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const isSelected =
     selectedSourceId === sourceId && (selectedPath ?? null) === node.path
@@ -60,45 +67,53 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
   const { data: ownTree } = useEntriesTree(open && node.count > 0 ? sourceId : null, node.path)
   const pages = ownTree?.entries ?? []
 
+  // Hovering a collapsed folder during a drag opens it so deeper targets show.
+  const startAutoExpand = () => {
+    if (!expandable || open || autoExpandTimer.current) return
+    autoExpandTimer.current = setTimeout(() => {
+      autoExpandTimer.current = null
+      setOpen(true)
+    }, 500)
+  }
+
+  const cancelAutoExpand = () => {
+    if (autoExpandTimer.current) {
+      clearTimeout(autoExpandTimer.current)
+      autoExpandTimer.current = null
+    }
+  }
+
+  useEffect(() => cancelAutoExpand, [])
+
   return (
     <div className="flex flex-col">
       <div
         className={cn(
           "flex items-center transition-colors rounded-sm",
-          isDragOver && "bg-primary/20 ring-1 ring-primary"
+          isDragOver && "bg-primary/10 ring-2 ring-primary"
         )}
         onDragOver={(e) => {
-          if (onDropEntry) {
-            e.preventDefault()
-            e.stopPropagation()
-            e.dataTransfer.dropEffect = "move"
-            if (!isDragOver) setIsDragOver(true)
-          }
+          if (!onDropEntry || !hasEntryDragData(e.dataTransfer)) return
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = "move"
+          if (!isDragOver) setIsDragOver(true)
+          startAutoExpand()
         }}
         onDragLeave={(e) => {
           e.preventDefault()
           e.stopPropagation()
           setIsDragOver(false)
+          cancelAutoExpand()
         }}
         onDrop={(e) => {
           e.preventDefault()
           e.stopPropagation()
           setIsDragOver(false)
-          let entryId = ""
-          try {
-            const raw = e.dataTransfer.getData("application/json")
-            if (raw) {
-              const data = JSON.parse(raw)
-              entryId = data.id
-            }
-          } catch {
-            // fallback
-          }
-          if (!entryId) {
-            entryId = e.dataTransfer.getData("text/plain")
-          }
-          if (entryId && onDropEntry) {
-            onDropEntry(sourceId, node.path, entryId)
+          cancelAutoExpand()
+          const payload = readEntryDragData(e.dataTransfer)
+          if (payload && onDropEntry) {
+            onDropEntry(sourceId, node.path, payload.id)
           }
         }}
       >
@@ -133,9 +148,15 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
             <Folder className="size-3.5 text-muted-foreground shrink-0" />
           )}
           <span className="truncate">{node.segment}</span>
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
-            {node.subtreeCount}
-          </span>
+          {isDragOver ? (
+            <span className="ml-auto shrink-0 rounded bg-primary px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-primary-foreground">
+              Move here
+            </span>
+          ) : (
+            <span className="ml-auto font-mono text-[10px] text-muted-foreground tabular-nums shrink-0">
+              {node.subtreeCount}
+            </span>
+          )}
         </Link>
       </div>
 
@@ -149,15 +170,16 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
                 href={buildHref(sourceId, node.path, page.id)}
                 draggable
                 onDragStart={(evt) => {
-                  evt.dataTransfer.setData(
-                    "application/json",
-                    JSON.stringify({ id: page.id, source_id: page.source_id, path: page.path })
-                  )
-                  evt.dataTransfer.setData("text/plain", page.id)
-                  evt.dataTransfer.effectAllowed = "move"
+                  setEntryDragData(evt.dataTransfer, {
+                    id: page.id,
+                    source_id: page.source_id,
+                    path: page.path,
+                    title: entryTitle(page, 80),
+                  })
                 }}
+                onDragEnd={() => clearEntryDrag()}
                 className={cn(
-                  "flex items-center gap-2 min-w-0 px-2 py-1 font-mono text-[11px] transition-colors hover:bg-card border-l-2",
+                  "flex items-center gap-2 min-w-0 px-2 py-1 font-mono text-xs transition-colors hover:bg-card border-l-2",
                   pageSelected
                     ? "bg-primary/10 text-primary border-primary"
                     : "text-muted-foreground hover:text-foreground border-transparent"

@@ -57,9 +57,10 @@ import { EntryCard } from "./entry-card";
 
 interface EntriesListProps {
   selectedCategory: string | null;
+  selectedPath?: string | null;
 }
 
-export function EntriesList({ selectedCategory }: EntriesListProps) {
+export function EntriesList({ selectedCategory, selectedPath }: EntriesListProps) {
   const [localSearch, setLocalSearch] = useSessionState<string>(
     "entries-list:search",
     "",
@@ -84,11 +85,13 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
 
   const lastFilters = useRef<{
     category: string | null;
+    path: string | null | undefined;
     sort: SortOrder;
     type: string | null;
     props: string;
   }>({
     category: selectedCategory,
+    path: selectedPath,
     sort: sortOrder,
     type: selectedType,
     props: JSON.stringify(propertyFilters),
@@ -98,22 +101,25 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
     const prev = lastFilters.current;
     if (
       prev.category !== selectedCategory ||
+      prev.path !== selectedPath ||
       prev.sort !== sortOrder ||
       prev.type !== selectedType ||
       prev.props !== propsKey
     ) {
       lastFilters.current = {
         category: selectedCategory,
+        path: selectedPath,
         sort: sortOrder,
         type: selectedType,
         props: propsKey,
       };
       setPage(1);
     }
-  }, [selectedCategory, sortOrder, selectedType, propertyFilters, setPage]);
+  }, [selectedCategory, selectedPath, sortOrder, selectedType, propertyFilters, setPage]);
 
   const { data: pagedData, isLoading } = useItems({
     source_id: selectedCategory ?? undefined,
+    path_prefix: selectedPath ?? undefined,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
     sort_order: sortOrder,
@@ -440,9 +446,11 @@ export function EntriesList({ selectedCategory }: EntriesListProps) {
           <p className="mb-10 text-muted-foreground text-lg max-w-sm mx-auto leading-relaxed">
             {hasActiveFilters
               ? "No records match the current filters. Try clearing one."
-              : selectedCategory
-                ? `No records found in the "${selectedCategory}" collection.`
-                : "Your neural network of memories is currently offline. Start by creating a record."}
+              : selectedPath
+                ? `No records found under "${selectedPath}".`
+                : selectedCategory
+                  ? `No records found in the "${selectedCategory}" collection.`
+                  : "Your neural network of memories is currently offline. Start by creating a record."}
           </p>
           <Button
             size="lg"

@@ -12,11 +12,18 @@ Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`
 
 - `src/` — main Rust API server. Entry point default bind: `http://127.0.0.1:4001`.
 - `src/mcp.rs` — in-process MCP server mounted at `/mcp`.
+- `src/acp_mcp.rs` — ACP-only MCP server at `/mcp/acp` (session/terminal control tools; keeps them off the main tool list).
+- `src/admin_mcp.rs` — admin MCP server at `/mcp/admin` (graph/ontology curation + projection-map tools).
+- Google Drive/Gmail MCP tools exist in `src/mcp.rs` but are deliberately not exposed (HTTP API only).
 
 - `frontend/` — Next.js app (server-side Zitadel OAuth, signed session cookie, proxies to Rust API).
 - `assets/` — ONNX model files baked into Docker image.
 - `deploy/kubernetes/` — k8s manifests (frontend only in prod).
 - `docs/` — `setup-guide.md`, `mcp-setup.md`.
+
+## Code search (`/api/code/*`, `src/db/code_store.rs`)
+
+Per-repo `.codesearch/codesearch.db` snapshots (external sqlite + sqlite-vec indexer, symbol-centric) are uploaded via `POST /api/code/upload` and merged into Postgres tables `code_repos` / `code_files` / `code_symbols` / `code_calls` (migration 0018; re-upload of a repo name replaces its rows). Symbols carry pre-computed **all-MiniLM-L6-v2** 384-dim float32 embeddings; queries are embedded server-side by a second, CPU-pinned ONNX session (`RAG_CODE_MODEL_PATH` + `RAG_CODE_TOKENIZER_PATH`, mean pooling) — never the main bge-m3 embedder. Postgres-only: the routes 503 without `RAG_DATABASE_URL`. The frontend page is `/code`.
 
 ## Build / run
 

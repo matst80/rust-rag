@@ -36,7 +36,10 @@ ENV RAG_HOST=0.0.0.0 \
 	RAG_GRAPH_BUILD_ON_STARTUP=false \
 	RAG_GRAPH_K=5 \
 	RAG_GRAPH_MAX_DISTANCE=0.75 \
-	RAG_GRAPH_CROSS_SOURCE=false
+	RAG_GRAPH_CROSS_SOURCE=false \
+	RAG_CODE_MODEL_PATH=/app/assets/all-MiniLM-L6-v2/model.onnx \
+	RAG_CODE_TOKENIZER_PATH=/app/assets/all-MiniLM-L6-v2/tokenizer.json \
+	RAG_CODE_POOLING=mean
 
 VOLUME ["/app/data"]
 EXPOSE 4001

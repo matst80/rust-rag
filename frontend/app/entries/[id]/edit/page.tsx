@@ -1,4 +1,3 @@
-import { AppHeader } from "@/components/app-header"
 import { EntryEditClient } from "./edit-client"
 
 export default async function EditEntryPage({
@@ -11,10 +10,7 @@ export default async function EditEntryPage({
 
   return (
     <>
-      <AppHeader />
-      <main>
         <EntryEditClient id={decodedId} />
-      </main>
     </>
   )
 }

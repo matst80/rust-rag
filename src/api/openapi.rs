@@ -19,6 +19,7 @@ use super::attachments::{
     EntriesTreeResponse,
 };
 use super::cms::CmsTreeResponse;
+use super::code::{CodeDeleteResponse, CodeSearchRequest};
 use super::graph::{
     CreateManualEdgeRequest, GraphEdgePayload, GraphEdgesResponse,
     GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse,
@@ -49,7 +50,10 @@ use super::store_search::{
 use crate::api::{
     AnalyzeEntryParams, SearchRequest, SearchResponse, StoreAnalysis, StoreRequest, StoreResponse,
 };
-use crate::db::DuplicateEdgeGroup;
+use crate::db::{
+    CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeUploadStats,
+    DuplicateEdgeGroup,
+};
 use crate::notify::SendResult;
 use crate::ontology::OntologyRunReport;
 use crate::projection::MapPoint;
@@ -710,6 +714,91 @@ pub fn openapi_document() -> Value {
                 "post",
                 "Fetch a URL and ingest its content",
                 "Ingest",
+            )
+        },
+        &mut components,
+    );
+
+    // -- Code search -------------------------------------------------------
+    add(
+        &mut paths,
+        "/api/code/upload",
+        Op {
+            request: Some(multipart_fields(json!({
+                "repo": { "type": "string", "description": "Repo name; re-uploading replaces the snapshot" },
+                "root_path": { "type": "string", "description": "Optional local repo path, for display" },
+                "file": { "type": "string", "format": "binary", "description": ".codesearch/codesearch.db snapshot (sqlite + sqlite-vec)" }
+            }))),
+            request_content: "multipart/form-data",
+            response: Some(sref!(components, "CodeUploadStats", CodeUploadStats)),
+            response_code: 201,
+            response_desc: "Snapshot merged.",
+            ..op("upload_codesearch_db", "post", "Upload a codesearch.db snapshot", "Code")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/search",
+        Op {
+            request: Some(sref!(components, "CodeSearchRequest", CodeSearchRequest)),
+            response: Some(json!({
+                "type": "array",
+                "items": sref!(components, "CodeSearchHit", CodeSearchHit)
+            })),
+            ..op(
+                "search_code",
+                "post",
+                "Semantic code symbol search (all-MiniLM-L6-v2)",
+                "Code",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/repos",
+        Op {
+            response: Some(json!({
+                "type": "array",
+                "items": sref!(components, "CodeRepoSummary", CodeRepoSummary)
+            })),
+            ..op("list_code_repos", "get", "List indexed code repos", "Code")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/repos/{name}",
+        Op {
+            response: Some(sref!(components, "CodeDeleteResponse", CodeDeleteResponse)),
+            response_desc: "Deleted.",
+            ..op("delete_code_repo", "delete", "Delete a code repo snapshot", "Code")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/repos/{name}/files",
+        Op {
+            response: Some(json!({
+                "type": "array",
+                "items": sref!(components, "CodeFileMeta", CodeFileMeta)
+            })),
+            ..op("list_code_files", "get", "List files in an indexed repo", "Code")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/repos/{name}/files/{path}",
+        Op {
+            response: Some(sref!(components, "CodeFileDetail", CodeFileDetail)),
+            ..op(
+                "get_code_file",
+                "get",
+                "File detail with symbol outline",
+                "Code",
             )
         },
         &mut components,

@@ -1,182 +1,33 @@
 "use client"
 
-import Link from "next/link"
-import { usePathname } from "next/navigation"
-import { useState } from "react"
-import useSWR from "swr"
-import { ManagerMemoryPanel } from "@/components/manager/memory-panel"
-import {
-  BookOpen,
-  Brain,
-  Flame,
-  Radar,
-  FolderOpen,
-  FolderTree,
-  GitBranch,
-  Github,
-  Hash,
-  KeyRound,
-  LayoutGrid,
-  LogIn,
-  LogOut,
-  MessageSquare,
-  Search,
-  Sparkles,
-  Terminal,
-  User,
-  Cog,
-} from "lucide-react"
-import { cn } from "@/lib/utils"
+import { Menu } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { HeaderSearch } from "@/components/header-search"
 
-// const GITHUB_REPO_URL = "https://github.com/matst80/rust-rag"
-
-const navigation = [
-  { name: "Search", href: "/", icon: Search },
-  { name: "Kanban", href: "/kanban", icon: LayoutGrid },
-  { name: "Entries", href: "/entries", icon: FolderOpen },
-  { name: "Wiki", href: "/wiki", icon: FolderTree },
-  { name: "Graph", href: "/visualize", icon: GitBranch },
-  { name: "Grill", href: "/grill", icon: Flame },
-  { name: "Insights", href: "/insights", icon: Radar },
-  { name: "Agents", href: "/acp", icon: Terminal },
-]
-
-const navigationRight = [
-  { name: "Docs", href: "/start-guide", icon: BookOpen },
-  // { name: "Settings", href: "/settings", icon: Cog },
-]
-
-interface SessionResponse {
-  authenticated: boolean
-  auth_enabled: boolean
-  user?: {
-    name?: string
-    email?: string
-    preferred_username?: string
-  }
-}
-
-async function loadSession(url: string): Promise<SessionResponse> {
-  const response = await fetch(url, { cache: "no-store" })
-  if (!response.ok) return { authenticated: false, auth_enabled: true }
-  return response.json()
-}
-
-export function AppHeader() {
-  const pathname = usePathname()
-  const { data: session } = useSWR<SessionResponse>("/auth/session", loadSession, {
-    revalidateOnFocus: true,
-  })
-  const displayName =
-    session?.user?.name ?? session?.user?.preferred_username ?? session?.user?.email ?? "Signed in"
-
+/** Slim top bar: mobile menu toggle, large centered quick search, theme toggle.
+ *  Navigation lives in the app sidebar; this bar stays out of the page scroll
+ *  (the shell's <main> scrolls beneath it). */
+export function AppHeader({ onMenu }: { onMenu: () => void }) {
   return (
-    <>
-      <header className="sticky top-0 z-50 border-b border-border bg-background">
-        <div className="flex items-center justify-between px-4">
+    <header className="grid h-12 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border bg-background px-2 md:px-4">
+      <div className="flex items-center">
+        <button
+          type="button"
+          onClick={onMenu}
+          aria-label="Open navigation"
+          className="flex size-8 items-center justify-center text-muted-foreground transition-colors hover:text-foreground md:hidden"
+        >
+          <Menu className="size-4" />
+        </button>
+      </div>
 
-          {/* Logo */}
-          <div className="flex items-center gap-6">
-            <Link
-              href="/"
-              className="flex items-center gap-2 font-mono text-xs font-black uppercase tracking-[3px] text-primary"
-            >
-              <Brain className="size-4" />
-              <span className="hidden sm:inline">bRAG</span>
-            </Link>
+      <div className="flex w-full min-w-0 justify-center">
+        <HeaderSearch />
+      </div>
 
-            {/* Nav */}
-            <nav className="flex items-center">
-              {navigation.map((item) => {
-                const isActive =
-                  item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)
-                return (
-                  <Link
-                    key={item.name}
-                    href={item.href}
-                    prefetch={false}
-                    aria-label={item.name}
-                    className={cn(
-                      "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
-                      isActive
-                        ? "text-primary border-primary"
-                        : "text-muted-foreground border-transparent hover:text-foreground hover:border-border"
-                    )}
-                  >
-                    <item.icon className="size-3.5" aria-hidden="true" />
-                    <span className="hidden sm:inline">{item.name}</span>
-                  </Link>
-                )
-              })}
-            </nav>
-          </div>
-
-          {/* Right side */}
-          <div className="flex items-center gap-2">
-            <HeaderSearch />
-            <div className="hidden sm:flex items-center">
-            {navigationRight.map((item) => {
-              const isActive = pathname.startsWith(item.href)
-              return (
-                <Link
-                  key={item.name}
-                  href={item.href}
-                  prefetch={false}
-                  aria-label={item.name}
-                  className={cn(
-                    "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors border-b-2",
-                    isActive
-                      ? "text-primary border-primary"
-                      : "text-muted-foreground border-transparent hover:text-foreground hover:border-border"
-                  )}
-                >
-                  <item.icon className="size-3.5" aria-hidden="true" />
-                  <span className="hidden sm:inline">{item.name}</span>
-                </Link>
-              )
-            })}
-            {session?.authenticated ? (
-              <>
-                <Link
-                  href="/auth/tokens"
-                  prefetch={false}
-                  aria-label="MCP tokens"
-                  className={cn(
-                    "flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] transition-colors",
-                    pathname.startsWith("/auth/tokens") || pathname.startsWith("/auth/device")
-                      ? "text-primary"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                  title="MCP tokens"
-                >
-                  <KeyRound className="size-3.5" aria-hidden="true" />
-                  <span className="hidden sm:inline">Tokens</span>
-                </Link>
-                <a
-                  href="/auth/logout"
-                  aria-label="Sign out"
-                  className="flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <LogOut className="size-3.5" aria-hidden="true" />
-                  <span>{displayName}</span>
-                </a>
-              </>
-            ) : session?.auth_enabled ? (
-              <a
-                href="/auth/login"
-                aria-label="Sign in"
-                className="flex items-center gap-1.5 px-3 py-3 font-mono text-[10px] font-bold uppercase tracking-[2px] text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <LogIn className="size-3.5" aria-hidden="true" />
-              </a>
-            ) : null}
-            <ThemeToggle />
-            </div>
-          </div>
-        </div>
-      </header>
-    </>
+      <div className="flex items-center justify-end">
+        <ThemeToggle />
+      </div>
+    </header>
   )
 }

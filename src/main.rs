@@ -22,10 +22,10 @@ use rust_rag::{
     config::{AppConfig, OpenAiChatConfig},
     crypto::EncryptionKey,
     db::{
-        AuthStore, MessageStore, OAuthCredsStore, PushStore, SqliteVectorStore, UserMemoryStore,
-        VectorStore,
+        AuthStore, CodeStore, MessageStore, OAuthCredsStore, PushStore, SqliteVectorStore,
+        UserMemoryStore, VectorStore,
     },
-    embedding::{Embedder, EmbeddingService},
+    embedding::{self, Embedder, EmbeddingService},
     manager, ontology,
 };
 
@@ -224,6 +224,15 @@ async fn main() -> Result<()> {
         Some(pg) => pg.clone(),
         None => store.clone(),
     };
+
+    // Code-search store: Postgres-only — the code tables (migration 0018)
+    // don't exist in SQLite, so /api/code/* 503s without RAG_DATABASE_URL.
+    let code_store = pg_store.as_ref().map(|pg| {
+        Arc::new(CodeStore::new(
+            pg.pool().clone(),
+            tokio::runtime::Handle::current(),
+        ))
+    });
     {
         let store_for_seed = store_service.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -268,6 +277,12 @@ async fn main() -> Result<()> {
     };
 
     let embedder_handle = Arc::new(EmbedderHandle::loading());
+    // Dedicated query embedder for code search (all-MiniLM-L6-v2). Stays
+    // separate from `embedder_handle`: different model, different dimensions.
+    let code_embedder_handle = config
+        .code_search
+        .is_enabled()
+        .then(|| Arc::new(EmbedderHandle::loading()));
 
     let state = AppState::new(
         embedder_handle.clone(),
@@ -293,7 +308,8 @@ async fn main() -> Result<()> {
             None => store.clone() as Arc<dyn PushStore>,
         },
     )
-    .with_whisper(config.whisper.clone());
+    .with_whisper(config.whisper.clone())
+    .with_code_search(code_store.clone(), code_embedder_handle.clone());
 
     // Build the markdown chunker from the embedder's tokenizer so chunk size
     // is measured in real model tokens. Only enabled when running against
@@ -489,6 +505,49 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // Code-query embedder (all-MiniLM-L6-v2). Loaded CPU-pinned on purpose:
+    // `with_cpu_only` keeps a second CUDA session out of the VRAM budget, and
+    // MiniLM query latency on CPU is negligible for this index size.
+    if let Some(code_handle) = &code_embedder_handle {
+        let model_path = config
+            .code_search
+            .model_path
+            .clone()
+            .expect("code model path checked by is_enabled");
+        let tokenizer_path = config
+            .code_search
+            .tokenizer_path
+            .clone()
+            .expect("code tokenizer path checked by is_enabled");
+        let dylib = config.ort_dylib_path.clone();
+        let intra_threads = config.code_search.intra_threads;
+        let pooling = config.code_search.pooling;
+        let code_handle = code_handle.clone();
+        tokio::task::spawn_blocking(move || {
+            println!("loading code embedder from {}", model_path.display());
+            let result = embedding::with_cpu_only(|| {
+                Embedder::from_paths(
+                    &model_path,
+                    &tokenizer_path,
+                    intra_threads,
+                    dylib.as_deref(),
+                )
+            });
+            match result {
+                Ok(embedder) => {
+                    let service: Arc<dyn EmbeddingService> =
+                        Arc::new(embedder.with_pooling(pooling));
+                    code_handle.mark_ready(service);
+                    println!("code embedder ready (pooling={pooling:?})");
+                }
+                Err(error) => {
+                    eprintln!("failed to load code embedder: {error}");
+                    code_handle.mark_failed(error.to_string());
+                }
+            }
+        });
+    }
 
     let state_for_shutdown = state.clone();
     axum::serve(listener, app)

@@ -1,6 +1,5 @@
 import Link from "next/link"
 import { ChevronRight, ExternalLink } from "lucide-react"
-import { AppHeader } from "@/components/app-header"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { cn } from "@/lib/utils"
 
@@ -48,11 +47,10 @@ export function DocsShell({
 }: DocsShellProps) {
   return (
     <>
-      <AppHeader />
-      <main className="min-h-[calc(100vh-3.5rem)] bg-[linear-gradient(180deg,rgba(0,0,0,0.02),transparent_220px)]">
+      <div className="min-h-full bg-[linear-gradient(180deg,rgba(0,0,0,0.02),transparent_220px)]">
         <div className="mx-auto grid w-full max-w-[1400px] gap-0 lg:grid-cols-[260px_minmax(0,1fr)_220px]">
           <aside className="hidden border-r border-border/60 px-6 py-10 lg:block">
-            <div className="sticky top-24 space-y-8">
+            <div className="sticky top-4 space-y-8">
               <div className="space-y-2">
                 <p className="text-[11px] font-black uppercase tracking-[0.28em] text-primary/70">
                   Guides
@@ -138,7 +136,7 @@ export function DocsShell({
           </section>
 
           <aside className="hidden border-l border-border/60 px-6 py-10 xl:block">
-            <div className="sticky top-24 space-y-4">
+            <div className="sticky top-4 space-y-4">
               <p className="text-[11px] font-black uppercase tracking-[0.28em] text-muted-foreground">
                 Resources
               </p>
@@ -159,7 +157,7 @@ export function DocsShell({
             </div>
           </aside>
         </div>
-      </main>
+      </div>
     </>
   )
 }

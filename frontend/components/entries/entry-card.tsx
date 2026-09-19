@@ -16,7 +16,8 @@ import {
   GripVertical,
 } from "lucide-react";
 import { memo, useState } from "react";
-import { cn, formatRelativeTime, stringToHslColor } from "@/lib/utils";
+import { cn, entryTitle, formatRelativeTime, stringToHslColor } from "@/lib/utils";
+import { setEntryDragData, clearEntryDrag } from "@/lib/drag-entry";
 import { ComboButton } from "@/components/ui/combo-button";
 import type { Entry, SearchResult } from "@/lib/api";
 import { MarkdownView } from "./markdown-view";
@@ -217,17 +218,14 @@ function EntryCardInner({
                 <div
                   draggable
                   onDragStart={(e) => {
-                    e.dataTransfer.setData(
-                      "application/json",
-                      JSON.stringify({
-                        id: entry.id,
-                        source_id: entry.source_id,
-                        path: entry.path,
-                      })
-                    );
-                    e.dataTransfer.setData("text/plain", entry.id);
-                    e.dataTransfer.effectAllowed = "move";
+                    setEntryDragData(e.dataTransfer, {
+                      id: entry.id,
+                      source_id: entry.source_id,
+                      path: isSearchResult ? undefined : (entry as Entry).path,
+                      title: entryTitle(entry, 80),
+                    });
                   }}
+                  onDragEnd={() => clearEntryDrag()}
                   className="size-7 flex items-center justify-center rounded cursor-grab active:cursor-grabbing text-muted-foreground/30 hover:text-primary hover:bg-primary/5 transition-colors"
                   title="Drag to organize into Wiki folder"
                 >

@@ -12,9 +12,9 @@ use super::auth;
 use super::auth_guard::require_api_key;
 use super::state::AppState;
 use super::{
-    acp, analysis, attachments, cms, collab, dream, graph, harness, health, ingest_url, integrations,
-    items, map, messages, multimodal, ontology, openai, openapi, push, query, schemas,
-    store_search, whisper,
+    acp, analysis, attachments, cms, code, collab, dream, graph, harness, health, ingest_url,
+    integrations, items, map, messages, multimodal, ontology, openai, openapi, push, query,
+    schemas, store_search, whisper,
 };
 
 pub fn router(state: AppState) -> Router {
@@ -86,6 +86,18 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/ingest/image", post(multimodal::ingest_image))
         .route("/api/ingest/url", post(ingest_url::ingest_url))
+        .route("/api/code/upload", post(code::upload_codesearch_db).layer(axum::extract::DefaultBodyLimit::max(code::CODE_SNAPSHOT_MAX_BYTES as usize)))
+        .route("/api/code/search", post(code::search_code))
+        .route("/api/code/repos", get(code::list_code_repos))
+        .route("/api/code/repos/{name}", delete(code::delete_code_repo))
+        .route(
+            "/api/code/repos/{name}/files",
+            get(code::list_code_files),
+        )
+        .route(
+            "/api/code/repos/{name}/files/{*path}",
+            get(code::get_code_file),
+        )
         .route("/api/attachments", post(attachments::upload_multipart))
         .route(
             "/api/attachments/from-url",
@@ -183,6 +195,14 @@ pub fn router(state: AppState) -> Router {
         .expose_headers([axum::http::HeaderName::from_static("mcp-session-id")]);
     let mcp_router = Router::new()
         .route_service("/mcp", crate::mcp::streamable_http_service(state.clone()))
+        .route_service(
+            "/mcp/acp",
+            crate::acp_mcp::streamable_http_service(state.clone()),
+        )
+        .route_service(
+            "/mcp/admin",
+            crate::admin_mcp::streamable_http_service(state.clone()),
+        )
         .route("/api/dream", post(dream::dreaming_endpoint))
         .layer(middleware::from_fn_with_state(
             state.clone(),

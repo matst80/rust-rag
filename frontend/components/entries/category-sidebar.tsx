@@ -1,22 +1,40 @@
 "use client";
 
-import { FolderOpen, Layers } from "lucide-react";
+import { FolderOpen, FolderTree, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { useCategories } from "@/lib/api";
+import { useCategories, useEntriesTree } from "@/lib/api";
 import { useMemo, useState } from "react";
+import { WikiTree, ancestorChain } from "./wiki-tree";
 
 interface CategorySidebarProps {
   selectedCategory: string | null;
   onSelectCategory: (category: string | null) => void;
+  selectedPath: string | null;
+  onSelectPath: (path: string | null) => void;
 }
 
 export function CategorySidebar({
   selectedCategory,
   onSelectCategory,
+  selectedPath,
+  onSelectPath,
 }: CategorySidebarProps) {
   const { data: categories, isLoading } = useCategories();
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    ancestorChain(selectedPath ?? "")
+  );
+  const { data: pathRoot } = useEntriesTree(selectedCategory, undefined);
+
+  const togglePath = (path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
   const [filterText, setFilterText] = useState("");
   const filteredCategories = useMemo(
     () =>
@@ -62,7 +80,10 @@ export function CategorySidebar({
               ? "bg-primary/5 text-primary shadow-sm ring-1 ring-primary/20"
               : "text-muted-foreground hover:bg-muted font-medium",
           )}
-          onClick={() => onSelectCategory(null)}
+          onClick={() => {
+            onSelectCategory(null);
+            onSelectPath(null);
+          }}
         >
           <div
             className={cn(
@@ -109,7 +130,10 @@ export function CategorySidebar({
                   ? "bg-primary/5 text-primary shadow-sm ring-1 ring-primary/10"
                   : "text-muted-foreground hover:bg-muted font-medium",
               )}
-              onClick={() => onSelectCategory(category.id)}
+              onClick={() => {
+                onSelectCategory(category.id);
+                onSelectPath(null);
+              }}
             >
               <div
                 className={cn(
@@ -146,6 +170,47 @@ export function CategorySidebar({
           ))
         )}
       </nav>
+
+      {selectedCategory && (
+        <div className="hidden md:flex flex-col mt-6 pt-4 border-t border-muted/20">
+          <h3 className="flex items-center gap-2 px-3 mb-2 text-[11px] font-bold uppercase tracking-[0.2em] text-primary/60">
+            <FolderTree className="size-3.5" />
+            Wiki Path
+          </h3>
+          <div className="flex flex-col overflow-y-auto max-h-96">
+            <button
+              type="button"
+              onClick={() => onSelectPath(null)}
+              className={cn(
+                "flex items-center gap-2 rounded-md mx-1 px-2 py-1.5 font-mono text-sm transition-colors",
+                !selectedPath
+                  ? "bg-primary/10 text-primary font-semibold"
+                  : "text-muted-foreground hover:bg-muted/50"
+              )}
+            >
+              <span className="truncate">{selectedCategory} (root)</span>
+            </button>
+            {pathRoot && pathRoot.children.length === 0 && (
+              <p className="px-4 py-3 text-xs text-muted-foreground">
+                No wiki folders in this collection yet.
+              </p>
+            )}
+            {pathRoot && (
+              <WikiTree
+                sourceId={selectedCategory}
+                prefix=""
+                depth={0}
+                value={selectedPath}
+                expanded={expanded}
+                onToggle={togglePath}
+                onSelect={onSelectPath}
+              >
+                {pathRoot.children}
+              </WikiTree>
+            )}
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

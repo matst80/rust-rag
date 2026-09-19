@@ -248,7 +248,7 @@ export function SearchPage({
           </div>
         ) : (
           <div className="flex flex-1 flex-col gap-6 py-8 animate-in fade-in slide-in-from-bottom-4 duration-500 fill-mode-both">
-            <div className="sticky top-12 z-40 pb-6 pt-2 -mx-6 px-6">
+            <div className="sticky top-0 z-40 pb-6 pt-2 -mx-6 px-6">
               <SearchInput
                 query={searchQuery}
                 onQueryChange={setSearchQuery}

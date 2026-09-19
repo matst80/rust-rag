@@ -56,6 +56,7 @@ import type {
   CodeFileDetail,
   CodeSearchHit,
   CodeSearchRequest,
+  CodeUploadResult,
   HarnessTreeResponse,
   TokenCountResponse,
 } from "./types"
@@ -193,10 +194,13 @@ async function request<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData
   const response = await fetch(url, {
     ...options,
     headers: {
-      "Content-Type": "application/json",
+      // FormData bodies must set their own multipart boundary — don't force JSON.
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...options.headers,
     },
   })
@@ -1094,5 +1098,23 @@ export async function searchCode(
   return request<CodeSearchHit[]>("/api/code/search", {
     method: "POST",
     body: JSON.stringify(req),
+  })
+}
+
+// Upload a repo's `.codesearch/codesearch.db` snapshot; the server parses the
+// sqlite file (symbols + 384-dim float32 embeddings + calls) and replaces
+// that repo's rows in Postgres.
+export async function uploadCodeRepo(
+  name: string,
+  file: File,
+  rootPath?: string
+): Promise<CodeUploadResult> {
+  const form = new FormData()
+  form.append("repo", name)
+  if (rootPath) form.append("root_path", rootPath)
+  form.append("file", file)
+  return request<CodeUploadResult>("/api/code/upload", {
+    method: "POST",
+    body: form,
   })
 }

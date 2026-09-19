@@ -88,13 +88,12 @@ export function HeaderSearch() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex items-center gap-2 h-7 px-2.5 rounded border border-border bg-muted/30 hover:bg-muted/60 text-muted-foreground hover:text-foreground text-xs font-mono transition-colors shadow-2xs"
+        className="flex h-9 w-full max-w-2xl items-center gap-2.5 rounded-md border border-border bg-muted/40 px-3.5 text-sm text-muted-foreground shadow-2xs transition-colors hover:border-primary/40 hover:bg-muted/70 hover:text-foreground"
         title="Search entries (⌘K or /)"
       >
-        <Search className="size-3.5 opacity-60" />
-        <span className="hidden md:inline">Quick search...</span>
-        <span className="md:hidden">Search</span>
-        <kbd className="hidden md:inline-flex items-center gap-0.5 rounded bg-background border border-border/80 px-1.5 py-0.5 text-[9px] font-sans font-semibold text-muted-foreground">
+        <Search className="size-4 shrink-0 opacity-60" />
+        <span className="flex-1 truncate text-left">Quick search…</span>
+        <kbd className="hidden shrink-0 items-center gap-0.5 rounded border border-border/80 bg-background px-1.5 py-0.5 font-sans text-[10px] font-semibold text-muted-foreground sm:inline-flex">
           ⌘K
         </kbd>
       </button>

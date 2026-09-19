@@ -28,16 +28,16 @@ export function NewEntryClient({ defaultTab = "manual" }: NewEntryClientProps) {
   }
 
   return (
-    <div className="mx-auto w-full max-w-2xl p-4 md:py-8">
+    <div className="mx-auto w-full max-w-2xl md:max-w-4xl p-4 md:py-8">
       {/* Unified Header */}
       <div className="mb-6 flex items-center gap-4">
-        <Button variant="ghost" size="icon" asChild>
+        <Button variant="ghost" size="icon" asChild className="shrink-0">
           <Link href="/entries">
             <ArrowLeft className="size-4" />
           </Link>
         </Button>
         <div>
-          <h1 className="text-2xl font-bold">New Entry</h1>
+          <h1 className="text-2xl font-bold tracking-tight">New Entry</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
             {tab === "manual" && "Create a new knowledge base entry manually"}
             {tab === "image" && "Extract and index content from an image using a multimodal model"}
@@ -47,7 +47,7 @@ export function NewEntryClient({ defaultTab = "manual" }: NewEntryClientProps) {
       </div>
 
       {/* Mode Switcher */}
-      <div className="mb-6 p-1 bg-muted/65 border border-border rounded-xl flex gap-1">
+      <div className="mb-6 p-1 bg-muted/65 border border-border rounded-xl flex gap-1 shadow-sm">
         <button
           onClick={() => handleTabChange("manual")}
           className={cn(

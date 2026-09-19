@@ -2,7 +2,6 @@
 
 import { Suspense } from "react"
 import { useSearchParams } from "next/navigation"
-import { AppHeader } from "@/components/app-header"
 import { EntryTree } from "@/components/wiki/entry-tree"
 
 function WikiInner() {
@@ -16,12 +15,9 @@ function WikiInner() {
 export default function WikiPage() {
   return (
     <>
-      <AppHeader />
-      <main>
         <Suspense fallback={null}>
           <WikiInner />
         </Suspense>
-      </main>
     </>
   )
 }

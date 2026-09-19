@@ -1,4 +1,3 @@
-import { AppHeader } from "@/components/app-header"
 import { EntriesBrowser } from "@/components/entries/entries-browser"
 
 export const metadata = {
@@ -9,10 +8,7 @@ export const metadata = {
 export default function EntriesPage() {
   return (
     <>
-      <AppHeader />
-      <main>
         <EntriesBrowser />
-      </main>
     </>
   )
 }

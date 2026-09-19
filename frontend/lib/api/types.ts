@@ -705,6 +705,16 @@ export interface CodeSearchRequest {
   limit?: number;
 }
 
+// Response of POST /api/code/upload (codesearch.db snapshot merge)
+export interface CodeUploadResult {
+  repo: string;
+  files: number;
+  symbols: number;
+  symbols_skipped: number;
+  calls: number;
+  source_version: string;
+}
+
 // --- Harness (Grill) graph domain ---
 
 export type HarnessBadge = "green" | "yellow" | "red";
@@ -774,6 +784,8 @@ export interface HarnessTreeEdge {
   from_item_id: string;
   to_item_id: string;
   relation: string | null;
+  /** Server-computed: whether this edge nests to_item_id under from_item_id in the cockpit tree. */
+  nests: boolean;
 }
 
 /**
