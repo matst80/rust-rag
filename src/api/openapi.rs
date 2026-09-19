@@ -51,7 +51,7 @@ use crate::api::{
     AnalyzeEntryParams, SearchRequest, SearchResponse, StoreAnalysis, StoreRequest, StoreResponse,
 };
 use crate::db::{
-    CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeUploadStats,
+    CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeSymbolGraph, CodeUploadStats,
     DuplicateEdgeGroup,
 };
 use crate::notify::SendResult;
@@ -798,6 +798,25 @@ pub fn openapi_document() -> Value {
                 "get_code_file",
                 "get",
                 "File detail with symbol outline",
+                "Code",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/code/repos/{name}/symbol-graph",
+        Op {
+            params: vec![
+                q("path", "File that defines the symbol."),
+                q("symbol", "Symbol (function/method) name."),
+                qnum("limit", "Max callers and callees each (default 24)."),
+            ],
+            response: Some(sref!(components, "CodeSymbolGraph", CodeSymbolGraph)),
+            ..op(
+                "get_code_symbol_graph",
+                "get",
+                "Call-graph neighborhood of a symbol (callers + callees)",
                 "Code",
             )
         },

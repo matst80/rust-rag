@@ -23,7 +23,7 @@ Full architecture lives in entry `rust_rag_project_overview` (source `knowledge`
 
 ## Code search (`/api/code/*`, `src/db/code_store.rs`)
 
-Per-repo `.codesearch/codesearch.db` snapshots (external sqlite + sqlite-vec indexer, symbol-centric) are uploaded via `POST /api/code/upload` and merged into Postgres tables `code_repos` / `code_files` / `code_symbols` / `code_calls` (migration 0018; re-upload of a repo name replaces its rows). Symbols carry pre-computed **all-MiniLM-L6-v2** 384-dim float32 embeddings; queries are embedded server-side by a second, CPU-pinned ONNX session (`RAG_CODE_MODEL_PATH` + `RAG_CODE_TOKENIZER_PATH`, mean pooling) — never the main bge-m3 embedder. Postgres-only: the routes 503 without `RAG_DATABASE_URL`. The frontend page is `/code`.
+Per-repo `.codesearch/codesearch.db` snapshots (external sqlite + sqlite-vec indexer, symbol-centric) are uploaded via `POST /api/code/upload` and merged into Postgres tables `code_repos` / `code_files` / `code_symbols` / `code_calls` (migration 0018; re-upload of a repo name replaces its rows). Symbols carry pre-computed **all-MiniLM-L6-v2** 384-dim float32 embeddings; queries are embedded server-side by a second, CPU-pinned ONNX session (`RAG_CODE_MODEL_PATH` + `RAG_CODE_TOKENIZER_PATH`, mean pooling) — never the main bge-m3 embedder. `GET /api/code/repos/{name}/symbol-graph?path=&symbol=` resolves a symbol's callers/callees from `code_calls` (name-based edges, same-file preference; builtins land in `unresolved_callees`). Postgres-only: the routes 503 without `RAG_DATABASE_URL`. The frontend page is `/code` (search + file browser + reagraph call-graph sheet).
 
 ## Build / run
 

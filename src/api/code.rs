@@ -10,7 +10,7 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,8 @@ use tokio::task::spawn_blocking;
 
 use super::{ApiError, AppState};
 use crate::db::{
-    CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, parse_codesearch_db,
+    CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeSymbolGraph,
+    parse_codesearch_db,
 };
 
 /// Snapshot size cap. Whole-repo sqlite files are a few MB; this only
@@ -217,4 +218,36 @@ pub async fn get_code_file(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("`{path}` not found in `{name}`")))?;
     Ok(Json(detail))
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CodeSymbolGraphQuery {
+    /// File that defines the symbol (disambiguates same-named symbols).
+    pub path: String,
+    /// Symbol (function/method) name.
+    pub symbol: String,
+    /// Max callers and callees each (default 24, clamp 1..64).
+    pub limit: Option<usize>,
+}
+
+/// GET /api/code/repos/{name}/symbol-graph?path=&symbol= — resolved
+/// call-graph neighborhood of one symbol (callers + callees) from the
+/// `code_calls` edge table.
+pub async fn get_code_symbol_graph(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<CodeSymbolGraphQuery>,
+) -> Result<Json<CodeSymbolGraph>, ApiError> {
+    let store = code_store(&state)?;
+    let (repo, path, symbol, limit) = (name, q.path, q.symbol, q.limit.unwrap_or(24));
+    let (err_repo, err_path, err_symbol) = (repo.clone(), path.clone(), symbol.clone());
+    let graph = spawn_blocking(move || store.symbol_graph(&repo, &path, &symbol, limit))
+        .await?
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "symbol `{err_symbol}` not found in `{err_repo}/{err_path}`"
+            ))
+        })?;
+    Ok(Json(graph))
 }

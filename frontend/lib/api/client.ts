@@ -56,6 +56,7 @@ import type {
   CodeFileDetail,
   CodeSearchHit,
   CodeSearchRequest,
+  CodeSymbolGraph,
   CodeUploadResult,
   HarnessTreeResponse,
   TokenCountResponse,
@@ -1099,6 +1100,19 @@ export async function searchCode(
     method: "POST",
     body: JSON.stringify(req),
   })
+}
+
+// Call-graph neighborhood of one symbol (callers + callees).
+export async function getCodeSymbolGraph(
+  name: string,
+  path: string,
+  symbol: string,
+  limit = 24
+): Promise<CodeSymbolGraph> {
+  const params = new URLSearchParams({ path, symbol, limit: String(limit) })
+  return request<CodeSymbolGraph>(
+    `/api/code/repos/${encodeURIComponent(name)}/symbol-graph?${params.toString()}`
+  )
 }
 
 // Upload a repo's `.codesearch/codesearch.db` snapshot; the server parses the

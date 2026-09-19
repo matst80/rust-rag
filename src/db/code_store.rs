@@ -95,6 +95,31 @@ pub struct CodeSearchHit {
     pub score: f32,
 }
 
+/// One node in a symbol call graph: a resolved row from `code_symbols`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CodeSymbolRef {
+    pub path: String,
+    pub name: String,
+    pub qualname: String,
+    pub kind: String,
+    pub line: i32,
+    pub end_line: i32,
+    pub signature: Option<String>,
+}
+
+/// Call-graph neighborhood of one symbol: outgoing call sites resolved to
+/// indexed symbols (callees) and incoming call sites (callers).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CodeSymbolGraph {
+    pub repo: String,
+    pub symbol: CodeSymbolRef,
+    pub callees: Vec<CodeSymbolRef>,
+    pub callers: Vec<CodeSymbolRef>,
+    /// Outgoing callee names that matched no indexed symbol (dynamic
+    /// dispatch, stdlib, external crates). Distinct, call-order.
+    pub unresolved_callees: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeUploadStats {
     pub repo: String,
@@ -703,6 +728,156 @@ impl CodeStore {
         })
     }
 
+    /// Call-graph neighborhood for one symbol. `code_calls` rows carry
+    /// simple names, not symbol ids — the external indexer doesn't resolve
+    /// callees — so edges are matched by name and disambiguated by preferring
+    /// candidates in the same file. Callers are rows whose `callee_name`
+    /// equals this symbol's name.
+    pub fn symbol_graph(
+        &self,
+        repo: &str,
+        path: &str,
+        symbol: &str,
+        limit: usize,
+    ) -> Result<Option<CodeSymbolGraph>> {
+        let limit = limit.clamp(1, 64) as i64;
+        let pool = self.pool.clone();
+        let repo = repo.to_owned();
+        let path = path.to_owned();
+        let symbol = symbol.to_owned();
+
+        self.block(async move {
+            let client = pool
+                .get()
+                .await
+                .context("acquiring postgres connection")?;
+
+            let anchor_row = client
+                .query_opt(
+                    "SELECT path, name, qualname, kind, line, end_line, signature \
+                     FROM code_symbols \
+                     WHERE repo = $1 AND path = $2 AND (name = $3 OR qualname = $3) \
+                     ORDER BY line LIMIT 1",
+                    &[&repo, &path, &symbol],
+                )
+                .await?;
+            let Some(anchor_row) = anchor_row else {
+                return Ok(None);
+            };
+            let anchor = symbol_ref_from_row(&anchor_row);
+
+            // Outgoing call sites: calls made from inside this symbol. The
+            // indexer records the caller's simple name, sometimes qualified.
+            let callee_rows = client
+                .query(
+                    "SELECT callee_name FROM code_calls \
+                     WHERE repo = $1 AND caller_path = $2 \
+                       AND (caller_symbol = $3 OR caller_symbol = $4 \
+                            OR caller_symbol LIKE '%.' || $3 \
+                            OR caller_symbol LIKE '%::' || $3) \
+                     ORDER BY call_line LIMIT 512",
+                    &[&repo, &path, &anchor.name, &anchor.qualname],
+                )
+                .await?;
+            let mut callee_names: Vec<String> = Vec::new();
+            for row in &callee_rows {
+                let name: String = row.get("callee_name");
+                if !name.is_empty() && !callee_names.contains(&name) {
+                    callee_names.push(name);
+                }
+            }
+
+            // Incoming call sites: any call whose callee name matches.
+            let caller_rows = client
+                .query(
+                    "SELECT DISTINCT caller_path, caller_symbol FROM code_calls \
+                     WHERE repo = $1 AND callee_name = $2 \
+                     ORDER BY caller_path, caller_symbol LIMIT 512",
+                    &[&repo, &anchor.name],
+                )
+                .await?;
+
+            let callee_candidates = resolve_names(&client, &repo, &callee_names).await?;
+            let caller_base_names: Vec<String> = caller_rows
+                .iter()
+                .map(|r| {
+                    let raw: String = r.get("caller_symbol");
+                    raw.rsplit(|c| c == '.' || c == ':')
+                        .next()
+                        .unwrap_or(&raw)
+                        .to_owned()
+                })
+                .filter(|n| !n.is_empty())
+                .collect();
+            let caller_candidates =
+                resolve_names(&client, &repo, &caller_base_names).await?;
+
+            let same_file_rank =
+                |r: &tokio_postgres::Row| (r.get::<_, String>("path") != path, r.get::<_, String>("path"));
+            let is_dup = |list: &[CodeSymbolRef], r: &CodeSymbolRef| {
+                list.iter()
+                    .any(|c| c.path == r.path && c.name == r.name && c.line == r.line)
+            };
+            let is_anchor = |r: &CodeSymbolRef| {
+                r.path == anchor.path && r.name == anchor.name && r.line == anchor.line
+            };
+
+            let mut callees = Vec::new();
+            let mut unresolved_callees = Vec::new();
+            for name in &callee_names {
+                let Some(row) = callee_candidates
+                    .iter()
+                    .filter(|r| r.get::<_, String>("name") == *name)
+                    .min_by_key(|r| same_file_rank(r))
+                else {
+                    if unresolved_callees.len() < 24 {
+                        unresolved_callees.push(name.clone());
+                    }
+                    continue;
+                };
+                let r = symbol_ref_from_row(row);
+                if is_anchor(&r) {
+                    continue; // recursion renders as the anchor node itself
+                }
+                if !is_dup(&callees, &r) && callees.len() < limit as usize {
+                    callees.push(r);
+                }
+            }
+
+            let mut callers = Vec::new();
+            for row in &caller_rows {
+                let caller_path: String = row.get("caller_path");
+                let raw_name: String = row.get("caller_symbol");
+                let base = raw_name
+                    .rsplit(|c| c == '.' || c == ':')
+                    .next()
+                    .unwrap_or(&raw_name);
+                let Some(r) = caller_candidates
+                    .iter()
+                    .filter(|r| r.get::<_, String>("name") == base)
+                    .min_by_key(|r| (r.get::<_, String>("path") != caller_path, r.get::<_, String>("path")))
+                    .map(symbol_ref_from_row)
+                else {
+                    continue;
+                };
+                if is_anchor(&r) {
+                    continue;
+                }
+                if !is_dup(&callers, &r) && callers.len() < limit as usize {
+                    callers.push(r);
+                }
+            }
+
+            Ok(Some(CodeSymbolGraph {
+                repo,
+                symbol: anchor,
+                callees,
+                callers,
+                unresolved_callees,
+            }))
+        })
+    }
+
     /// Cosine KNN over code symbols. `embedding` must be a query vector from
     /// the same all-MiniLM-L6-v2 model the snapshots were embedded with.
     pub fn search(
@@ -766,6 +941,37 @@ impl CodeStore {
                 .collect())
         })
     }
+}
+
+fn symbol_ref_from_row(row: &tokio_postgres::Row) -> CodeSymbolRef {
+    CodeSymbolRef {
+        path: row.get("path"),
+        name: row.get("name"),
+        qualname: row.get("qualname"),
+        kind: row.get("kind"),
+        line: row.get("line"),
+        end_line: row.get("end_line"),
+        signature: row.get("signature"),
+    }
+}
+
+/// Fetch `code_symbols` rows matching any of `names` (simple-name match) for
+/// call-edge resolution. Empty input short-circuits to no rows.
+async fn resolve_names(
+    client: &tokio_postgres::Client,
+    repo: &str,
+    names: &[String],
+) -> Result<Vec<tokio_postgres::Row>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(client
+        .query(
+            "SELECT path, name, qualname, kind, line, end_line, signature \
+             FROM code_symbols WHERE repo = $1 AND name = ANY($2::text[])",
+            &[&repo.to_owned(), &names.to_vec()],
+        )
+        .await?)
 }
 
 fn file_meta_from_row(row: &tokio_postgres::Row) -> CodeFileMeta {

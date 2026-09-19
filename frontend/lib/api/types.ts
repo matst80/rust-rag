@@ -705,6 +705,28 @@ export interface CodeSearchRequest {
   limit?: number;
 }
 
+// Node of GET /api/code/repos/{name}/symbol-graph
+export interface CodeSymbolRef {
+  path: string;
+  name: string;
+  qualname: string;
+  kind: string;
+  line: number;
+  end_line: number;
+  signature?: string | null;
+}
+
+// Call-graph neighborhood of one symbol (callers + callees). Edges are
+// name-resolved from the code_calls table; callee names that matched no
+// indexed symbol land in unresolved_callees.
+export interface CodeSymbolGraph {
+  repo: string;
+  symbol: CodeSymbolRef;
+  callees: CodeSymbolRef[];
+  callers: CodeSymbolRef[];
+  unresolved_callees: string[];
+}
+
 // Response of POST /api/code/upload (codesearch.db snapshot merge)
 export interface CodeUploadResult {
   repo: string;

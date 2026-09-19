@@ -98,6 +98,10 @@ pub fn router(state: AppState) -> Router {
             "/api/code/repos/{name}/files/{*path}",
             get(code::get_code_file),
         )
+        .route(
+            "/api/code/repos/{name}/symbol-graph",
+            get(code::get_code_symbol_graph),
+        )
         .route("/api/attachments", post(attachments::upload_multipart))
         .route(
             "/api/attachments/from-url",
