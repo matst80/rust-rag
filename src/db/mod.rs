@@ -29,9 +29,9 @@ use schema::{initialize_schema, register_sqlite_vec};
 
 pub use code_store::{
     CODE_EMBEDDING_DIM, CODE_EMBEDDING_MODEL, CODE_EMBEDDING_VERSION, CodeFileDetail, CodeFileMeta,
-    CodeOutlineEntry, CodeRepoSummary, CodeSearchHit, CodeStore, CodeSymbolGraph, CodeSymbolRef,
-    CodeTodoEntry, CodeUploadStats, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo,
-    ParsedCodeSymbol, parse_codesearch_db,
+    CodeGraphEdge, CodeGraphNode, CodeOutlineEntry, CodeRepoSummary, CodeSearchHit, CodeStore,
+    CodeSymbolGraph, CodeSymbolRef, CodeTodoEntry, CodeUploadStats, ParsedCodeCall, ParsedCodeFile,
+    ParsedCodeRepo, ParsedCodeSymbol, parse_codesearch_db,
 };
 
 /// Reciprocal Rank Fusion ranking constant. 60 is the value from the original

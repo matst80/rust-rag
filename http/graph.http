@@ -29,3 +29,9 @@ content-type: application/json
 
 ### Delete a manual edge
 DELETE {{baseUrl}}/admin/graph/edges/manual:replace-me
+
+### Code symbol graph — 1 hop (direct callers + callees)
+GET {{baseUrl}}/api/code/repos/my-repo/symbol-graph?path=src/main.rs&symbol=main&depth=1
+
+### Code symbol graph — multi-hop BFS (depth up to 5, node cap 500)
+GET {{baseUrl}}/api/code/repos/my-repo/symbol-graph?path=src/main.rs&symbol=main&depth=3&max_nodes=200&limit=24

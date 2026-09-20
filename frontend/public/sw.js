@@ -6,9 +6,11 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(clients.claim());
 });
 
-self.addEventListener('fetch', (event) => {
-  // Pass-through for now, just to satisfy PWA requirements
-  event.respondWith(fetch(event.request));
+self.addEventListener('fetch', () => {
+  // Pass-through for now, just to satisfy PWA requirements. Deliberately no
+  // respondWith(): re-dispatching `fetch(event.request)` from the worker turns
+  // any network hiccup into a rejected promise and a hard network-error page;
+  // the browser's default handling recovers on retry instead.
 });
 
 // Web Push handler. Payload shape (set by crate::notify):

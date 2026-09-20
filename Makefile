@@ -130,8 +130,12 @@ KUBECTL_NS := $(if $(strip $(K8S_NAMESPACE)),-n $(K8S_NAMESPACE))
 K8S_CUDA_DEPLOYMENT ?= rust-rag-cuda
 K8S_FRONTEND_DEPLOYMENT ?= rust-rag-frontend
 
+# Immutable deploy ID baked into the frontend bundle and used as the RUM
+# source-map upload release; must match between build and upload.
+NEXT_PUBLIC_APP_RELEASE ?= $(shell git rev-parse --short HEAD)$(shell git diff --quiet || echo -dirty)
 
-.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files mcp-inspector-local mcp-inspector-hosted android-deploy android-build
+
+.PHONY: help fetch-assets export-bge-m3 export-bge-m3-sparse export-bge-reranker fetch-prod-snapshot migrate-prod cleanup-legacy-chunks backfill-section-paths e2e-local print-env fmt test verify check-env build build-cuda run run-pg run-baseline run-cuda eval tail-logs ontology-status ontology-edges docker-build-cuda docker-push-cuda docker-run-cuda frontend-docker-build frontend-docker-push frontend-docker-run frontend-upload-sourcemaps frontend-install frontend-dev frontend-prod docker-push-all k8s-namespace k8s-apply-cuda k8s-delete-cuda k8s-apply-frontend k8s-delete-frontend k8s-apply-ingress k8s-delete-ingress k8s-apply-runtimeclass k8s-delete-runtimeclass k8s-apply-nvidia-plugin k8s-delete-nvidia-plugin k8s-apply-all k8s-delete-all rollout rollout-cuda rollout-frontend rollout-status push-and-rollout store-knowledge store-memory search-knowledge search-memory admin-categories admin-items graph-status graph-rebuild graph-neighborhood smoke http-files mcp-inspector-local mcp-inspector-hosted android-deploy android-build
 
 help:
 	@printf '%s\n' \
@@ -164,6 +168,7 @@ help:
 		'  make frontend-prod         Build and start Next.js on $(FRONTEND_DEV_HOST):$(FRONTEND_DEV_PORT)' \
 		'  make frontend-docker-build Build the Next.js frontend container image' \
 		'  make frontend-docker-push  Push the Next.js frontend container image' \
+		'  make frontend-upload-sourcemaps  Upload RUM source maps for the built release' \
 		'  make frontend-docker-run   Run the frontend container (override RAG_API_URL as needed)' \
 		'  make docker-push-all       Push CUDA backend + frontend images' \
 		'  make k8s-apply-cuda            Apply the CUDA backend Deployment' \
@@ -609,18 +614,24 @@ docker-run-cuda:
 ## local layer cache. On non-amd64: buildx with QEMU for amd64 target.
 frontend-docker-build:
 ifeq ($(HOST_ARCH),x86_64)
-	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+	docker build --build-arg "NEXT_PUBLIC_APP_RELEASE=$(NEXT_PUBLIC_APP_RELEASE)" -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
 else
-	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+	docker buildx build --platform linux/amd64 --build-arg "NEXT_PUBLIC_APP_RELEASE=$(NEXT_PUBLIC_APP_RELEASE)" -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
 endif
 
 frontend-docker-push:
 ifeq ($(HOST_ARCH),x86_64)
-	docker build -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
+	docker build --build-arg "NEXT_PUBLIC_APP_RELEASE=$(NEXT_PUBLIC_APP_RELEASE)" -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" "$(CURDIR)"
 	docker push "$(FRONTEND_IMAGE_NAME)"
 else
-	docker buildx build --platform linux/amd64 -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
+	docker buildx build --platform linux/amd64 --build-arg "NEXT_PUBLIC_APP_RELEASE=$(NEXT_PUBLIC_APP_RELEASE)" -f "$(FRONTEND_DIR)/Dockerfile" -t "$(FRONTEND_IMAGE_NAME)" --push "$(CURDIR)"
 endif
+	$(MAKE) frontend-upload-sourcemaps
+
+# Upload browser source maps from the exact built image so RUM error stacks
+# are de-obfuscated (https://otel.k6n.net/instrumentation.md).
+frontend-upload-sourcemaps:
+	bash scripts/upload-sourcemaps.sh "$(NEXT_PUBLIC_APP_RELEASE)" "$(FRONTEND_IMAGE_NAME)"
 
 frontend-docker-run:
 	docker run --rm \

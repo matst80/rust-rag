@@ -61,6 +61,7 @@ import type {
   HarnessTreeResponse,
   TokenCountResponse,
 } from "./types"
+import { rumTraceHeaders } from "@/lib/rum"
 
 const API_BASE_URL = ""
 
@@ -202,6 +203,8 @@ async function request<T>(
     headers: {
       // FormData bodies must set their own multipart boundary — don't force JSON.
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
+      // RUM trace context so frontend requests link to backend traces.
+      ...rumTraceHeaders(),
       ...options.headers,
     },
   })
@@ -291,6 +294,7 @@ export async function streamChatCompletions(
     headers: {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
+      ...rumTraceHeaders(),
     },
     body: JSON.stringify({
       ...input,
@@ -375,6 +379,7 @@ export async function streamAssistedQuery(
     headers: {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
+      ...rumTraceHeaders(),
     },
     body: JSON.stringify(input),
     signal: options.signal,
@@ -1102,14 +1107,23 @@ export async function searchCode(
   })
 }
 
-// Call-graph neighborhood of one symbol (callers + callees).
+// Call-graph neighborhood of one symbol, BFS-expanded depth hops in both
+// directions (callers + callees).
 export async function getCodeSymbolGraph(
   name: string,
   path: string,
   symbol: string,
-  limit = 24
+  limit = 24,
+  depth = 1,
+  maxNodes = 200
 ): Promise<CodeSymbolGraph> {
-  const params = new URLSearchParams({ path, symbol, limit: String(limit) })
+  const params = new URLSearchParams({
+    path,
+    symbol,
+    limit: String(limit),
+    depth: String(depth),
+    max_nodes: String(maxNodes),
+  })
   return request<CodeSymbolGraph>(
     `/api/code/repos/${encodeURIComponent(name)}/symbol-graph?${params.toString()}`
   )

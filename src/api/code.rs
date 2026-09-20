@@ -16,6 +16,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 
+use super::error::{validate_graph_depth, validate_graph_limit};
 use super::{ApiError, AppState};
 use crate::db::{
     CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeSymbolGraph,
@@ -226,28 +227,39 @@ pub struct CodeSymbolGraphQuery {
     pub path: String,
     /// Symbol (function/method) name.
     pub symbol: String,
-    /// Max callers and callees each (default 24, clamp 1..64).
+    /// Max callers and callees per expanded symbol (default 24, clamp 1..64).
     pub limit: Option<usize>,
+    /// BFS hops from the anchor, both directions (default 1, max 5).
+    pub depth: Option<usize>,
+    /// Max total nodes in the returned graph incl. the anchor (default 200,
+    /// max 500).
+    pub max_nodes: Option<usize>,
 }
 
-/// GET /api/code/repos/{name}/symbol-graph?path=&symbol= — resolved
-/// call-graph neighborhood of one symbol (callers + callees) from the
-/// `code_calls` edge table.
+/// GET /api/code/repos/{name}/symbol-graph?path=&symbol=&depth= — resolved,
+/// multi-hop call-graph neighborhood of one symbol (callers + callees) from
+/// the `code_calls` edge table.
 pub async fn get_code_symbol_graph(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<CodeSymbolGraphQuery>,
 ) -> Result<Json<CodeSymbolGraph>, ApiError> {
+    let depth = q.depth.unwrap_or(1);
+    let max_nodes = q.max_nodes.unwrap_or(200);
+    validate_graph_depth(depth)?;
+    validate_graph_limit(max_nodes)?;
     let store = code_store(&state)?;
     let (repo, path, symbol, limit) = (name, q.path, q.symbol, q.limit.unwrap_or(24));
     let (err_repo, err_path, err_symbol) = (repo.clone(), path.clone(), symbol.clone());
-    let graph = spawn_blocking(move || store.symbol_graph(&repo, &path, &symbol, limit))
-        .await?
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "symbol `{err_symbol}` not found in `{err_repo}/{err_path}`"
-            ))
-        })?;
+    let graph = spawn_blocking(move || {
+        store.symbol_graph(&repo, &path, &symbol, limit, depth, max_nodes)
+    })
+    .await?
+    .map_err(ApiError::Internal)?
+    .ok_or_else(|| {
+        ApiError::NotFound(format!(
+            "symbol `{err_symbol}` not found in `{err_repo}/{err_path}`"
+        ))
+    })?;
     Ok(Json(graph))
 }

@@ -25,10 +25,20 @@ COPY frontend ./frontend
 
 WORKDIR /app/frontend
 
+# Immutable deploy ID baked into the client bundle; must exactly match the
+# source-map upload release (scripts/upload-sourcemaps.sh).
+ARG NEXT_PUBLIC_APP_RELEASE=dev
+
 ENV NEXT_TELEMETRY_DISABLED=1 \
-	CI=true
+	CI=true \
+	NEXT_PUBLIC_APP_RELEASE=${NEXT_PUBLIC_APP_RELEASE}
 
 RUN pnpm build
+
+# Build-stage snapshot used to extract browser source maps from the exact
+# deployed build: docker build --target sourcemaps, then docker cp the
+# /app/frontend/.next/static tree out and upload the *.js.map files.
+FROM builder AS sourcemaps
 
 FROM node:22-slim AS runner
 
@@ -45,6 +55,9 @@ ENV NODE_ENV=production \
 COPY --from=builder /app/frontend/public ./frontend/public
 COPY --from=builder --chown=nextjs:nodejs /app/frontend/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/frontend/.next/static ./frontend/.next/static
+
+# Maps were uploaded from the sourcemaps stage; don't serve them publicly.
+RUN find /app/frontend/.next -name "*.map" -delete
 
 USER nextjs
 

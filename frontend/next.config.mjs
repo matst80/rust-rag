@@ -12,6 +12,10 @@ const nextConfig = {
   outputFileTracingRoot: path.join(__dirname, '..'),
   allowedDevOrigins: ["127.0.0.1", "10.10.11.135", "rag.k6n.net"],
   transpilePackages: ["@rust-rag/llm"],
+  // Emit .map files next to client chunks so they can be uploaded to the RUM
+  // backend (scripts/upload-sourcemaps.sh); they are stripped from the served
+  // image in the Dockerfile runner stage.
+  productionBrowserSourceMaps: true,
   // Native onnxruntime-node binding resolves libonnxruntime.so.1 via a relative
   // path; bundling it (Turbopack/webpack) breaks that lookup. Keep it (and its
   // caller) external so it's require()'d straight from node_modules.

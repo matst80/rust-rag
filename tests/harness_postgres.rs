@@ -14,8 +14,9 @@ use rust_rag::api::harness::{
 };
 use rust_rag::db::postgres::{PostgresVectorStore, connect};
 use rust_rag::db::{
-    GraphConfig, GraphEdgeType, ItemRecord, ListItemsRequest, ManualEdgeInput, SortOrder,
-    VectorStore,
+    CODE_EMBEDDING_DIM, CodeStore, CodeSymbolGraph, GraphConfig, GraphEdgeType, ItemRecord,
+    ListItemsRequest, ManualEdgeInput, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo,
+    ParsedCodeSymbol, SortOrder, VectorStore,
 };
 
 use testcontainers::core::{ContainerPort, WaitFor};
@@ -46,6 +47,7 @@ fn item(id: &str, type_name: &str, data: serde_json::Value) -> ItemRecord {
 async fn start_postgres() -> (
     testcontainers::ContainerAsync<GenericImage>,
     PostgresVectorStore,
+    CodeStore,
 ) {
     let image = GenericImage::new("pgvector/pgvector", "pg16")
         .with_wait_for(WaitFor::message_on_stderr(
@@ -73,14 +75,15 @@ async fn start_postgres() -> (
         }
     };
     let store = PostgresVectorStore::new(
-        pool,
+        pool.clone(),
         tokio::runtime::Handle::current(),
         GraphConfig {
             enabled: true,
             ..Default::default()
         },
     );
-    (container, store)
+    let code_store = CodeStore::new(pool, tokio::runtime::Handle::current());
+    (container, store, code_store)
 }
 
 /// Shared scenario: plan --BREAKS_INTO--> sprint --CONTAINS_TODO--> todo,
@@ -153,7 +156,7 @@ async fn harness_nodes_edges_and_tree_on_postgres() {
     // call must run off the async reactor — same as the production handlers.
     // The container handle is moved into the blocking task so the container
     // stays alive (and is removed) only when the test body finishes.
-    let (container, store) = start_postgres().await;
+    let (container, store, _code_store) = start_postgres().await;
     tokio::task::spawn_blocking(move || {
         let _container = container;
         seed_scenario(&store).expect("seeding scenario");
@@ -229,6 +232,223 @@ async fn harness_nodes_edges_and_tree_on_postgres() {
         .unwrap();
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].data.as_ref().unwrap()["title"], "Build cache v2");
+    })
+    .await
+    .expect("blocking test body");
+}
+
+/// Synthetic `code_symbols` row for code-search graph tests.
+fn code_symbol(path: &str, line: i32, name: &str) -> ParsedCodeSymbol {
+    ParsedCodeSymbol {
+        path: path.to_owned(),
+        line,
+        end_line: line + 5,
+        kind: "function".to_owned(),
+        name: name.to_owned(),
+        qualname: name.to_owned(),
+        signature: format!("fn {name}()"),
+        doc: String::new(),
+        lang: "rust".to_owned(),
+        text: String::new(),
+        visibility: "public".to_owned(),
+        exemplar: String::new(),
+        hotpath: String::new(),
+        embedding: vec![0.05f32; CODE_EMBEDDING_DIM],
+    }
+}
+
+/// Synthetic `code_calls` row for code-search graph tests.
+fn code_call(
+    caller_path: &str,
+    caller_symbol: &str,
+    call_line: i32,
+    callee_name: &str,
+) -> ParsedCodeCall {
+    ParsedCodeCall {
+        caller_path: caller_path.to_owned(),
+        caller_symbol: caller_symbol.to_owned(),
+        caller_line: call_line,
+        callee_name: callee_name.to_owned(),
+        callee_operand: String::new(),
+        call_line,
+        call_column: 4,
+    }
+}
+
+fn node_ids(g: &CodeSymbolGraph) -> Vec<&str> {
+    g.nodes.iter().map(|n| n.symbol.name.as_str()).collect()
+}
+
+fn edge_ids(g: &CodeSymbolGraph) -> Vec<(String, String)> {
+    let mut v: Vec<_> = g
+        .edges
+        .iter()
+        .map(|e| (e.from.name.clone(), e.to.name.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Code-search scenario: call chain a -> b -> c -> d inside src/a.rs, plus
+/// x (in src/x.rs) calling a. Anchoring on `a` must walk the whole chain in
+/// both directions as depth grows.
+#[tokio::test]
+#[ignore]
+async fn code_symbol_graph_multi_hop_on_postgres() {
+    let (container, _store, code) = start_postgres().await;
+    tokio::task::spawn_blocking(move || {
+        let _container = container;
+
+        let parsed = ParsedCodeRepo {
+            source_version: "test".to_owned(),
+            files: vec![
+                ParsedCodeFile { path: "src/a.rs".to_owned(), size_bytes: 400, mtime: 1 },
+                ParsedCodeFile { path: "src/x.rs".to_owned(), size_bytes: 100, mtime: 1 },
+            ],
+            symbols: vec![
+                code_symbol("src/a.rs", 1, "a"),
+                code_symbol("src/a.rs", 10, "b"),
+                code_symbol("src/a.rs", 20, "c"),
+                code_symbol("src/a.rs", 30, "d"),
+                code_symbol("src/x.rs", 1, "x"),
+            ],
+            calls: vec![
+                code_call("src/a.rs", "a", 3, "b"),
+                code_call("src/a.rs", "b", 13, "c"),
+                code_call("src/a.rs", "c", 23, "d"),
+                code_call("src/x.rs", "x", 5, "a"),
+            ],
+            symbols_skipped: 0,
+        };
+        code
+            .upsert_repo("code-graph-test", "/tmp/code-graph-test", parsed)
+            .expect("uploading snapshot");
+
+        // Depth 1: direct neighbors only — the pre-multi-hop behavior.
+        let g1 = code
+            .symbol_graph("code-graph-test", "src/a.rs", "a", 24, 1, 200)
+            .expect("depth-1 graph")
+            .expect("anchor found");
+        assert_eq!(g1.depth, 1);
+        assert_eq!(node_ids(&g1), vec!["a", "b", "x"]);
+        assert_eq!(g1.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(), vec![0, 1, 1]);
+        assert_eq!(
+            edge_ids(&g1),
+            vec![("a".to_owned(), "b".to_owned()), ("x".to_owned(), "a".to_owned())]
+        );
+        assert_eq!(
+            g1.callees.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert_eq!(
+            g1.callers.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            vec!["x"]
+        );
+
+        // Depth 3: the whole chain, each node at its minimum BFS depth. Edges
+        // rediscovered while expanding b/x/c must dedup against earlier hops.
+        let g3 = code
+            .symbol_graph("code-graph-test", "src/a.rs", "a", 24, 3, 200)
+            .expect("depth-3 graph")
+            .expect("anchor found");
+        assert_eq!(g3.depth, 3);
+        assert_eq!(node_ids(&g3), vec!["a", "b", "x", "c", "d"]);
+        assert_eq!(
+            g3.nodes
+                .iter()
+                .map(|n| (n.symbol.name.as_str(), n.depth))
+                .collect::<Vec<_>>(),
+            vec![("a", 0), ("b", 1), ("x", 1), ("c", 2), ("d", 3)]
+        );
+        assert_eq!(
+            edge_ids(&g3),
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("b".to_owned(), "c".to_owned()),
+                ("c".to_owned(), "d".to_owned()),
+                ("x".to_owned(), "a".to_owned()),
+            ]
+        );
+    })
+    .await
+    .expect("blocking test body");
+}
+
+/// Cycle scenario: a -> b -> c -> a (mutual recursion) with a tail c -> d and
+/// an external caller x -> a. The BFS must terminate: each symbol expands
+/// exactly once, cycle edges dedup, and even max depth (5) yields the same
+/// 5 distinct symbols — no runaway growth, tail d reached at depth 2.
+#[tokio::test]
+#[ignore]
+async fn code_symbol_graph_cycle_terminates_on_postgres() {
+    let (container, _store, code) = start_postgres().await;
+    tokio::task::spawn_blocking(move || {
+        let _container = container;
+
+        let parsed = ParsedCodeRepo {
+            source_version: "test".to_owned(),
+            files: vec![
+                ParsedCodeFile { path: "src/a.rs".to_owned(), size_bytes: 500, mtime: 1 },
+                ParsedCodeFile { path: "src/x.rs".to_owned(), size_bytes: 100, mtime: 1 },
+            ],
+            symbols: vec![
+                code_symbol("src/a.rs", 1, "a"),
+                code_symbol("src/a.rs", 10, "b"),
+                code_symbol("src/a.rs", 20, "c"),
+                code_symbol("src/a.rs", 30, "d"),
+                code_symbol("src/x.rs", 1, "x"),
+            ],
+            calls: vec![
+                code_call("src/a.rs", "a", 3, "b"),
+                code_call("src/a.rs", "b", 13, "c"),
+                code_call("src/a.rs", "c", 21, "a"), // cycle back to the anchor
+                code_call("src/a.rs", "c", 23, "d"),
+                code_call("src/x.rs", "x", 5, "a"),
+            ],
+            symbols_skipped: 0,
+        };
+        code
+            .upsert_repo("code-cycle-test", "/tmp/code-cycle-test", parsed)
+            .expect("uploading snapshot");
+
+        // Depth 1: callers of `a` include both x and c (the cycle edge).
+        let g1 = code
+            .symbol_graph("code-cycle-test", "src/a.rs", "a", 24, 1, 200)
+            .expect("depth-1 graph")
+            .expect("anchor found");
+        assert_eq!(node_ids(&g1), vec!["a", "b", "c", "x"]);
+        assert_eq!(
+            edge_ids(&g1),
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("c".to_owned(), "a".to_owned()),
+                ("x".to_owned(), "a".to_owned()),
+            ]
+        );
+
+        // Max depth over the cycle: still exactly 5 distinct symbols.
+        let g5 = code
+            .symbol_graph("code-cycle-test", "src/a.rs", "a", 24, 5, 200)
+            .expect("depth-5 graph")
+            .expect("anchor found");
+        assert_eq!(node_ids(&g5), vec!["a", "b", "c", "x", "d"]);
+        assert_eq!(
+            g5.nodes
+                .iter()
+                .map(|n| (n.symbol.name.as_str(), n.depth))
+                .collect::<Vec<_>>(),
+            vec![("a", 0), ("b", 1), ("c", 1), ("x", 1), ("d", 2)]
+        );
+        assert_eq!(
+            edge_ids(&g5),
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("b".to_owned(), "c".to_owned()),
+                ("c".to_owned(), "a".to_owned()),
+                ("c".to_owned(), "d".to_owned()),
+                ("x".to_owned(), "a".to_owned()),
+            ]
+        );
     })
     .await
     .expect("blocking test body");

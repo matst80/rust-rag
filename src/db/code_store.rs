@@ -13,7 +13,7 @@ use deadpool_postgres::Pool;
 use rusqlite::OptionalExtension;
 use rusqlite::types::Value as SqlValue;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 use tokio::runtime::Handle;
@@ -107,16 +107,41 @@ pub struct CodeSymbolRef {
     pub signature: Option<String>,
 }
 
-/// Call-graph neighborhood of one symbol: outgoing call sites resolved to
-/// indexed symbols (callees) and incoming call sites (callers).
+/// One visited symbol in the multi-hop call graph, at its minimum BFS depth
+/// from the anchor (anchor = 0).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CodeGraphNode {
+    pub symbol: CodeSymbolRef,
+    pub depth: usize,
+}
+
+/// One resolved call edge: `from` calls `to` at `call_line` in `from`'s file.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CodeGraphEdge {
+    pub from: CodeSymbolRef,
+    pub to: CodeSymbolRef,
+    pub call_line: i32,
+}
+
+/// Call-graph neighborhood of one symbol, BFS-expanded `depth` hops in both
+/// directions (what it calls, what calls it). `callees`/`callers` remain the
+/// anchor's direct (1-hop) lists; `nodes`/`edges` carry the full multi-hop
+/// view for graph rendering.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeSymbolGraph {
     pub repo: String,
     pub symbol: CodeSymbolRef,
+    /// Traversal depth the graph was built with (1 = direct neighbors only).
+    pub depth: usize,
     pub callees: Vec<CodeSymbolRef>,
     pub callers: Vec<CodeSymbolRef>,
-    /// Outgoing callee names that matched no indexed symbol (dynamic
-    /// dispatch, stdlib, external crates). Distinct, call-order.
+    /// Every visited symbol across all hops, anchor first, in BFS order.
+    pub nodes: Vec<CodeGraphNode>,
+    /// Resolved call edges (caller -> callee) across all hops, discovery
+    /// order. One edge per (caller, callee) pair, at the earliest call line.
+    pub edges: Vec<CodeGraphEdge>,
+    /// Outgoing callee names of the anchor that matched no indexed symbol
+    /// (dynamic dispatch, stdlib, external crates). Distinct, call-order.
     pub unresolved_callees: Vec<String>,
 }
 
@@ -728,19 +753,26 @@ impl CodeStore {
         })
     }
 
-    /// Call-graph neighborhood for one symbol. `code_calls` rows carry
-    /// simple names, not symbol ids — the external indexer doesn't resolve
-    /// callees — so edges are matched by name and disambiguated by preferring
-    /// candidates in the same file. Callers are rows whose `callee_name`
-    /// equals this symbol's name.
+    /// Call-graph neighborhood for one symbol, BFS-expanded `depth` hops in
+    /// both directions. `code_calls` rows carry simple names, not symbol ids
+    /// — the external indexer doesn't resolve callees — so edges are matched
+    /// by name and disambiguated by preferring candidates in the same file.
+    /// `limit` caps each direction per expanded symbol; `max_nodes` caps the
+    /// total visited nodes including the anchor. Call cycles (a -> b -> c -> a)
+    /// terminate the walk: every symbol expands exactly once per query (the
+    /// visited set keys on path/name/line) and edges dedup per symbol pair.
     pub fn symbol_graph(
         &self,
         repo: &str,
         path: &str,
         symbol: &str,
         limit: usize,
+        depth: usize,
+        max_nodes: usize,
     ) -> Result<Option<CodeSymbolGraph>> {
-        let limit = limit.clamp(1, 64) as i64;
+        let limit = limit.clamp(1, 64);
+        let depth = depth.clamp(1, 5);
+        let max_nodes = max_nodes.clamp(1, 500);
         let pool = self.pool.clone();
         let repo = repo.to_owned();
         let path = path.to_owned();
@@ -766,113 +798,214 @@ impl CodeStore {
             };
             let anchor = symbol_ref_from_row(&anchor_row);
 
-            // Outgoing call sites: calls made from inside this symbol. The
-            // indexer records the caller's simple name, sometimes qualified.
-            let callee_rows = client
-                .query(
-                    "SELECT callee_name FROM code_calls \
-                     WHERE repo = $1 AND caller_path = $2 \
-                       AND (caller_symbol = $3 OR caller_symbol = $4 \
-                            OR caller_symbol LIKE '%.' || $3 \
-                            OR caller_symbol LIKE '%::' || $3) \
-                     ORDER BY call_line LIMIT 512",
-                    &[&repo, &path, &anchor.name, &anchor.qualname],
-                )
-                .await?;
-            let mut callee_names: Vec<String> = Vec::new();
-            for row in &callee_rows {
-                let name: String = row.get("callee_name");
-                if !name.is_empty() && !callee_names.contains(&name) {
-                    callee_names.push(name);
+            let key_of = |r: &CodeSymbolRef| (r.path.clone(), r.name.clone(), r.line);
+            let same_ref = |a: &CodeSymbolRef, b: &CodeSymbolRef| {
+                a.path == b.path && a.name == b.name && a.line == b.line
+            };
+
+            let mut nodes: Vec<CodeGraphNode> =
+                vec![CodeGraphNode { symbol: anchor.clone(), depth: 0 }];
+            let mut index_of: HashMap<SymbolKey, usize> = HashMap::new();
+            index_of.insert(key_of(&anchor), 0);
+            let mut edges: Vec<CodeGraphEdge> = Vec::new();
+            let mut edge_seen: HashSet<(SymbolKey, SymbolKey)> = HashSet::new();
+
+            let mut direct_callees: Vec<CodeSymbolRef> = Vec::new();
+            let mut direct_callers: Vec<CodeSymbolRef> = Vec::new();
+            let mut unresolved_callees: Vec<String> = Vec::new();
+
+            // BFS by level so name resolution batches per level: collect raw
+            // call sites for the whole frontier, resolve once, then wire.
+            let mut frontier: Vec<CodeSymbolRef> = vec![anchor.clone()];
+            for level in 0..depth {
+                if frontier.is_empty() || nodes.len() >= max_nodes {
+                    break;
                 }
-            }
 
-            // Incoming call sites: any call whose callee name matches.
-            let caller_rows = client
-                .query(
-                    "SELECT DISTINCT caller_path, caller_symbol FROM code_calls \
-                     WHERE repo = $1 AND callee_name = $2 \
-                     ORDER BY caller_path, caller_symbol LIMIT 512",
-                    &[&repo, &anchor.name],
-                )
-                .await?;
-
-            let callee_candidates = resolve_names(&client, &repo, &callee_names).await?;
-            let caller_base_names: Vec<String> = caller_rows
-                .iter()
-                .map(|r| {
-                    let raw: String = r.get("caller_symbol");
-                    raw.rsplit(|c| c == '.' || c == ':')
-                        .next()
-                        .unwrap_or(&raw)
-                        .to_owned()
-                })
-                .filter(|n| !n.is_empty())
-                .collect();
-            let caller_candidates =
-                resolve_names(&client, &repo, &caller_base_names).await?;
-
-            let same_file_rank =
-                |r: &tokio_postgres::Row| (r.get::<_, String>("path") != path, r.get::<_, String>("path"));
-            let is_dup = |list: &[CodeSymbolRef], r: &CodeSymbolRef| {
-                list.iter()
-                    .any(|c| c.path == r.path && c.name == r.name && c.line == r.line)
-            };
-            let is_anchor = |r: &CodeSymbolRef| {
-                r.path == anchor.path && r.name == anchor.name && r.line == anchor.line
-            };
-
-            let mut callees = Vec::new();
-            let mut unresolved_callees = Vec::new();
-            for name in &callee_names {
-                let Some(row) = callee_candidates
-                    .iter()
-                    .filter(|r| r.get::<_, String>("name") == *name)
-                    .min_by_key(|r| same_file_rank(r))
-                else {
-                    if unresolved_callees.len() < 24 {
-                        unresolved_callees.push(name.clone());
+                struct Sites {
+                    node: CodeSymbolRef,
+                    /// (callee name, earliest call line), call order, per name.
+                    callees: Vec<(String, i32)>,
+                    /// (caller path, caller base name, earliest call line).
+                    callers: Vec<(String, String, i32)>,
+                }
+                let mut level_sites: Vec<Sites> = Vec::with_capacity(frontier.len());
+                for node in &frontier {
+                    // Outgoing call sites: calls made from inside this symbol.
+                    // The indexer records the caller's simple name, sometimes
+                    // qualified.
+                    let callee_rows = client
+                        .query(
+                            "SELECT callee_name, call_line FROM code_calls \
+                             WHERE repo = $1 AND caller_path = $2 \
+                               AND (caller_symbol = $3 OR caller_symbol = $4 \
+                                    OR caller_symbol LIKE '%.' || $3 \
+                                    OR caller_symbol LIKE '%::' || $3) \
+                             ORDER BY call_line LIMIT 512",
+                            &[&repo, &node.path, &node.name, &node.qualname],
+                        )
+                        .await?;
+                    let mut callees: Vec<(String, i32)> = Vec::new();
+                    for row in &callee_rows {
+                        let name: String = row.get("callee_name");
+                        let line: i32 = row.get("call_line");
+                        if name.is_empty() {
+                            continue;
+                        }
+                        match callees.iter_mut().find(|(n, _)| n == &name) {
+                            Some(slot) => slot.1 = slot.1.min(line),
+                            None => callees.push((name, line)),
+                        }
                     }
-                    continue;
-                };
-                let r = symbol_ref_from_row(row);
-                if is_anchor(&r) {
-                    continue; // recursion renders as the anchor node itself
-                }
-                if !is_dup(&callees, &r) && callees.len() < limit as usize {
-                    callees.push(r);
-                }
-            }
 
-            let mut callers = Vec::new();
-            for row in &caller_rows {
-                let caller_path: String = row.get("caller_path");
-                let raw_name: String = row.get("caller_symbol");
-                let base = raw_name
-                    .rsplit(|c| c == '.' || c == ':')
-                    .next()
-                    .unwrap_or(&raw_name);
-                let Some(r) = caller_candidates
-                    .iter()
-                    .filter(|r| r.get::<_, String>("name") == base)
-                    .min_by_key(|r| (r.get::<_, String>("path") != caller_path, r.get::<_, String>("path")))
-                    .map(symbol_ref_from_row)
-                else {
-                    continue;
-                };
-                if is_anchor(&r) {
-                    continue;
+                    // Incoming call sites: any call whose callee name matches.
+                    let caller_rows = client
+                        .query(
+                            "SELECT caller_path, caller_symbol, MIN(call_line) AS call_line \
+                             FROM code_calls \
+                             WHERE repo = $1 AND callee_name = $2 \
+                             GROUP BY caller_path, caller_symbol \
+                             ORDER BY caller_path, caller_symbol LIMIT 512",
+                            &[&repo, &node.name],
+                        )
+                        .await?;
+                    let mut callers: Vec<(String, String, i32)> = Vec::new();
+                    for row in &caller_rows {
+                        let caller_path: String = row.get("caller_path");
+                        let raw: String = row.get("caller_symbol");
+                        let base = raw.rsplit(['.', ':']).next().unwrap_or(&raw).to_owned();
+                        if base.is_empty() {
+                            continue;
+                        }
+                        if !callers
+                            .iter()
+                            .any(|(p, n, _): &(String, String, i32)| {
+                                p == &caller_path && n == &base
+                            })
+                        {
+                            callers.push((caller_path, base, row.get("call_line")));
+                        }
+                    }
+
+                    level_sites.push(Sites {
+                        node: node.clone(),
+                        callees,
+                        callers,
+                    });
                 }
-                if !is_dup(&callers, &r) && callers.len() < limit as usize {
-                    callers.push(r);
+
+                let mut names: Vec<String> = Vec::new();
+                for sites in &level_sites {
+                    for (n, _) in &sites.callees {
+                        if !names.contains(n) {
+                            names.push(n.clone());
+                        }
+                    }
+                    for (_, n, _) in &sites.callers {
+                        if !names.contains(n) {
+                            names.push(n.clone());
+                        }
+                    }
                 }
+                let candidates = resolve_names(&client, &repo, &names).await?;
+
+                let mut next_frontier: Vec<CodeSymbolRef> = Vec::new();
+                for sites in level_sites {
+                    let node = sites.node;
+
+                    let mut fan_out = 0usize;
+                    for (name, call_line) in &sites.callees {
+                        if fan_out >= limit {
+                            break;
+                        }
+                        let Some(row) = candidates
+                            .iter()
+                            .filter(|r| r.get::<_, String>("name") == *name)
+                            .min_by_key(|r| {
+                                (r.get::<_, String>("path") != node.path, r.get::<_, String>("path"))
+                            })
+                        else {
+                            if level == 0
+                                && unresolved_callees.len() < 24
+                                && !unresolved_callees.contains(name)
+                            {
+                                unresolved_callees.push(name.clone());
+                            }
+                            continue;
+                        };
+                        let target = symbol_ref_from_row(row);
+                        if same_ref(&target, &node) {
+                            continue; // recursion renders as the node itself
+                        }
+                        fan_out += 1;
+                        if try_add_node(
+                            target.clone(),
+                            level + 1,
+                            max_nodes,
+                            &mut nodes,
+                            &mut index_of,
+                            &mut next_frontier,
+                        )
+                        .is_some()
+                        {
+                            try_add_edge(&node, &target, *call_line, &mut edges, &mut edge_seen);
+                        }
+                        if level == 0 && !direct_callees.iter().any(|c| same_ref(c, &target)) {
+                            direct_callees.push(target);
+                        }
+                    }
+
+                    let mut fan_in = 0usize;
+                    for (caller_path, base, call_line) in &sites.callers {
+                        if fan_in >= limit {
+                            break;
+                        }
+                        let Some(row) = candidates
+                            .iter()
+                            .filter(|r| r.get::<_, String>("name") == *base)
+                            .min_by_key(|r| {
+                                (
+                                    r.get::<_, String>("path") != *caller_path,
+                                    r.get::<_, String>("path"),
+                                )
+                            })
+                        else {
+                            continue;
+                        };
+                        let source = symbol_ref_from_row(row);
+                        if same_ref(&source, &node) {
+                            continue;
+                        }
+                        fan_in += 1;
+                        if try_add_node(
+                            source.clone(),
+                            level + 1,
+                            max_nodes,
+                            &mut nodes,
+                            &mut index_of,
+                            &mut next_frontier,
+                        )
+                        .is_some()
+                        {
+                            try_add_edge(&source, &node, *call_line, &mut edges, &mut edge_seen);
+                        }
+                        if level == 0 && !direct_callers.iter().any(|c| same_ref(c, &source)) {
+                            direct_callers.push(source);
+                        }
+                    }
+                }
+
+                frontier = next_frontier;
             }
 
             Ok(Some(CodeSymbolGraph {
                 repo,
                 symbol: anchor,
-                callees,
-                callers,
+                depth,
+                callees: direct_callees,
+                callers: direct_callers,
+                nodes,
+                edges,
                 unresolved_callees,
             }))
         })
@@ -943,6 +1076,10 @@ impl CodeStore {
     }
 }
 
+/// Node identity in the call graph: (path, name, line) — the same key the
+/// frontend uses for `nodeKey`.
+type SymbolKey = (String, String, i32);
+
 fn symbol_ref_from_row(row: &tokio_postgres::Row) -> CodeSymbolRef {
     CodeSymbolRef {
         path: row.get("path"),
@@ -952,6 +1089,54 @@ fn symbol_ref_from_row(row: &tokio_postgres::Row) -> CodeSymbolRef {
         line: row.get("line"),
         end_line: row.get("end_line"),
         signature: row.get("signature"),
+    }
+}
+
+/// Add a BFS neighbor unless already visited or the node cap is reached.
+/// Returns the node's index when present after the call, `None` when the cap
+/// blocked it (so callers can skip the edge too). New symbols join
+/// `next_frontier` for the next level.
+fn try_add_node(
+    r: CodeSymbolRef,
+    depth: usize,
+    max_nodes: usize,
+    nodes: &mut Vec<CodeGraphNode>,
+    index_of: &mut HashMap<SymbolKey, usize>,
+    next_frontier: &mut Vec<CodeSymbolRef>,
+) -> Option<usize> {
+    let key = (r.path.clone(), r.name.clone(), r.line);
+    if let Some(&idx) = index_of.get(&key) {
+        return Some(idx);
+    }
+    if nodes.len() >= max_nodes {
+        return None;
+    }
+    let idx = nodes.len();
+    nodes.push(CodeGraphNode { symbol: r, depth });
+    index_of.insert(key, idx);
+    next_frontier.push(nodes[idx].symbol.clone());
+    Some(idx)
+}
+
+/// Record a caller -> callee edge once per symbol pair (earliest call line
+/// wins, since expansion visits pairs in call order).
+fn try_add_edge(
+    from: &CodeSymbolRef,
+    to: &CodeSymbolRef,
+    call_line: i32,
+    edges: &mut Vec<CodeGraphEdge>,
+    seen: &mut HashSet<(SymbolKey, SymbolKey)>,
+) {
+    let key = (
+        (from.path.clone(), from.name.clone(), from.line),
+        (to.path.clone(), to.name.clone(), to.line),
+    );
+    if seen.insert(key) {
+        edges.push(CodeGraphEdge {
+            from: from.clone(),
+            to: to.clone(),
+            call_line,
+        });
     }
 }
 

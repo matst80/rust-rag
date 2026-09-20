@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTheme } from "next-themes"
 import dynamic from "next/dynamic"
 import { darkTheme, lightTheme } from "reagraph"
@@ -10,6 +10,8 @@ import {
   ArrowUpRight,
   FileCode,
   LoaderCircle,
+  Minus,
+  Plus,
   ShieldAlert,
   X,
 } from "lucide-react"
@@ -34,6 +36,22 @@ const GraphCanvas = dynamic(
 const ANCHOR_COLOR = "#6366f1"
 const CALLER_COLOR = "#f59e0b"
 const CALLEE_COLOR = "#10b981"
+
+// BFS hops the server supports (validated 1..=5); the sheet opens 2 deep —
+// enough to see the surrounding connections without pulling in a hub's whole
+// transitive closure. The BFS itself is cycle-safe (visited set server-side).
+const MAX_DEPTH = 5
+const DEFAULT_DEPTH = 2
+
+// Bottom-bar geometry: default half the viewport, resizable via the drag
+// strip on the bar's top edge.
+const MIN_HEIGHT_VH = 25
+const MAX_HEIGHT_VH = 85
+const DEFAULT_HEIGHT_VH = 50
+
+function clampHeightVh(vh: number): number {
+  return Math.round(Math.min(MAX_HEIGHT_VH, Math.max(MIN_HEIGHT_VH, vh)))
+}
 
 function basename(path: string): string {
   return path.split("/").pop() ?? path
@@ -100,15 +118,27 @@ export function SymbolGraphSheet({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  const [depth, setDepth] = useState(DEFAULT_DEPTH)
+  // Bottom-bar height in vh; persists across open/close for the page session.
+  const [heightVh, setHeightVh] = useState(DEFAULT_HEIGHT_VH)
+  const resizeDrag = useRef<{ startY: number; startVh: number } | null>(null)
+  // Remembers the fetched target so a depth change refreshes in place (the
+  // current graph stays visible); a new target starts from an empty canvas.
+  // Depth intentionally stays sticky across re-anchors.
+  const fetchedTarget = useRef<SymbolGraphTarget | null>(null)
 
   useEffect(() => {
     if (!open || !target) return
+    const prev = fetchedTarget.current
+    const newTarget =
+      !prev || prev.path !== target.path || prev.symbol !== target.symbol
+    fetchedTarget.current = target
     let cancelled = false
     setLoading(true)
     setError(null)
-    setGraph(null)
     setSelected(null)
-    getCodeSymbolGraph(repo, target.path, target.symbol)
+    if (newTarget) setGraph(null)
+    getCodeSymbolGraph(repo, target.path, target.symbol, 24, depth)
       .then((g) => {
         if (!cancelled) setGraph(g)
       })
@@ -121,144 +151,269 @@ export function SymbolGraphSheet({
     return () => {
       cancelled = true
     }
-  }, [open, repo, target])
+  }, [open, repo, target, depth])
 
   const nodes = useMemo<GraphNode[]>(() => {
     if (!graph) return []
-    const out: GraphNode[] = [
-      {
-        id: nodeKey(graph.symbol),
-        label: graph.symbol.name,
-        subLabel: basename(graph.symbol.path),
-        fill: ANCHOR_COLOR,
-        size: 15,
-      },
-    ]
-    for (const c of graph.callers) {
-      out.push({
-        id: nodeKey(c),
-        label: c.name,
-        subLabel: basename(c.path),
-        fill: CALLER_COLOR,
-        size: 9,
-      })
-    }
-    for (const c of graph.callees) {
-      if (c.path === graph.symbol.path && c.name === graph.symbol.name) continue
-      out.push({
-        id: nodeKey(c),
-        label: c.name,
-        subLabel: basename(c.path),
-        fill: CALLEE_COLOR,
-        size: 9,
-      })
-    }
-    return out
+    const anchorKey = nodeKey(graph.symbol)
+    // Amber nodes only ever appear as edge sources (they call into the
+    // cluster); anything reached by a call is green.
+    const sources = new Set(graph.edges.map((e) => nodeKey(e.from)))
+    const targets = new Set(graph.edges.map((e) => nodeKey(e.to)))
+    return graph.nodes.map((n) => {
+      const key = nodeKey(n.symbol)
+      const isAnchor = key === anchorKey
+      const callerOnly = sources.has(key) && !targets.has(key)
+      return {
+        id: key,
+        label: n.symbol.name,
+        subLabel: basename(n.symbol.path),
+        fill: isAnchor ? ANCHOR_COLOR : callerOnly ? CALLER_COLOR : CALLEE_COLOR,
+        size: isAnchor ? 15 : 9,
+      }
+    })
   }, [graph])
 
   const edges = useMemo<GraphEdge[]>(() => {
     if (!graph) return []
-    const anchorKey = nodeKey(graph.symbol)
-    const out: GraphEdge[] = []
-    for (const c of graph.callers) {
-      out.push({
-        id: `caller-${nodeKey(c)}`,
-        source: nodeKey(c),
-        target: anchorKey,
+    const sources = new Set(graph.edges.map((e) => nodeKey(e.from)))
+    const targets = new Set(graph.edges.map((e) => nodeKey(e.to)))
+    const callerOnly = (key: string) => sources.has(key) && !targets.has(key)
+    return graph.edges.map((e) => {
+      const sourceKey = nodeKey(e.from)
+      return {
+        id: `call-${sourceKey}-${nodeKey(e.to)}`,
+        source: sourceKey,
+        target: nodeKey(e.to),
         size: 1.5,
-        fill: CALLER_COLOR,
-      })
-    }
-    for (const c of graph.callees) {
-      const key = nodeKey(c)
-      if (key === anchorKey) continue
-      out.push({
-        id: `callee-${key}`,
-        source: anchorKey,
-        target: key,
-        size: 1.5,
-        fill: CALLEE_COLOR,
-      })
-    }
-    return out
+        fill: callerOnly(sourceKey) ? CALLER_COLOR : CALLEE_COLOR,
+      }
+    })
   }, [graph])
 
-  const onNodeClick = useCallback((node: InternalGraphNode) => {
-    setSelected(node.id)
-  }, [])
+  const onCanvasClick = useCallback(() => setSelected(null), [])
 
-  const onNodeDoubleClick = useCallback(
-    (node: InternalGraphNode) => {
-      const all = [...(graph?.callers ?? []), ...(graph?.callees ?? [])]
-      const ref = all.find((r) => nodeKey(r) === node.id)
+  // Re-center action for the selected connected node (the anchor has nothing
+  // to re-center to). Same navigation as double-click, just discoverable.
+  const recenterTarget = useMemo(() => {
+    if (!graph || !selected || selected === nodeKey(graph.symbol)) return null
+    return graph.nodes.find((n) => nodeKey(n.symbol) === selected)?.symbol ?? null
+  }, [graph, selected])
+
+  const recenterOn = useCallback(
+    (nodeId: string) => {
+      const ref = graph?.nodes.find((n) => nodeKey(n.symbol) === nodeId)?.symbol
       if (ref) onNavigate({ path: ref.path, symbol: ref.name })
     },
     [graph, onNavigate]
   )
 
-  const onCanvasClick = useCallback(() => setSelected(null), [])
+  // Double-click detection on the click handler itself — reagraph's
+  // onNodeDoubleClick relies on the canvas's dblclick raycast, which proves
+  // unreliable, and one click always selects first anyway.
+  const lastNodeClick = useRef<{ id: string; time: number } | null>(null)
+
+  const onNodeClick = useCallback(
+    (node: InternalGraphNode) => {
+      setSelected(node.id)
+      const now = performance.now()
+      const last = lastNodeClick.current
+      lastNodeClick.current = { id: node.id, time: now }
+      if (last && last.id === node.id && now - last.time < 400) {
+        lastNodeClick.current = null
+        recenterOn(node.id)
+      }
+    },
+    [recenterOn]
+  )
+
+  const onResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault()
+      resizeDrag.current = { startY: e.clientY, startVh: heightVh }
+      e.currentTarget.setPointerCapture(e.pointerId)
+    },
+    [heightVh]
+  )
+
+  const onResizePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = resizeDrag.current
+    if (!drag) return
+    const deltaVh = ((drag.startY - e.clientY) / window.innerHeight) * 100
+    setHeightVh(clampHeightVh(drag.startVh + deltaVh))
+  }, [])
+
+  const onResizePointerEnd = useCallback(() => {
+    resizeDrag.current = null
+  }, [])
+
+  const onResizeDoubleClick = useCallback(() => {
+    setHeightVh(DEFAULT_HEIGHT_VH)
+  }, [])
+
+  const onResizeKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "ArrowUp") {
+      e.preventDefault()
+      setHeightVh((h) => clampHeightVh(h + 2))
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault()
+      setHeightVh((h) => clampHeightVh(h - 2))
+    }
+  }, [])
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-xl p-0 flex flex-col">
+      <SheetContent
+        side="bottom"
+        style={{ height: `${heightVh}vh` }}
+        className="w-full overflow-hidden p-0 flex flex-col"
+      >
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize graph panel"
+          tabIndex={0}
+          title="Drag to resize · double-click to reset"
+          className="group absolute inset-x-0 top-0 z-10 flex h-3 cursor-row-resize touch-none items-center justify-center outline-none focus-visible:bg-primary/10"
+          onPointerDown={onResizePointerDown}
+          onPointerMove={onResizePointerMove}
+          onPointerUp={onResizePointerEnd}
+          onPointerCancel={onResizePointerEnd}
+          onDoubleClick={onResizeDoubleClick}
+          onKeyDown={onResizeKeyDown}
+        >
+          <div className="h-1 w-16 rounded-full bg-muted-foreground/25 transition-colors group-hover:bg-primary/50 group-focus-visible:bg-primary/50" />
+        </div>
+        <SheetHeader className="shrink-0 space-y-2 px-6 pt-5 pb-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-[9px] uppercase font-bold tracking-widest">
+              {graph?.symbol.kind || "symbol"}
+            </Badge>
+            <SheetTitle className="font-mono text-lg tracking-tight">
+              {graph?.symbol.name ?? target?.symbol ?? "Symbol graph"}
+            </SheetTitle>
+          </div>
+          <SheetDescription className="font-mono text-xs">
+            {repo}/{graph?.symbol.path ?? target?.path}
+            {graph && (
+              <span className="ml-2 text-muted-foreground/60">
+                L{graph.symbol.line}–{graph.symbol.end_line}
+              </span>
+            )}
+          </SheetDescription>
+          {graph?.symbol.signature && (
+            <pre className="overflow-x-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/80">
+              {graph.symbol.signature}
+            </pre>
+          )}
+          {graph && (
+          <div className="flex items-center justify-between gap-2 pt-1">
+                <div className="flex items-center gap-3 text-[9px] font-bold uppercase tracking-[0.2em] text-muted-foreground/60">
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-1.5 rounded-full" style={{ backgroundColor: CALLER_COLOR }} />
+                    {graph.callers.length} callers
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-1.5 rounded-full" style={{ backgroundColor: CALLEE_COLOR }} />
+                    {graph.callees.length} callees
+                  </span>
+                  <span className="text-muted-foreground/40">
+                    {graph.nodes.length} nodes · {graph.edges.length} edges
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {loading && (
+                    <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" />
+                  )}
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-6 rounded-md"
+                    disabled={depth <= 1 || loading}
+                    onClick={() => setDepth((d) => Math.max(1, d - 1))}
+                    title="Shrink graph"
+                  >
+                    <Minus className="size-3" />
+                  </Button>
+                  <span className="w-10 text-center text-[10px] font-bold text-muted-foreground">
+                    {depth} hop{depth === 1 ? "" : "s"}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-6 rounded-md"
+                    disabled={depth >= MAX_DEPTH || loading}
+                    onClick={() => setDepth((d) => Math.min(MAX_DEPTH, d + 1))}
+                    title="Expand graph"
+                  >
+                    <Plus className="size-3" />
+                  </Button>
+                </div>
+          </div>
+          )}
+        </SheetHeader>
+
         {graph ? (
-          <>
-            <SheetHeader className="p-6 pb-4 space-y-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-[9px] uppercase font-bold tracking-widest">
-                  {graph.symbol.kind || "symbol"}
-                </Badge>
-                <SheetTitle className="font-mono text-lg tracking-tight">
-                  {graph.symbol.name}
-                </SheetTitle>
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 pb-4 scrollbar-thin md:flex-row md:overflow-hidden">
+              <div className="flex shrink-0 flex-col md:min-h-0 md:flex-1">
+                <div className="relative h-52 min-h-[180px] overflow-hidden rounded-2xl border border-primary/10 md:h-auto md:min-h-0 md:flex-1">
+                  <GraphCanvas
+                    theme={theme}
+                    nodes={nodes}
+                    edges={edges}
+                    layoutType="forceDirected2d"
+                    layoutOverrides={{ linkDistance: 120, nodeStrength: -600 }}
+                    labelType="all"
+                    // Serve the label font locally — troika's default pulls
+                    // Roboto from a Google Fonts CDN, which flakes on
+                    // self-hosted/offline deployments (labels silently
+                    // vanish).
+                    labelFontUrl="/fonts/Roboto-Variable.ttf"
+                    animated={false}
+                    selections={selected ? [selected] : []}
+                    actives={selected ? [selected] : []}
+                    draggable
+                    edgeArrowPosition="end"
+                    onNodeClick={onNodeClick}
+                    onCanvasClick={onCanvasClick}
+                  />
+                  {recenterTarget && (
+                    <div className="absolute inset-x-0 bottom-2 flex justify-center">
+                      <div className="flex items-center gap-1.5 rounded-full border bg-background/90 py-1 pl-3 pr-1 shadow-lg backdrop-blur">
+                        <span
+                          className="max-w-[220px] truncate font-mono text-xs font-semibold"
+                          title={recenterTarget.path}
+                        >
+                          {recenterTarget.name}
+                        </span>
+                        <Button
+                          size="sm"
+                          className="h-6 rounded-full px-2.5 text-[10px] font-bold uppercase tracking-wider"
+                          onClick={() =>
+                            onNavigate({ path: recenterTarget.path, symbol: recenterTarget.name })
+                          }
+                        >
+                          Re-center
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-6 rounded-full"
+                          onClick={() => setSelected(null)}
+                          title="Clear selection"
+                        >
+                          <X className="size-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <p className="mt-2 text-center text-[9px] font-medium uppercase tracking-widest text-muted-foreground/40">
+                  Click to select · double-click to re-center · ± to change depth
+                </p>
               </div>
-              <SheetDescription className="font-mono text-xs">
-                {graph.repo}/{graph.symbol.path}
-                <span className="ml-2 text-muted-foreground/60">
-                  L{graph.symbol.line}–{graph.symbol.end_line}
-                </span>
-              </SheetDescription>
-              {graph.symbol.signature && (
-                <pre className="overflow-x-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/80">
-                  {graph.symbol.signature}
-                </pre>
-              )}
-              <div className="flex items-center gap-3 pt-1 text-[9px] font-bold uppercase tracking-[0.2em] text-muted-foreground/60">
-                <span className="flex items-center gap-1.5">
-                  <span className="size-1.5 rounded-full" style={{ backgroundColor: CALLER_COLOR }} />
-                  {graph.callers.length} callers
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="size-1.5 rounded-full" style={{ backgroundColor: CALLEE_COLOR }} />
-                  {graph.callees.length} callees
-                </span>
-              </div>
-            </SheetHeader>
 
-            <div className="px-6">
-              <div className="h-[320px] overflow-hidden rounded-2xl border border-primary/10">
-                <GraphCanvas
-                  theme={theme}
-                  nodes={nodes}
-                  edges={edges}
-                  layoutType="forceDirected2d"
-                  layoutOverrides={{ linkDistance: 120, nodeStrength: -600 }}
-                  labelType="auto"
-                  selections={selected ? [selected] : []}
-                  actives={selected ? [selected] : []}
-                  draggable
-                  edgeArrowPosition="end"
-                  onNodeClick={onNodeClick}
-                  onNodeDoubleClick={onNodeDoubleClick}
-                  onCanvasClick={onCanvasClick}
-                />
-              </div>
-              <p className="mt-2 text-center text-[9px] font-medium uppercase tracking-widest text-muted-foreground/40">
-                Click to select · double-click to explore that symbol
-              </p>
-            </div>
-
-            <div className="flex-1 space-y-6 overflow-y-auto p-6 pt-4 scrollbar-thin">
+              <div className="min-h-0 space-y-6 md:w-80 md:shrink-0 md:overflow-y-auto md:border-l md:border-primary/10 md:pr-1 md:pl-5 md:scrollbar-thin">
               <SymbolEdgeList
                 title="Called by"
                 icon={<ArrowDownLeft className="size-3.5 text-amber-500" />}
@@ -295,8 +450,8 @@ export function SymbolGraphSheet({
                   </p>
                 </div>
               )}
+              </div>
             </div>
-          </>
         ) : (
           <div className="flex flex-1 items-center justify-center">
             {loading ? (

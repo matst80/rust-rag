@@ -716,14 +716,32 @@ export interface CodeSymbolRef {
   signature?: string | null;
 }
 
-// Call-graph neighborhood of one symbol (callers + callees). Edges are
-// name-resolved from the code_calls table; callee names that matched no
-// indexed symbol land in unresolved_callees.
+// One visited symbol in the multi-hop call graph, at its minimum BFS depth
+// from the anchor (anchor = 0).
+export interface CodeGraphNode {
+  symbol: CodeSymbolRef;
+  depth: number;
+}
+
+// One resolved call edge: from calls to at call_line (in from's file).
+export interface CodeGraphEdge {
+  from: CodeSymbolRef;
+  to: CodeSymbolRef;
+  call_line: number;
+}
+
+// Call-graph neighborhood of one symbol, BFS-expanded depth hops in both
+// directions. callees/callers stay the anchor's direct (1-hop) lists;
+// nodes/edges carry the full multi-hop view for graph rendering. Callee
+// names that matched no indexed symbol land in unresolved_callees.
 export interface CodeSymbolGraph {
   repo: string;
   symbol: CodeSymbolRef;
+  depth: number;
   callees: CodeSymbolRef[];
   callers: CodeSymbolRef[];
+  nodes: CodeGraphNode[];
+  edges: CodeGraphEdge[];
   unresolved_callees: string[];
 }
 
