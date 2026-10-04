@@ -418,10 +418,6 @@ async fn process_item_inner(
 /// contribute. Keeps a chatty model from fanning a single item out.
 const MAX_ACTIONS_PER_ITEM: usize = 4;
 
-fn outcome_of(record: &DreamActionRecord) -> &str {
-    record.outcome.as_str()
-}
-
 #[cfg(test)]
 fn round_for_test(dry_run: bool, action_budget: usize) -> std::sync::Arc<RoundContext> {
     std::sync::Arc::new(RoundContext {
@@ -525,14 +521,21 @@ pub(crate) async fn apply_dreaming_action(
         return record;
     }
 
-    // Gate 2 — protected namespaces. An entry living in a namespace the
-    // harness client searches must never be moved or removed by dreaming.
-    // `keep` is a no-op on data, so it stays available as the downgrade.
-    if kind.moves_entry_out_of_namespace() && cfg.is_protected(&item.source_id) {
+    // Gate 2 — protected namespaces. Only *destructive* actions are blocked
+    // here: a `merge` or `prune` of an entry in a namespace the harness client
+    // searches would remove or overwrite that client's data. A `promote`
+    // copy is permitted — it writes a new row in the target namespace and
+    // leaves the original exactly where it was, so nothing disappears from
+    // the protected namespace.
+    if kind.destroys_entry() && cfg.is_protected(&item.source_id) {
         record.outcome = "blocked".to_owned();
         record.reason = format!(
-            "namespace '{}' is protected (RAG_DREAMING_PROTECTED_SOURCE_IDS {:?}); downgraded to keep: {}",
-            item.source_id, cfg.protected_source_ids, action.reason
+            "namespace '{}' is protected (RAG_DREAMING_PROTECTED_SOURCE_IDS {:?}); \
+             {} not applied: {}",
+            item.source_id,
+            cfg.protected_source_ids,
+            kind.as_str(),
+            action.reason
         );
         warn!(
             "dreaming: blocked {} on {} — namespace '{}' is protected",
@@ -784,10 +787,20 @@ mod tests {
     }
 
     #[test]
-    fn only_promote_merge_prune_leave_the_namespace() {
-        assert!(DreamActionKind::Keep.moves_entry_out_of_namespace() == false);
-        assert!(DreamActionKind::Promote.moves_entry_out_of_namespace());
-        assert!(DreamActionKind::Merge.moves_entry_out_of_namespace());
-        assert!(DreamActionKind::Prune.moves_entry_out_of_namespace());
+    fn only_merge_and_prune_destroy_the_entry() {
+        // A `promote` copy writes a new row and leaves the original in place,
+        // so it must not be treated as destructive: the harness searches the
+        // protected "memory" namespace and needs copies to escape it.
+        assert!(!DreamActionKind::Keep.destroys_entry());
+        assert!(!DreamActionKind::Promote.destroys_entry());
+        assert!(DreamActionKind::Merge.destroys_entry());
+        assert!(DreamActionKind::Prune.destroys_entry());
+    }
+
+    #[test]
+    fn memory_namespace_is_protected_by_default() {
+        let cfg = DreamingConfig::default();
+        assert!(cfg.is_protected("memory"));
+        assert!(!cfg.is_protected("knowledge"));
     }
 }

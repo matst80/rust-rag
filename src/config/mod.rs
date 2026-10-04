@@ -306,13 +306,16 @@ pub struct DreamingConfig {
     pub concurrency: usize,
     pub source_id: String,
     pub target_source_id: String,
-    /// Namespaces dreaming may never move entries out of. A `promote` or
-    /// `merge` touching an entry in one of these namespaces is downgraded to
-    /// `keep` and recorded as `blocked`. Defaults to the harness memory
-    /// namespace, which the `eventsourced-ai` enricher searches on every
-    /// turn — silently emptying it of durable facts would silently degrade
-    /// that client. Set `RAG_DREAMING_PROTECTED_SOURCE_IDS=` (empty) to opt
-    /// out, or comma-separate extra namespaces.
+    /// Namespaces whose entries dreaming may never destroy or move: `merge`
+    /// and `prune` are blocked and recorded as such. A `promote` *copy* is
+    /// still allowed out of these namespaces — it writes a new row under
+    /// `<id>:dream:<uuid>` in the target namespace and leaves the original
+    /// in place, so nothing leaves the client's search space. Defaults to the
+    /// harness memory namespace, which the `eventsourced-ai` enricher
+    /// searches on every turn; the copy makes a durable fact available to
+    /// the repo scope without removing it from memory. Set
+    /// `RAG_DREAMING_PROTECTED_SOURCE_IDS=` (empty) to opt out, or
+    /// comma-separate extra namespaces.
     pub protected_source_ids: Vec<String>,
     /// Actions dreaming may actually apply. `merge` and `prune` are opt-in
     /// (`keep,promote,merge,prune` unlocks everything) because both delete
@@ -360,10 +363,12 @@ impl DreamActionKind {
         }
     }
 
-    /// Whether applying this action would move or remove the reviewed entry
-    /// from the namespace it currently lives in.
-    pub fn moves_entry_out_of_namespace(self) -> bool {
-        matches!(self, Self::Promote | Self::Merge | Self::Prune)
+    /// Whether applying this action would *destroy* or *move* the reviewed
+    /// entry out of the namespace it currently lives in. A `promote` copy
+    /// leaves the original row untouched under its original id, so it is not
+    /// destructive and is exempt from the protected-namespace gate.
+    pub fn destroys_entry(self) -> bool {
+        matches!(self, Self::Merge | Self::Prune)
     }
 }
 
