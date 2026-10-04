@@ -169,7 +169,11 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     println!("rust-rag booting");
     println!("config: binding to http://{}", config.bind_address());
-    println!("config: sqlite db {}", config.db_path);
+    if config.database_url.is_some() {
+        println!("config: database backend=postgres");
+    } else {
+        println!("config: database backend=sqlite path={}", config.db_path);
+    }
     println!(
         "config: graph enabled={} build_on_startup={} k={} max_distance={} cross_source={}",
         config.graph_enabled,
@@ -178,7 +182,6 @@ async fn main() -> Result<()> {
         config.graph_similarity_max_distance,
         config.graph_cross_source
     );
-    println!("loading sqlite store");
     println!(
         "config: auth enabled={} (frontend_key={}, session_secret={}, api_keys={})",
         config.auth.enabled,
@@ -186,19 +189,23 @@ async fn main() -> Result<()> {
         config.auth.session_secret.is_some(),
         config.auth.api_keys.len()
     );
-    let store = Arc::new(SqliteVectorStore::connect(
-        &config.db_path,
-        config.embedding_dimension,
-        config.graph_config(),
-    )?);
+    let store = if config.database_url.is_none() {
+        println!("loading sqlite store");
+        Some(Arc::new(SqliteVectorStore::connect(
+            &config.db_path,
+            config.embedding_dimension,
+            config.graph_config(),
+        )?))
+    } else {
+        None
+    };
 
-    // VectorStore + MessageStore: route to Postgres when RAG_DATABASE_URL is
-    // set. Auth + user_memory still on SQLite — those tables port in a
-    // follow-up slice. The Postgres + SQLite stores coexist during the
-    // cutover window.
+    // All storage services use the selected backend; PostgreSQL startup
+    // must not depend on opening or migrating the legacy SQLite file.
     let pg_store = if let Some(url) = &config.database_url {
+        println!("loading postgres store");
         let pg_pool = rust_rag::db::postgres::connect(url, 10).await?;
-        info!("postgres: connected, vector/message/auth/user-memory routed to {url}");
+        info!("postgres: connected, all storage services routed to postgres");
         let pg = Arc::new(rust_rag::db::postgres::PostgresVectorStore::new(
             pg_pool,
             tokio::runtime::Handle::current(),
@@ -215,14 +222,17 @@ async fn main() -> Result<()> {
     } else {
         if config.graph_enabled && config.graph_build_on_startup {
             println!("rebuilding similarity graph");
-            let rebuilt = store.rebuild_similarity_graph()?;
+            let rebuilt = store
+                .as_ref()
+                .expect("sqlite backend selected")
+                .rebuild_similarity_graph()?;
             println!("similarity graph rebuilt with {rebuilt} edges");
         }
         None
     };
     let store_service: Arc<dyn VectorStore> = match &pg_store {
         Some(pg) => pg.clone(),
-        None => store.clone(),
+        None => store.as_ref().expect("sqlite backend selected").clone(),
     };
 
     // Code-search store: Postgres-only — the code tables (migration 0018)
@@ -249,21 +259,21 @@ async fn main() -> Result<()> {
     }
     let message_store: Arc<dyn MessageStore> = match &pg_store {
         Some(pg) => pg.clone(),
-        None => store.clone(),
+        None => store.as_ref().expect("sqlite backend selected").clone(),
     };
     let auth_store: Arc<dyn AuthStore> = match &pg_store {
         Some(pg) => pg.clone(),
-        None => store.clone(),
+        None => store.as_ref().expect("sqlite backend selected").clone(),
     };
     let user_memory: Arc<dyn UserMemoryStore> = match &pg_store {
         Some(pg) => pg.clone(),
-        None => store.clone(),
+        None => store.as_ref().expect("sqlite backend selected").clone(),
     };
     // OAuth integrations: per-user encrypted credential vault routes
     // through Postgres in prod and falls back to SQLite for local dev.
     let oauth_creds: Arc<dyn OAuthCredsStore> = match &pg_store {
         Some(pg) => pg.clone(),
-        None => store.clone(),
+        None => store.as_ref().expect("sqlite backend selected").clone(),
     };
     let oauth_token_key = match config.google_oauth.token_enc_key.as_deref() {
         Some(raw) => match EncryptionKey::from_secret_str(raw) {
@@ -305,7 +315,7 @@ async fn main() -> Result<()> {
         config.web_push.clone(),
         match &pg_store {
             Some(pg) => pg.clone() as Arc<dyn PushStore>,
-            None => store.clone() as Arc<dyn PushStore>,
+            None => store.as_ref().expect("sqlite backend selected").clone() as Arc<dyn PushStore>,
         },
     )
     .with_whisper(config.whisper.clone())
@@ -574,8 +584,10 @@ async fn main() -> Result<()> {
         let _ = handle.await;
     }
 
-    info!("closing sqlite store");
-    store.close()?;
+    if let Some(store) = store {
+        info!("closing sqlite store");
+        store.close()?;
+    }
 
     if let Some(providers) = otel_provider {
         info!("flushing otel exporters");

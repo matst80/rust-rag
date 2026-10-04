@@ -22,6 +22,18 @@ export interface UseHostedChatArgs {
   onDone?: () => void
 }
 
+// Replayed history keeps every tool result but truncates oversized payloads:
+// full entries would otherwise grow each subsequent request until it exceeds
+// the backend's request body limit — the connection is then reset mid-upload,
+// which the browser reports as a bare network error. The model saw the full
+// result in the turn it happened; for context it can always re-fetch.
+const MAX_REPLAYED_TOOL_RESULT_CHARS = 2000
+
+function truncateToolResult(content: string): string {
+  if (content.length <= MAX_REPLAYED_TOOL_RESULT_CHARS) return content
+  return `${content.slice(0, MAX_REPLAYED_TOOL_RESULT_CHARS)}…[truncated ${content.length - MAX_REPLAYED_TOOL_RESULT_CHARS} chars]`
+}
+
 export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHostedChatArgs) {
   const [isGenerating, setIsGenerating] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -40,22 +52,41 @@ export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHo
     try {
       let fullContent = ""
       let fullReasoning = ""
+      // Tool calls finalized from earlier tool-loop iterations of this
+      // exchange. The backend runs one upstream response per loop iteration,
+      // and each response restarts its delta `index` at 0 — so accumulation
+      // must be scoped per response id and completed calls carried over,
+      // otherwise two iterations merge into one garbled tool call
+      // (concatenated name/arguments) that breaks history replay.
+      let finalizedToolCalls: ChatCompletionAssistantToolCall[] = []
       let accumulatedToolCalls: Record<number, Partial<ChatCompletionAssistantToolCall>> = {}
+      let currentResponseId: string | undefined
 
       // Expand messages to include tool results in the format expected by the API
       const expandedMessages = messages.flatMap(m => {
-        if (m.tool_calls && m.tool_results && Object.keys(m.tool_results).length > 0) {
+        if (m.tool_calls?.length) {
+          // An assistant message with tool_calls must be followed by a tool
+          // message per call id — replay only the calls that have results and
+          // strip the field entirely when none do (e.g. generation was stopped
+          // mid-loop), or the upstream rejects the whole request.
+          const paired = m.tool_calls.filter(tc => m.tool_results?.[tc.id] !== undefined)
+          if (paired.length === 0) {
+            return [{
+              role: m.role,
+              content: m.content || null,
+              name: m.name,
+              tool_call_id: m.tool_call_id
+            } as ChatCompletionMessage]
+          }
           const expanded: ChatCompletionMessage[] = []
-          expanded.push({ role: m.role, content: m.content || null, tool_calls: m.tool_calls })
-          for (const tc of m.tool_calls) {
-            if (m.tool_results[tc.id] !== undefined) {
-              expanded.push({
-                role: "tool" as const,
-                tool_call_id: tc.id,
-                content: m.tool_results[tc.id],
-                name: tc.function.name
-              })
-            }
+          expanded.push({ role: m.role, content: m.content || null, tool_calls: paired })
+          for (const tc of paired) {
+            expanded.push({
+              role: "tool" as const,
+              tool_call_id: tc.id,
+              content: truncateToolResult(m.tool_results![tc.id]),
+              name: tc.function.name
+            })
           }
           return expanded
         }
@@ -77,6 +108,17 @@ export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHo
           onChunk: (chunk: ChatCompletionChunk) => {
             const delta = chunk.choices[0]?.delta
             if (!delta) return
+
+            if (chunk.id !== undefined && chunk.id !== currentResponseId) {
+              // First chunk of a new upstream response: the previous
+              // response's tool calls are complete.
+              currentResponseId = chunk.id
+              finalizedToolCalls = [
+                ...finalizedToolCalls,
+                ...Object.values(accumulatedToolCalls)
+              ] as ChatCompletionAssistantToolCall[]
+              accumulatedToolCalls = {}
+            }
 
             let updated = false
 
@@ -113,7 +155,11 @@ export function useHostedChat({ onUpdate, onToolResult, onError, onDone }: UseHo
             }
 
             if (updated) {
-              onUpdate(fullContent, fullReasoning, Object.values(accumulatedToolCalls) as ChatCompletionAssistantToolCall[])
+              onUpdate(
+                fullContent,
+                fullReasoning,
+                [...finalizedToolCalls, ...Object.values(accumulatedToolCalls)] as ChatCompletionAssistantToolCall[]
+              )
             }
           },
           onToolResult: (result: ChatCompletionToolResult) => {

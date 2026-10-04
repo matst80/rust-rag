@@ -749,7 +749,7 @@ pub fn openapi_document() -> Value {
             ..op(
                 "search_code",
                 "post",
-                "Semantic code symbol search (all-MiniLM-L6-v2)",
+                "Full-text BM25 symbol search across code snapshots",
                 "Code",
             )
         },

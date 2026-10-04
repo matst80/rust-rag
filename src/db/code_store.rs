@@ -192,7 +192,7 @@ pub struct ParsedCodeSymbol {
     pub visibility: String,
     pub exemplar: String,
     pub hotpath: String,
-    pub embedding: Vec<f32>,
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug)]
@@ -305,7 +305,7 @@ fn parse_codesearch_db_file(path: &Path) -> Result<ParsedCodeRepo> {
     }
 
     let mut symbols = Vec::new();
-    let mut symbols_skipped = 0usize;
+    let symbols_skipped = 0usize;
     let mut stmt = conn.prepare(
         "SELECT id, path, line, end_line, kind, name, qualname, signature, doc, lang, \
                 text, visibility, exemplar, hotpath \
@@ -331,16 +331,18 @@ fn parse_codesearch_db_file(path: &Path) -> Result<ParsedCodeRepo> {
     })?;
     for row in rows {
         let (id, path, line, end_line, kind, name, qualname, signature, doc, lang, text, visibility, exemplar, hotpath) = row?;
-        let Some(embedding) = embeddings.get(&id) else {
-            symbols_skipped += 1;
-            continue;
+        let embedding = match embeddings.get(&id) {
+            Some(vec) => {
+                if vec.len() != CODE_EMBEDDING_DIM {
+                    return Err(anyhow!(
+                        "symbol {id} ({name}) has {}-dim embedding, expected {CODE_EMBEDDING_DIM}",
+                        vec.len()
+                    ));
+                }
+                Some(vec.clone())
+            }
+            None => None,
         };
-        if embedding.len() != CODE_EMBEDDING_DIM {
-            return Err(anyhow!(
-                "symbol {id} ({name}) has {}-dim embedding, expected {CODE_EMBEDDING_DIM}",
-                embedding.len()
-            ));
-        }
         symbols.push(ParsedCodeSymbol {
             path,
             line: line as i32,
@@ -355,7 +357,7 @@ fn parse_codesearch_db_file(path: &Path) -> Result<ParsedCodeRepo> {
             visibility,
             exemplar,
             hotpath,
-            embedding: embedding.clone(),
+            embedding,
         });
     }
 
@@ -546,7 +548,7 @@ impl CodeStore {
                 )
                 .await?;
             for s in &parsed.symbols {
-                let vector = pgvector::Vector::from(s.embedding.clone());
+                let vector = s.embedding.as_ref().map(|e| pgvector::Vector::from(e.clone()));
                 tx.execute(
                     &sym_stmt,
                     &[
@@ -1011,25 +1013,29 @@ impl CodeStore {
         })
     }
 
-    /// Cosine KNN over code symbols. `embedding` must be a query vector from
-    /// the same all-MiniLM-L6-v2 model the snapshots were embedded with.
+    /// Full-text BM25 / cover-density ranking over code symbols.
+    ///
+    /// Combines PostgreSQL weighted full-text search (`tsvector` over name, qualname,
+    /// signature, doc, text) with exact and prefix symbol-name boosts.
     pub fn search(
         &self,
-        embedding: &[f32],
+        query: &str,
         repo: Option<&str>,
         language: Option<&str>,
         path_prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<CodeSearchHit>> {
-        if embedding.len() != CODE_EMBEDDING_DIM {
-            return Err(anyhow!(
-                "query embedding is {}-dim, code index expects {CODE_EMBEDDING_DIM}",
-                embedding.len()
-            ));
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
         }
         let limit = limit.clamp(1, 200) as i64;
         let pool = self.pool.clone();
-        let vector = pgvector::Vector::from(embedding.to_vec());
+        let (or_query, and_query) = prepare_code_search_query(query);
+        let raw_query = query
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
+            .trim()
+            .to_owned();
         let repo = repo.map(str::to_owned);
         let language = language.map(str::to_owned);
         let path_prefix = path_prefix.map(str::to_owned);
@@ -1043,21 +1049,51 @@ impl CodeStore {
                 .query(
                     "SELECT s.repo, s.path, f.language, s.kind, s.name, s.signature, \
                             s.line, s.end_line, s.text, \
-                            (s.dense_embedding <=> $1::vector)::REAL AS distance \
+                            ( \
+                                CASE \
+                                    WHEN $5::text IS NOT NULL AND s.tsv @@ to_tsquery('simple', $5) THEN \
+                                        ts_rank_cd(ARRAY[0.1, 0.2, 0.4, 1.0], s.tsv, to_tsquery('simple', $5), 32 | 1) \
+                                    ELSE 0.0 \
+                                END \
+                                + \
+                                CASE \
+                                    WHEN $6::text IS NOT NULL AND s.tsv @@ to_tsquery('simple', $6) THEN 0.25 \
+                                    ELSE 0.0 \
+                                END \
+                                + \
+                                CASE \
+                                    WHEN lower(s.name) = lower($7) THEN 1.0 \
+                                    WHEN lower(s.qualname) = lower($7) THEN 0.8 \
+                                    WHEN lower(s.name) LIKE lower($7) || '%' THEN 0.5 \
+                                    WHEN lower(s.name) LIKE '%' || lower($7) || '%' THEN 0.3 \
+                                    ELSE 0.0 \
+                                END \
+                                + \
+                                CASE \
+                                    WHEN s.signature ILIKE '%' || $7 || '%' THEN 0.15 \
+                                    ELSE 0.0 \
+                                END \
+                            )::REAL AS raw_score \
                      FROM code_symbols s \
                      LEFT JOIN code_files f ON f.repo = s.repo AND f.path = s.path \
-                     WHERE ($2::text IS NULL OR s.repo = $2) \
-                       AND ($3::text IS NULL OR s.lang = $3) \
-                       AND ($4::text IS NULL OR s.path LIKE $4 || '%') \
-                     ORDER BY s.dense_embedding <=> $1::vector \
-                     LIMIT $5",
-                    &[&vector, &repo, &language, &path_prefix, &limit],
+                     WHERE ($1::text IS NULL OR s.repo = $1) \
+                       AND ($2::text IS NULL OR s.lang = $2) \
+                       AND ($3::text IS NULL OR s.path LIKE $3 || '%') \
+                       AND ( \
+                           ($5::text IS NOT NULL AND s.tsv @@ to_tsquery('simple', $5)) \
+                           OR s.name ILIKE '%' || $7 || '%' \
+                           OR s.signature ILIKE '%' || $7 || '%' \
+                       ) \
+                     ORDER BY raw_score DESC, s.line ASC \
+                     LIMIT $4",
+                    &[&repo, &language, &path_prefix, &limit, &or_query, &and_query, &raw_query],
                 )
                 .await?;
             Ok(rows
                 .iter()
                 .map(|row| {
-                    let distance: f32 = row.get("distance");
+                    let raw_score: f32 = row.get("raw_score");
+                    let score = (raw_score / 2.0).clamp(0.01, 1.0);
                     CodeSearchHit {
                         repo: row.get("repo"),
                         path: row.get("path"),
@@ -1068,12 +1104,68 @@ impl CodeStore {
                         start_line: row.get("line"),
                         end_line: row.get("end_line"),
                         snippet: row.get("text"),
-                        score: (1.0 - distance).max(0.0),
+                        score,
                     }
                 })
                 .collect())
         })
     }
+}
+
+fn prepare_code_search_query(query: &str) -> (Option<String>, Option<String>) {
+    let mut or_terms: Vec<String> = Vec::new();
+    let mut and_terms: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for raw_token in query.split_whitespace() {
+        let cleaned: String = raw_token
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        if seen.insert(cleaned.to_lowercase()) {
+            and_terms.push(cleaned.clone());
+            or_terms.push(cleaned.clone());
+        }
+
+        if cleaned.contains('_') {
+            for part in cleaned.split('_') {
+                if !part.is_empty() && seen.insert(part.to_lowercase()) {
+                    or_terms.push(part.to_owned());
+                }
+            }
+        }
+
+        let mut camel_part = String::new();
+        for ch in cleaned.chars() {
+            if ch.is_uppercase() && !camel_part.is_empty() {
+                if seen.insert(camel_part.to_lowercase()) {
+                    or_terms.push(camel_part.clone());
+                }
+                camel_part.clear();
+            }
+            camel_part.push(ch);
+        }
+        if !camel_part.is_empty() && seen.insert(camel_part.to_lowercase()) {
+            or_terms.push(camel_part);
+        }
+    }
+
+    let or_query = if or_terms.is_empty() {
+        None
+    } else {
+        Some(or_terms.join(" | "))
+    };
+    let and_query = if and_terms.is_empty() {
+        None
+    } else {
+        Some(and_terms.join(" & "))
+    };
+
+    (or_query, and_query)
 }
 
 /// Node identity in the call graph: (path, name, line) — the same key the

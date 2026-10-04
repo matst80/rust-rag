@@ -195,6 +195,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0018_code_search",
         include_str!("../../migrations/0018_code_search.sql"),
     ),
+    (
+        "0019_dreaming",
+        include_str!("../../migrations/0019_dreaming.sql"),
+    ),
+    (
+        "0019_code_search_bm25",
+        include_str!("../../migrations/0019_code_search_bm25.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {

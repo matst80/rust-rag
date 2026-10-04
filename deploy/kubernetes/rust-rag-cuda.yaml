@@ -21,11 +21,9 @@ metadata:
 data:
   RAG_HOST: "0.0.0.0"
   RAG_PORT: "4001"
-  ## SQLite path is still set because the legacy `SqliteVectorStore` is
-  ## opened on boot for backward-compat — but with `RAG_DATABASE_URL` set
-  ## (see Secret below), every trait surface routes to Postgres and the
-  ## SQLite file at this path is unused. Safe to delete after the cutover
-  ## settles; the PVC stays mounted for the moment as a rollback option.
+  ## SQLite fallback path, used only when RAG_DATABASE_URL is unset.
+  ## Production uses the PostgreSQL Secret below. Keep the legacy PVC
+  ## mounted as a rollback option and for uploaded files.
   RAG_DB_PATH: "/app/data/rag.db"
   RAG_UPLOAD_PATH: "/app/data/uploads"
   ## bge-m3 int8 (dynamic quant, 1024-d, CLS-pooled) — fetched onto the
@@ -85,11 +83,11 @@ data:
   ## must include the public hostname so VSCode/Cursor over the ingress
   ## are not rejected with 403 "Host header is not allowed".
   RAG_MCP_ALLOWED_HOSTS: "rag.k6n.net,localhost,127.0.0.1,::1"
-  ## Comma-separated list of Zitadel subject IDs (the JWT `sub` claim)
+  ## Comma-separated list of OIDC subject IDs (the JWT `sub` claim)
   ## that bypass per-message ownership checks for channel clear and
   ## individual message delete/update. ApiKey + Disabled auth paths are
   ## already unrestricted; this knob covers session-cookie users.
-  RAG_ADMIN_SUBJECTS: "369527412653951321"
+  RAG_ADMIN_SUBJECTS: "987ce0eccf3ce47c"
   RAG_OPENAI_API_BASE_URL: "https://openrouter.ai/api/v1"
   RAG_OPENAI_MODEL: "inclusionai/ling-3.0-flash-vl:free"
   RAG_CDP_URL: "http://10.10.3.27:9222"

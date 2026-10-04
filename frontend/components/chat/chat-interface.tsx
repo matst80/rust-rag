@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, CheckCircle2, Sparkles, Cpu } from "lucide-react"
+import { Send, Bot, User, Trash2, Brain, Loader2, Wand2, Terminal, Sparkles } from "lucide-react"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type {
@@ -22,7 +22,7 @@ import {
 import { useLocalChat } from "@/hooks/use-local-chat"
 import { useHostedChat, type ExtendedMessage } from "@/hooks/use-hosted-chat"
 
-import { ToolResultView } from "@/components/chat/tool-result-view"
+import { ToolCallCard } from "@/components/chat/tool-call-card"
 import { WhisperTranscribe } from "@/components/entries/whisper-transcribe"
 
 function detectWebGpu(): boolean {
@@ -185,69 +185,44 @@ export function ChatInterface() {
 
                 {/* Local tool calls (on-device chat) */}
                 {message.local_tool_calls?.map((tc, idx) => (
-                  <div key={`local-${idx}`} className="w-full border border-primary/20 bg-primary/5 overflow-hidden text-xs">
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/10 font-mono font-bold text-primary">
-                      <Cpu className="size-3" />
-                      <span>{tc.name}</span>
-                      {tc.result && !tc.error && <CheckCircle2 className="size-3 text-green-500 ml-auto" />}
-                      {tc.error && <span className="ml-auto text-destructive">err</span>}
-                    </div>
-                    <div className="p-2 font-mono text-[10px] opacity-70 truncate" title={JSON.stringify(tc.args)}>
-                      {JSON.stringify(tc.args)}
-                    </div>
-                    {tc.result && (
-                      <Accordion type="single" collapsible className="w-full border-t border-primary/5">
-                        <AccordionItem value="result" className="border-none">
-                          <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
-                            View result
-                          </AccordionTrigger>
-                          <AccordionContent className="p-3 bg-muted/20 max-h-80 overflow-auto border-t border-primary/5">
-                            <ToolResultView name={tc.name} result={tc.result} />
-                          </AccordionContent>
-                        </AccordionItem>
-                      </Accordion>
-                    )}
-                  </div>
+                  <ToolCallCard
+                    key={`local-${idx}`}
+                    name={tc.name}
+                    args={tc.args}
+                    result={tc.result}
+                    error={tc.error}
+                    status={tc.error ? "error" : tc.result ? "done" : "running"}
+                  />
                 ))}
 
                 {/* Tool calls */}
                 {message.tool_calls?.map((tc, idx) => (
-                  <div key={idx} className="w-full border border-primary/20 bg-primary/5 overflow-hidden text-xs">
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border-b border-primary/10 font-mono font-bold text-primary">
-                      <Terminal className="size-3" />
-                      <span>{tc.function.name}</span>
-                      {message.tool_results?.[tc.id] && <CheckCircle2 className="size-3 text-green-500 ml-auto" />}
-                    </div>
-                    <div className="p-2 font-mono text-[10px] opacity-70 truncate" title={tc.function.arguments}>
-                      {tc.function.arguments}
-                    </div>
-                    {message.tool_results?.[tc.id] && (
-                      <Accordion type="single" collapsible className="w-full border-t border-primary/5">
-                        <AccordionItem value="result" className="border-none">
-                          <AccordionTrigger className="py-1 px-3 font-mono text-[10px] hover:no-underline text-primary/60 uppercase tracking-[1px]">
-                            View result
-                          </AccordionTrigger>
-                          <AccordionContent className="p-3 bg-muted/20 max-h-80 overflow-auto border-t border-primary/5">
-                            <ToolResultView name={tc.function.name} result={message.tool_results[tc.id]} />
-                          </AccordionContent>
-                        </AccordionItem>
-                      </Accordion>
-                    )}
-                  </div>
+                  <ToolCallCard
+                    key={idx}
+                    name={tc.function.name}
+                    args={tc.function.arguments}
+                    result={message.tool_results?.[tc.id]}
+                    status={message.tool_results?.[tc.id] ? "done" : "running"}
+                  />
                 ))}
 
                 {/* Bubble */}
                 <div
                   className={cn(
-                    "px-6 py-4 border leading-relaxed transition-all duration-200",
+                    "border leading-relaxed transition-all duration-200",
                     message.role === "user"
-                      ? "bg-primary text-primary-foreground border-primary/40 shadow-[0_12px_30px_-10px_rgba(0,0,0,0.15)] ring-1 ring-white/10 ring-inset"
-                      : "bg-card text-card-foreground border-border shadow-sm"
+                      ? "px-4 py-2.5 bg-primary text-primary-foreground border-primary/40 shadow-[0_12px_30px_-10px_rgba(0,0,0,0.15)] ring-1 ring-white/10 ring-inset"
+                      : "px-6 py-4 bg-card text-card-foreground border-border shadow-sm"
                   )}
                 >
                   {typeof message.content === "string" ? (
                     message.content ? (
-                      <div className="prose prose-sm dark:prose-invert max-w-none">
+                      <div
+                        className={cn(
+                          "prose prose-sm dark:prose-invert max-w-none",
+                          message.role === "user" && "chat-user-bubble"
+                        )}
+                      >
                         <MarkdownView content={message.content} />
                       </div>
                     ) : (

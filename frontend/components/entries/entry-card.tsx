@@ -325,6 +325,25 @@ function EntryCardInner({
                       ));
                     }
 
+                    // Link the repo chip straight into the code browser.
+                    if (key === "repo") {
+                      return (
+                        <Link
+                          key={key}
+                          href={`/code?repo=${encodeURIComponent(String(value))}`}
+                          title="Open this repo in Code Search"
+                          className="group/repo flex items-center gap-1.5 px-1.5 py-0.5 rounded-sm bg-muted/20 border border-border/50 font-mono text-[9px] transition-colors hover:border-primary/40"
+                        >
+                          <span className="font-bold text-muted-foreground/40 uppercase tracking-tighter">
+                            {key}
+                          </span>
+                          <span className="text-muted-foreground/80 truncate max-w-[120px] group-hover/repo:text-primary">
+                            {String(value)}
+                          </span>
+                        </Link>
+                      );
+                    }
+
                     return (
                       <div
                         key={key}

@@ -226,3 +226,19 @@ body::before {
         scrollbar-width: none;
     }
 }
+
+/* User chat bubbles are filled with --primary. The typography plugin
+   (prose / dark:prose-invert, incl. the nested one inside MarkdownView)
+   would paint page-level body colors over that fill and produce
+   light-on-light text — force bubble content to inherit the bubble
+   foreground instead. The .prose roots must inherit too: the plugin
+   sets its body color on the wrapper element itself, which plain
+   `color: inherit` on inner elements would otherwise pick up. */
+.chat-user-bubble,
+.chat-user-bubble .prose,
+.chat-user-bubble :is(p, ul, ol, li, strong, em, h1, h2, h3, h4, h5, h6, a, blockquote, code:not(pre code), td, th) {
+    color: inherit !important;
+}
+.chat-user-bubble :is(li)::marker {
+    color: inherit;
+}

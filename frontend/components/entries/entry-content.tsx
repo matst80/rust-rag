@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { GitBranch } from "lucide-react";
+import { GitBranch, Code2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import dynamic from "next/dynamic";
 const EntryCodeMirrorEditor = dynamic(
@@ -353,6 +353,15 @@ ${(entry.text ?? "").slice(0, 6000)}`
                                 .map((t) => t.trim())
                                 .filter(Boolean)}
                             />
+                          ) : key === "repo" ? (
+                            <Link
+                              href={`/code?repo=${encodeURIComponent(String(value))}`}
+                              className="flex items-center gap-1 text-primary hover:underline"
+                              title="Open this repo in Code Search"
+                            >
+                              <span className="truncate">{String(value)}</span>
+                              <Code2 className="size-3.5 shrink-0" />
+                            </Link>
                           ) : (
                             String(value)
                           )}

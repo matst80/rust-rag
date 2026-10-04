@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{borrow::Cow, collections::HashMap, convert::Infallible};
+use std::{borrow::Cow, collections::HashMap, convert::Infallible, time::Duration};
 
 const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const SEARCH_ENTRIES_TOOL: &str = "search_entries";
@@ -367,36 +367,82 @@ pub(super) async fn chat_completions(
                 }
             };
 
-            let upstream_request = state
-                .http_client
-                .post(format!(
-                    "{}{}",
-                    openai_config
-                        .base_url
-                        .as_deref()
-                        .expect("config already validated")
-                        .trim_end_matches('/'),
-                    CHAT_COMPLETIONS_PATH,
-                ))
-                .json(&upstream_payload);
+            // Transient upstream failures (rate limits, gateway errors) are
+            // retried with backoff before surfacing an error to the client.
+            // This is safe here: nothing has been yielded for this tool-loop
+            // iteration yet, so a retry can't duplicate output. The total
+            // wait stays well under typical proxy idle timeouts (~60s).
+            const UPSTREAM_MAX_RETRIES: u32 = 4;
+            const RETRYABLE: [StatusCode; 4] = [
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::BAD_GATEWAY,
+                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::GATEWAY_TIMEOUT,
+            ];
 
-            let upstream_request = if let Some(api_key) = openai_config.api_key.as_deref() {
-                upstream_request.bearer_auth(api_key)
-            } else {
-                upstream_request
-            };
+            let upstream_url = format!(
+                "{}{}",
+                openai_config
+                    .base_url
+                    .as_deref()
+                    .expect("config already validated")
+                    .trim_end_matches('/'),
+                CHAT_COMPLETIONS_PATH,
+            );
 
-            let upstream_response = match upstream_request.send().await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    yield Ok::<_, Infallible>(encode_error_event(&format!(
-                        "failed to call upstream chat provider: {error}"
-                    )));
-                    yield Ok::<_, Infallible>(encode_done_event());
-                    break;
+            let mut attempt: u32 = 0;
+            let mut upstream_response = None;
+            let mut send_error: Option<String> = None;
+            loop {
+                let upstream_request = state
+                    .http_client
+                    .post(&upstream_url)
+                    .json(&upstream_payload);
+
+                let upstream_request = if let Some(api_key) = openai_config.api_key.as_deref() {
+                    upstream_request.bearer_auth(api_key)
+                } else {
+                    upstream_request
+                };
+
+                match upstream_request.send().await {
+                    Ok(response) if response.status().is_success() => {
+                        upstream_response = Some(response);
+                        break;
+                    }
+                    Ok(response) if RETRYABLE.contains(&response.status()) && attempt < UPSTREAM_MAX_RETRIES => {
+                        attempt += 1;
+                        let retry_after = response
+                            .headers()
+                            .get(header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| value.parse::<u64>().ok());
+                        let _ = response.text().await;
+                        tokio::time::sleep(upstream_retry_delay(attempt, retry_after)).await;
+                    }
+                    Ok(response) => {
+                        // Non-retryable status — the error path below reports it.
+                        upstream_response = Some(response);
+                        break;
+                    }
+                    Err(_error) if attempt < UPSTREAM_MAX_RETRIES => {
+                        attempt += 1;
+                        tokio::time::sleep(upstream_retry_delay(attempt, None)).await;
+                    }
+                    Err(error) => {
+                        send_error = Some(format!("failed to call upstream chat provider: {error}"));
+                        break;
+                    }
                 }
-            };
+            }
+
+            if let Some(message) = send_error {
+                yield Ok::<_, Infallible>(encode_error_event(&message));
+                yield Ok::<_, Infallible>(encode_done_event());
+                break;
+            }
+
+            let upstream_response = upstream_response.expect("response or send_error is set");
 
             if !upstream_response.status().is_success() {
                 let status = upstream_response.status();
@@ -582,6 +628,19 @@ fn build_upstream_payload(
 
 fn sanitize_tool_choice(tool_choice: Option<Value>) -> Option<Value> {
     tool_choice
+}
+
+/// Backoff before retrying a transient upstream failure. `attempt` is 1-based.
+/// Honors a provider-supplied `Retry-After` (seconds) when present; either way
+/// the delay is clamped so total retry time stays well under proxy idle
+/// timeouts (1+2+4+8 = 15s for the default 4 retries).
+fn upstream_retry_delay(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
+    const MAX: Duration = Duration::from_secs(20);
+    if let Some(secs) = retry_after_secs {
+        return Duration::from_secs(secs).min(MAX);
+    }
+    let exp = (attempt.saturating_sub(1)).min(4);
+    Duration::from_secs(1u64 << exp).min(MAX)
 }
 
 fn server_tool_definitions() -> Vec<ChatToolDefinition> {
@@ -1960,5 +2019,22 @@ mod tests {
             parsed["results"][0]["id"],
             Value::String("doc-1".to_owned())
         );
+    }
+
+    #[test]
+    fn retry_delay_backs_off_exponentially() {
+        assert_eq!(upstream_retry_delay(1, None), Duration::from_secs(1));
+        assert_eq!(upstream_retry_delay(2, None), Duration::from_secs(2));
+        assert_eq!(upstream_retry_delay(3, None), Duration::from_secs(4));
+        assert_eq!(upstream_retry_delay(4, None), Duration::from_secs(8));
+        // Far more attempts than we ever make still stay clamped.
+        assert_eq!(upstream_retry_delay(9, None), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn retry_delay_honors_retry_after_but_clamps() {
+        assert_eq!(upstream_retry_delay(1, Some(5)), Duration::from_secs(5));
+        // A provider asking for minutes must not stall the client stream.
+        assert_eq!(upstream_retry_delay(1, Some(300)), Duration::from_secs(20));
     }
 }

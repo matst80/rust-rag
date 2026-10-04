@@ -1,9 +1,15 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
+import CodeMirror from "@uiw/react-codemirror"
+import { oneDark } from "@codemirror/theme-one-dark"
+import { EditorView, keymap } from "@codemirror/view"
+import { jsonSchema } from "codemirror-json-schema"
+import { useTheme } from "next-themes"
 import { useSchema, useUpsertSchema, useDeleteSchema, useSchemas } from "@/lib/api/hooks"
+import { DRAFT_07_META_SCHEMA } from "@/lib/schemas/draft-07-meta-schema"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -15,6 +21,64 @@ const DEFAULT_SCHEMA = `{
   "required": [],
   "additionalProperties": false
 }`
+
+function SchemaJsonEditor({
+  value,
+  onChange,
+  onSave,
+}: {
+  value: string
+  onChange: (text: string) => void
+  onSave: () => void
+}) {
+  const { resolvedTheme } = useTheme()
+  const saveRef = useRef(onSave)
+  useEffect(() => {
+    saveRef.current = onSave
+  })
+
+  // jsonSchema() bundles the JSON language, syntax linting, schema validation,
+  // completion, and hover docs against the draft-07 meta-schema.
+  const extensions = useMemo(
+    () => [
+      ...jsonSchema(DRAFT_07_META_SCHEMA),
+      EditorView.lineWrapping,
+      keymap.of([
+        {
+          key: "Mod-s",
+          preventDefault: true,
+          run: () => {
+            saveRef.current()
+            return true
+          },
+        },
+      ]),
+    ],
+    []
+  )
+
+  return (
+    <div className="rounded-md border overflow-hidden">
+      <CodeMirror
+        value={value}
+        height="600px"
+        theme={resolvedTheme === "dark" ? oneDark : "light"}
+        extensions={extensions}
+        onChange={onChange}
+        basicSetup={{
+          lineNumbers: true,
+          foldGutter: true,
+          highlightActiveLine: true,
+          highlightActiveLineGutter: true,
+          bracketMatching: true,
+          closeBrackets: true,
+          autocompletion: true,
+        }}
+        className="text-xs font-mono [&_.cm-editor]:bg-transparent"
+      />
+    </div>
+  )
+}
 
 export function SchemaEditor({ typeName }: { typeName: string }) {
   const { data, error, isLoading, mutate } = useSchema(typeName)
@@ -36,6 +100,17 @@ export function SchemaEditor({ typeName }: { typeName: string }) {
       setSchemaText(JSON.stringify(data.json_schema, null, 2))
     }
   }, [data])
+
+  function onSchemaTextChange(text: string) {
+    setSchemaText(text)
+    try {
+      JSON.parse(text)
+      setParseError(null)
+    } catch {
+      // Invalid mid-edit JSON is flagged inline by the editor's syntax linter;
+      // onSave still blocks and reports it.
+    }
+  }
 
   async function onSave() {
     setSaveError(null)
@@ -121,16 +196,12 @@ export function SchemaEditor({ typeName }: { typeName: string }) {
             rows={2}
           />
         </label>
-        <label className="space-y-1">
-          <span className="text-sm font-medium">JSON Schema</span>
-          <Textarea
-            value={schemaText}
-            onChange={(e) => setSchemaText(e.target.value)}
-            rows={24}
-            className="font-mono text-xs"
-            spellCheck={false}
-          />
-        </label>
+        <div className="space-y-1">
+          <span className="text-sm font-medium">
+            JSON Schema <span className="text-muted-foreground font-normal">(draft-07, ⌘S to save)</span>
+          </span>
+          <SchemaJsonEditor value={schemaText} onChange={onSchemaTextChange} onSave={onSave} />
+        </div>
         {parseError && (
           <p className="text-sm text-destructive">JSON parse error: {parseError}</p>
         )}

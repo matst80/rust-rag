@@ -1,6 +1,6 @@
 "use client"
 
-import { FileText, Search, ListTree, Database, Tag } from "lucide-react"
+import { FileText, Search, ListTree, Database, Tag, CheckCircle2, AlertTriangle } from "lucide-react"
 import { MarkdownView } from "@/components/entries/markdown-view"
 import { Badge } from "@/components/ui/badge"
 
@@ -96,7 +96,7 @@ export function ToolResultView({ name, result }: { name: string; result: string 
       )
     }
 
-    if (name === "get_entry" && data.id) {
+    if (["get_entry", "get_item"].includes(name) && data.id) {
       const entry = data as EntryResult
       return (
         <div className="flex flex-col gap-3 p-4 bg-card border border-border/50">
@@ -145,6 +145,125 @@ export function ToolResultView({ name, result }: { name: string; result: string 
               </div>
             );
           })()}
+        </div>
+      )
+    }
+
+    if (name === "list_categories" && Array.isArray(data?.categories)) {
+      const categories: { source_id: string; item_count: number }[] = data.categories
+      return (
+        <div className="flex flex-wrap gap-1.5 py-1">
+          {categories.map((c) => (
+            <div
+              key={c.source_id}
+              className="flex items-center gap-1.5 border border-primary/20 bg-primary/5 px-2 py-1 transition-colors hover:border-primary/40"
+            >
+              <Tag className="size-2.5 text-primary" />
+              <span className="font-mono text-[10px] font-bold uppercase tracking-wider">{c.source_id}</span>
+              <span className="border-l border-border pl-1.5 font-mono text-[9px] tabular-nums text-primary/70">
+                {c.item_count}
+              </span>
+            </div>
+          ))}
+          {categories.length === 0 && (
+            <p className="w-full py-1 text-center font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+              No categories yet
+            </p>
+          )}
+        </div>
+      )
+    }
+
+    if (name === "list_items" && Array.isArray(data?.items)) {
+      const items: (EntryResult & { created_at?: number; path?: string | null })[] = data.items
+      const shown = items.slice(0, 25)
+      return (
+        <div className="flex flex-col gap-1.5 py-1">
+          {shown.map((item) => (
+            <div
+              key={item.id}
+              className="group flex flex-col gap-1 border border-border/50 bg-card p-2 transition-colors hover:border-primary/30"
+            >
+              <div className="flex items-center gap-2">
+                <FileText className="size-3 shrink-0 text-primary/70" />
+                <span className="truncate font-mono text-[10px] font-bold text-primary/90">{item.id}</span>
+                <Badge variant="outline" className="ml-auto h-4 shrink-0 px-1.5 py-0 font-mono text-[9px] opacity-60">
+                  {item.source_id}
+                </Badge>
+              </div>
+              {item.path && (
+                <div className="flex items-center gap-1 pl-5 font-mono text-[9px] text-muted-foreground">
+                  <ListTree className="size-2.5" />
+                  {item.path}
+                </div>
+              )}
+              <p className="line-clamp-2 pl-5 text-[10px] leading-relaxed text-muted-foreground/80">
+                {item.text?.slice(0, 240)}
+              </p>
+            </div>
+          ))}
+          {items.length > shown.length && (
+            <p className="pt-1 text-center font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
+              showing {shown.length} of {data.total_count ?? items.length} items
+            </p>
+          )}
+          {items.length === 0 && (
+            <p className="w-full py-1 text-center font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+              No items found
+            </p>
+          )}
+        </div>
+      )
+    }
+
+    if ((name === "store_entry" || name === "update_item") && typeof data?.id === "string") {
+      const chunkIds: string[] | undefined = data.chunk_ids
+      return (
+        <div className="flex flex-col gap-2 py-1">
+          <div className="flex items-center gap-2 border border-green-500/25 bg-green-500/5 px-2.5 py-2">
+            <CheckCircle2 className="size-3.5 shrink-0 text-green-500" />
+            <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-green-500">
+              {name === "store_entry" ? "Entry stored" : "Entry updated"}
+            </span>
+            <span className="ml-auto truncate font-mono text-[10px] text-primary" title={data.id}>
+              {data.id}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 pl-1">
+            {data.source_id && (
+              <Badge variant="outline" className="h-4 px-1.5 py-0 font-mono text-[9px] opacity-60">
+                {data.source_id}
+              </Badge>
+            )}
+            {chunkIds && chunkIds.length > 0 && (
+              <span className="font-mono text-[9px] text-muted-foreground">
+                split into {chunkIds.length} chunks
+              </span>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    if (name === "delete_item" && typeof data?.id === "string") {
+      return (
+        <div className="flex items-center gap-2 py-1">
+          {data.deleted ? (
+            <>
+              <CheckCircle2 className="size-3.5 shrink-0 text-green-500" />
+              <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-green-500">Deleted</span>
+            </>
+          ) : (
+            <>
+              <AlertTriangle className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                Not found
+              </span>
+            </>
+          )}
+          <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground" title={data.id}>
+            {data.id}
+          </span>
         </div>
       )
     }

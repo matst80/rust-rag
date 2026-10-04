@@ -53,8 +53,8 @@ CREATE TABLE code_symbols (
     visibility TEXT NOT NULL DEFAULT '',
     exemplar TEXT NOT NULL DEFAULT '',
     hotpath TEXT NOT NULL DEFAULT '',
-    -- all-MiniLM-L6-v2, 384 dims, cosine-normalized float32
-    dense_embedding vector(384) NOT NULL,
+    -- all-MiniLM-L6-v2, 384 dims, cosine-normalized float32 (optional)
+    dense_embedding vector(384),
     embedding_model TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2',
     embedding_version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

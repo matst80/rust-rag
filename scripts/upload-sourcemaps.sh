@@ -16,7 +16,9 @@
 #   IMAGE defaults to $FRONTEND_IMAGE_NAME (matst80/rust-rag-frontend:latest)
 #
 # Env:
-#   RUM_BASE_URL   RUM backend base URL (default https://otel.k6n.net)
+#   RUM_BASE_URL            RUM backend base URL (default https://otel.k6n.net)
+#   SOURCEMAP_UPLOAD_KEY    X-Sourcemap-Key the ingest requires (defaults to
+#                           the shared non-secret upload key)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -24,6 +26,9 @@ cd "$(dirname "$0")/.."
 RELEASE="${1:-$(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)}"
 IMAGE="${2:-${FRONTEND_IMAGE_NAME:-matst80/rust-rag-frontend:latest}}"
 BASE_URL="${RUM_BASE_URL:-https://otel.k6n.net}"
+# Upload-auth key (not a secret): only stops random internet clients from
+# pushing maps, so it's committed with the rest of the pipeline.
+SOURCEMAP_KEY="${SOURCEMAP_UPLOAD_KEY:-6901e62e4468631f27f1dc85fd4231f35b5e591c61f5bcfa}"
 FRONTEND_DIR="frontend"
 
 echo "release: $RELEASE"
@@ -85,6 +90,7 @@ for js in "$WORKDIR"/static/**/*.js; do
   fi
   if curl --fail-with-body --silent --show-error \
     -X POST "$BASE_URL/api/sourcemaps" \
+    -H "X-Sourcemap-Key: $SOURCEMAP_KEY" \
     -F "release=$RELEASE" \
     -F "source=$source_path" \
     -F "file=@$map;type=application/json" >/dev/null; then

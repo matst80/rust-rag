@@ -14,9 +14,9 @@ use rust_rag::api::harness::{
 };
 use rust_rag::db::postgres::{PostgresVectorStore, connect};
 use rust_rag::db::{
-    CODE_EMBEDDING_DIM, CodeStore, CodeSymbolGraph, GraphConfig, GraphEdgeType, ItemRecord,
-    ListItemsRequest, ManualEdgeInput, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo,
-    ParsedCodeSymbol, SortOrder, VectorStore,
+    CodeStore, CodeSymbolGraph, GraphConfig, GraphEdgeType, ItemRecord, ListItemsRequest,
+    ManualEdgeInput, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo, ParsedCodeSymbol, SortOrder,
+    VectorStore,
 };
 
 use testcontainers::core::{ContainerPort, WaitFor};
@@ -254,7 +254,7 @@ fn code_symbol(path: &str, line: i32, name: &str) -> ParsedCodeSymbol {
         visibility: "public".to_owned(),
         exemplar: String::new(),
         hotpath: String::new(),
-        embedding: vec![0.05f32; CODE_EMBEDDING_DIM],
+        embedding: None,
     }
 }
 
@@ -303,8 +303,16 @@ async fn code_symbol_graph_multi_hop_on_postgres() {
         let parsed = ParsedCodeRepo {
             source_version: "test".to_owned(),
             files: vec![
-                ParsedCodeFile { path: "src/a.rs".to_owned(), size_bytes: 400, mtime: 1 },
-                ParsedCodeFile { path: "src/x.rs".to_owned(), size_bytes: 100, mtime: 1 },
+                ParsedCodeFile {
+                    path: "src/a.rs".to_owned(),
+                    size_bytes: 400,
+                    mtime: 1,
+                },
+                ParsedCodeFile {
+                    path: "src/x.rs".to_owned(),
+                    size_bytes: 100,
+                    mtime: 1,
+                },
             ],
             symbols: vec![
                 code_symbol("src/a.rs", 1, "a"),
@@ -321,8 +329,7 @@ async fn code_symbol_graph_multi_hop_on_postgres() {
             ],
             symbols_skipped: 0,
         };
-        code
-            .upsert_repo("code-graph-test", "/tmp/code-graph-test", parsed)
+        code.upsert_repo("code-graph-test", "/tmp/code-graph-test", parsed)
             .expect("uploading snapshot");
 
         // Depth 1: direct neighbors only — the pre-multi-hop behavior.
@@ -332,17 +339,29 @@ async fn code_symbol_graph_multi_hop_on_postgres() {
             .expect("anchor found");
         assert_eq!(g1.depth, 1);
         assert_eq!(node_ids(&g1), vec!["a", "b", "x"]);
-        assert_eq!(g1.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(), vec![0, 1, 1]);
         assert_eq!(
-            edge_ids(&g1),
-            vec![("a".to_owned(), "b".to_owned()), ("x".to_owned(), "a".to_owned())]
+            g1.nodes.iter().map(|n| n.depth).collect::<Vec<_>>(),
+            vec![0, 1, 1]
         );
         assert_eq!(
-            g1.callees.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            edge_ids(&g1),
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("x".to_owned(), "a".to_owned())
+            ]
+        );
+        assert_eq!(
+            g1.callees
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["b"]
         );
         assert_eq!(
-            g1.callers.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            g1.callers
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["x"]
         );
 
@@ -389,8 +408,16 @@ async fn code_symbol_graph_cycle_terminates_on_postgres() {
         let parsed = ParsedCodeRepo {
             source_version: "test".to_owned(),
             files: vec![
-                ParsedCodeFile { path: "src/a.rs".to_owned(), size_bytes: 500, mtime: 1 },
-                ParsedCodeFile { path: "src/x.rs".to_owned(), size_bytes: 100, mtime: 1 },
+                ParsedCodeFile {
+                    path: "src/a.rs".to_owned(),
+                    size_bytes: 500,
+                    mtime: 1,
+                },
+                ParsedCodeFile {
+                    path: "src/x.rs".to_owned(),
+                    size_bytes: 100,
+                    mtime: 1,
+                },
             ],
             symbols: vec![
                 code_symbol("src/a.rs", 1, "a"),
@@ -408,8 +435,7 @@ async fn code_symbol_graph_cycle_terminates_on_postgres() {
             ],
             symbols_skipped: 0,
         };
-        code
-            .upsert_repo("code-cycle-test", "/tmp/code-cycle-test", parsed)
+        code.upsert_repo("code-cycle-test", "/tmp/code-cycle-test", parsed)
             .expect("uploading snapshot");
 
         // Depth 1: callers of `a` include both x and c (the cycle edge).
@@ -450,6 +476,78 @@ async fn code_symbol_graph_cycle_terminates_on_postgres() {
                 ("x".to_owned(), "a".to_owned()),
             ]
         );
+    })
+    .await
+    .expect("blocking test body");
+}
+
+#[tokio::test]
+#[ignore]
+async fn code_search_bm25_without_embeddings_on_postgres() {
+    let (container, _store, code) = start_postgres().await;
+    tokio::task::spawn_blocking(move || {
+        let _container = container;
+
+        let mut sym1 = code_symbol("src/parser.rs", 10, "parse_snapshot_db");
+        sym1.signature =
+            "pub fn parse_snapshot_db(bytes: &[u8]) -> Result<ParsedCodeRepo>".to_owned();
+        sym1.doc = "Parse codesearch database snapshot without requiring dense vectors.".to_owned();
+        sym1.text = "let conn = rusqlite::Connection::open(path)?;".to_owned();
+
+        let mut sym2 = code_symbol("src/search.rs", 50, "search_symbols");
+        sym2.signature = "pub fn search_symbols(query: &str) -> Vec<Hit>".to_owned();
+        sym2.doc = "Full text BM25 ranking across code repository symbols.".to_owned();
+        sym2.text = "SELECT id, name FROM code_symbols WHERE tsv @@ query".to_owned();
+
+        let parsed = ParsedCodeRepo {
+            source_version: "test-bm25".to_owned(),
+            files: vec![
+                ParsedCodeFile {
+                    path: "src/parser.rs".to_owned(),
+                    size_bytes: 500,
+                    mtime: 1,
+                },
+                ParsedCodeFile {
+                    path: "src/search.rs".to_owned(),
+                    size_bytes: 400,
+                    mtime: 1,
+                },
+            ],
+            symbols: vec![sym1, sym2],
+            calls: vec![],
+            symbols_skipped: 0,
+        };
+        code.upsert_repo("bm25-test-repo", "/tmp/bm25-test", parsed)
+            .expect("uploading snapshot without embeddings");
+
+        // 1. Exact / partial symbol name search
+        let hits = code
+            .search("parse_snapshot_db", Some("bm25-test-repo"), None, None, 10)
+            .expect("search exact name");
+        assert!(!hits.is_empty(), "expected hits for exact name");
+        assert_eq!(hits[0].symbol_name.as_deref(), Some("parse_snapshot_db"));
+        assert!(hits[0].score > 0.5, "exact match score should be high");
+
+        // 2. Snake-case keyword search ("snapshot")
+        let hits_keyword = code
+            .search("snapshot", Some("bm25-test-repo"), None, None, 10)
+            .expect("search keyword");
+        assert!(
+            !hits_keyword.is_empty(),
+            "expected hits for keyword snapshot"
+        );
+        assert_eq!(
+            hits_keyword[0].symbol_name.as_deref(),
+            Some("parse_snapshot_db")
+        );
+
+        // 3. Keyword in doc comments / BM25 search
+        let hits_bm25 = code
+            .search("BM25 ranking", Some("bm25-test-repo"), None, None, 10)
+            .expect("search BM25 ranking");
+        assert!(!hits_bm25.is_empty(), "expected hits for doc keyword");
+        assert_eq!(hits_bm25[0].symbol_name.as_deref(), Some("search_symbols"));
+        assert!(hits_bm25[0].score > 0.0);
     })
     .await
     .expect("blocking test body");

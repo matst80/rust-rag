@@ -24,9 +24,10 @@ import { EntryHeader } from "./entry-header";
 import { EntryContent } from "./entry-content";
 import { EntryGraphPanel } from "./entry-graph-panel";
 import { RelatedPanel } from "./related-panel";
+import { EntryCodePanel } from "./entry-code-panel";
 import { MarkdownView } from "./markdown-view";
 import { CommentsPanel } from "./comments-panel";
-import { Eye, MessageSquare, GitBranch, Network } from "lucide-react";
+import { Eye, MessageSquare, GitBranch, Network, Code2 } from "lucide-react";
 
 interface EntryDetailProps {
   id: string;
@@ -51,7 +52,9 @@ export function EntryDetail({ id }: EntryDetailProps) {
   );
   const [isDataValid, setIsDataValid] = useState(true);
   const [editPanelTab, setEditPanelTab] = useState<"preview" | "comments">("preview");
-  const [sidePanelTab, setSidePanelTab] = useState<"related" | "graph">("related");
+  const [sidePanelTab, setSidePanelTab] = useState<
+    "related" | "graph" | "code"
+  >("related");
 
   useEffect(() => {
     if (entry) {
@@ -317,10 +320,24 @@ export function EntryDetail({ id }: EntryDetailProps) {
                   <GitBranch className="size-3.5" />
                   Graph
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setSidePanelTab("code")}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                    sidePanelTab === "code"
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Code2 className="size-3.5" />
+                  Code
+                </button>
               </div>
               <div className="flex-1 overflow-hidden">
                 {sidePanelTab === "related" ? (
                   <RelatedPanel id={id} edges={edges} />
+                ) : sidePanelTab === "code" ? (
+                  <EntryCodePanel entry={entry} />
                 ) : (
                   <EntryGraphPanel id={id} edges={edges} />
                 )}

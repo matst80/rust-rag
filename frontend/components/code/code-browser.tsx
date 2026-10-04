@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useSearchParams } from "next/navigation"
 import {
   Braces,
   ChevronDown,
@@ -52,7 +53,12 @@ function basename(path: string): string {
 }
 
 export function CodeBrowser() {
+  const searchParams = useSearchParams()
+  const urlRepo = searchParams.get("repo")
+  const urlQuery = searchParams.get("q")
+  const urlFile = searchParams.get("file")
   const [repos, setRepos] = useState<CodeRepoSummary[]>([])
+  const [reposLoaded, setReposLoaded] = useState(false)
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [files, setFiles] = useState<CodeFileMeta[]>([])
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
@@ -69,12 +75,16 @@ export function CodeBrowser() {
   const [uploadHasFile, setUploadHasFile] = useState(false)
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Query the current hits were produced with — drives the shareable URL.
+  const lastSearched = useRef("")
 
   const refreshRepos = useCallback(async () => {
     try {
       setRepos(await listCodeRepos())
     } catch (e) {
       setError(String(e))
+    } finally {
+      setReposLoaded(true)
     }
   }, [])
 
@@ -82,10 +92,50 @@ export function CodeBrowser() {
     refreshRepos()
   }, [refreshRepos])
 
-  // Auto-pick a scope once, so the page is usable immediately.
+  // Auto-pick a scope once, so the page is usable immediately — unless the URL
+  // names a repo or query, in which case the deep-link effect decides the scope.
   useEffect(() => {
+    if (urlRepo || urlQuery) return
     setSelectedRepo((current) => current ?? repos[0]?.name ?? null)
-  }, [repos])
+  }, [repos, urlRepo, urlQuery])
+
+  // Apply ?repo= / ?q= / ?file= deep links (from entries etc.) once, after the
+  // repo list is known — an unknown repo falls back to all-repos scope.
+  const repoMissing = !!urlRepo && !repos.some((r) => r.name === urlRepo)
+  useEffect(() => {
+    if (!reposLoaded) return
+    let repo: string | null = null
+    if (urlRepo) {
+      repo = repos.some((r) => r.name === urlRepo) ? urlRepo : null
+      setSelectedRepo(repo)
+    }
+    if (urlFile && repo) {
+      setSelectedFile(urlFile)
+      setTab("files")
+    }
+    if (urlQuery) {
+      setQuery(urlQuery)
+      lastSearched.current = urlQuery
+      setBusy(true)
+      searchCode({ query: urlQuery, repo: repo ?? undefined, limit: 20 })
+        .then(setHits)
+        .catch((e) => setError(String(e)))
+        .finally(() => setBusy(false))
+    }
+    // Deep links only need to apply once per page load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reposLoaded])
+
+  // Keep the URL in sync with the current scope/search so views stay shareable.
+  useEffect(() => {
+    if (!reposLoaded) return
+    const params = new URLSearchParams()
+    if (selectedRepo) params.set("repo", selectedRepo)
+    if (lastSearched.current) params.set("q", lastSearched.current)
+    if (tab === "files" && selectedFile) params.set("file", selectedFile)
+    const qs = params.toString()
+    window.history.replaceState(null, "", qs ? `/code?${qs}` : "/code")
+  }, [reposLoaded, selectedRepo, selectedFile, tab, hits])
 
   useEffect(() => {
     if (!selectedRepo) return
@@ -121,6 +171,7 @@ export function CodeBrowser() {
     if (!query.trim()) return
     setBusy(true)
     setError(null)
+    lastSearched.current = query.trim()
     try {
       setHits(
         await searchCode({
@@ -283,6 +334,14 @@ export function CodeBrowser() {
             />
           ))}
         </div>
+      )}
+
+      {urlRepo && repoMissing && reposLoaded && (
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <ScanSearch className="size-3.5" />
+          Repo <span className="font-mono text-foreground/80">{urlRepo}</span> is
+          not indexed — searching across all repos instead.
+        </p>
       )}
 
       {/* Search bar */}

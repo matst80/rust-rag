@@ -53,6 +53,32 @@ function clampHeightVh(vh: number): number {
   return Math.round(Math.min(MAX_HEIGHT_VH, Math.max(MIN_HEIGHT_VH, vh)))
 }
 
+// Hover popup geometry: the card is clamped inside the graph box, flipping to
+// the left/above the cursor once the preferred (right/below) placement would
+// overflow. Sizes are generous upper bounds — clipping the corner on a bad
+// estimate is fine, drifting off-box is not.
+const HOVER_CARD_WIDTH = 288
+const HOVER_CARD_HEIGHT = 220
+const CURSOR_OFFSET = 14
+
+function clampCardPos(x: number, y: number, boxW: number, boxH: number) {
+  let left = x + CURSOR_OFFSET
+  let top = y + CURSOR_OFFSET
+  if (left + HOVER_CARD_WIDTH > boxW) left = Math.max(8, x - HOVER_CARD_WIDTH - CURSOR_OFFSET)
+  if (top + HOVER_CARD_HEIGHT > boxH) top = Math.max(8, y - HOVER_CARD_HEIGHT - CURSOR_OFFSET)
+  return { left, top }
+}
+
+// Everything the popup shows about one graph node, derived from the fetched
+// graph: the symbol itself, its BFS distance from the anchor, and how many
+// call edges point in/out of it.
+interface SymbolNodeInfo {
+  symbol: CodeSymbolRef
+  depth: number
+  inCount: number
+  outCount: number
+}
+
 function basename(path: string): string {
   return path.split("/").pop() ?? path
 }
@@ -118,6 +144,16 @@ export function SymbolGraphSheet({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  // Node under the cursor plus the pointer position in graph-box coordinates
+  // (captured at pointer-over time; the popup is clamped against boxW/H).
+  const [hovered, setHovered] = useState<{
+    id: string
+    x: number
+    y: number
+    boxW: number
+    boxH: number
+  } | null>(null)
+  const graphBoxRef = useRef<HTMLDivElement | null>(null)
   const [depth, setDepth] = useState(DEFAULT_DEPTH)
   // Bottom-bar height in vh; persists across open/close for the page session.
   const [heightVh, setHeightVh] = useState(DEFAULT_HEIGHT_VH)
@@ -137,6 +173,7 @@ export function SymbolGraphSheet({
     setLoading(true)
     setError(null)
     setSelected(null)
+    setHovered(null)
     if (newTarget) setGraph(null)
     getCodeSymbolGraph(repo, target.path, target.symbol, 24, depth)
       .then((g) => {
@@ -191,14 +228,63 @@ export function SymbolGraphSheet({
     })
   }, [graph])
 
+  const nodeInfo = useMemo<Map<string, SymbolNodeInfo>>(() => {
+    const map = new Map<string, SymbolNodeInfo>()
+    if (!graph) return map
+    for (const n of graph.nodes) {
+      map.set(nodeKey(n.symbol), {
+        symbol: n.symbol,
+        depth: n.depth,
+        inCount: 0,
+        outCount: 0,
+      })
+    }
+    for (const e of graph.edges) {
+      const from = map.get(nodeKey(e.from))
+      const to = map.get(nodeKey(e.to))
+      if (from) from.outCount++
+      if (to) to.inCount++
+    }
+    return map
+  }, [graph])
+
+  const anchorKey = graph ? nodeKey(graph.symbol) : null
+
   const onCanvasClick = useCallback(() => setSelected(null), [])
 
-  // Re-center action for the selected connected node (the anchor has nothing
-  // to re-center to). Same navigation as double-click, just discoverable.
-  const recenterTarget = useMemo(() => {
-    if (!graph || !selected || selected === nodeKey(graph.symbol)) return null
-    return graph.nodes.find((n) => nodeKey(n.symbol) === selected)?.symbol ?? null
-  }, [graph, selected])
+  // Info for the selected node — rendered as the pinned card at the bottom of
+  // the canvas. Selecting the anchor shows its card too, even though the
+  // header repeats the same details; consistency beats special-casing.
+  const selectedInfo = selected ? (nodeInfo.get(selected) ?? null) : null
+  const isAnchorSelected = !!anchorKey && selected === anchorKey
+
+  // Hovering the selected node would duplicate the pinned card — skip it.
+  const hoverInfo = hovered ? (nodeInfo.get(hovered.id) ?? null) : null
+  const hoverPos = hovered && selected !== hovered.id
+    ? clampCardPos(hovered.x, hovered.y, hovered.boxW, hovered.boxH)
+    : null
+
+  // Hover popup handlers. The event is reagraph's (react-three-fiber) pointer
+  // event; only the DOM coordinates are needed, so a structural type avoids
+  // importing @react-three/fiber directly.
+  const onNodePointerOver = useCallback(
+    (node: InternalGraphNode, event: { clientX: number; clientY: number }) => {
+      const rect = graphBoxRef.current?.getBoundingClientRect()
+      if (!rect) return
+      setHovered({
+        id: node.id,
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+        boxW: rect.width,
+        boxH: rect.height,
+      })
+    },
+    []
+  )
+
+  const onNodePointerOut = useCallback((node: InternalGraphNode) => {
+    setHovered((h) => (h?.id === node.id ? null : h))
+  }, [])
 
   const recenterOn = useCallback(
     (nodeId: string) => {
@@ -356,7 +442,10 @@ export function SymbolGraphSheet({
         {graph ? (
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 pb-4 scrollbar-thin md:flex-row md:overflow-hidden">
               <div className="flex shrink-0 flex-col md:min-h-0 md:flex-1">
-                <div className="relative h-52 min-h-[180px] overflow-hidden rounded-2xl border border-primary/10 md:h-auto md:min-h-0 md:flex-1">
+                <div
+                  ref={graphBoxRef}
+                  className="relative h-52 min-h-[180px] overflow-hidden rounded-2xl border border-primary/10 md:h-auto md:min-h-0 md:flex-1"
+                >
                   <GraphCanvas
                     theme={theme}
                     nodes={nodes}
@@ -375,41 +464,61 @@ export function SymbolGraphSheet({
                     draggable
                     edgeArrowPosition="end"
                     onNodeClick={onNodeClick}
+                    onNodePointerOver={onNodePointerOver}
+                    onNodePointerOut={onNodePointerOut}
                     onCanvasClick={onCanvasClick}
                   />
-                  {recenterTarget && (
-                    <div className="absolute inset-x-0 bottom-2 flex justify-center">
-                      <div className="flex items-center gap-1.5 rounded-full border bg-background/90 py-1 pl-3 pr-1 shadow-lg backdrop-blur">
-                        <span
-                          className="max-w-[220px] truncate font-mono text-xs font-semibold"
-                          title={recenterTarget.path}
-                        >
-                          {recenterTarget.name}
-                        </span>
-                        <Button
-                          size="sm"
-                          className="h-6 rounded-full px-2.5 text-[10px] font-bold uppercase tracking-wider"
-                          onClick={() =>
-                            onNavigate({ path: recenterTarget.path, symbol: recenterTarget.name })
+                  {hoverInfo && hoverPos && (
+                    <div
+                      className="pointer-events-none absolute z-20 w-72 rounded-xl border bg-background/95 p-3 text-left shadow-xl backdrop-blur"
+                      style={{ left: hoverPos.left, top: hoverPos.top }}
+                    >
+                      <SymbolInfoCard
+                        info={hoverInfo}
+                        isAnchor={!!anchorKey && nodeKey(hoverInfo.symbol) === anchorKey}
+                      />
+                    </div>
+                  )}
+                  {selectedInfo && (
+                    <div className="absolute inset-x-0 bottom-2 flex justify-center px-3">
+                      <div className="w-full max-w-sm rounded-2xl border bg-background/95 p-3 shadow-xl backdrop-blur">
+                        <SymbolInfoCard
+                          info={selectedInfo}
+                          isAnchor={isAnchorSelected}
+                          actions={
+                            <>
+                              {!isAnchorSelected && (
+                                <Button
+                                  size="sm"
+                                  className="h-6 rounded-full px-2.5 text-[10px] font-bold uppercase tracking-wider"
+                                  onClick={() =>
+                                    onNavigate({
+                                      path: selectedInfo.symbol.path,
+                                      symbol: selectedInfo.symbol.name,
+                                    })
+                                  }
+                                >
+                                  Re-center
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-6 rounded-full"
+                                onClick={() => setSelected(null)}
+                                title="Clear selection"
+                              >
+                                <X className="size-3" />
+                              </Button>
+                            </>
                           }
-                        >
-                          Re-center
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-6 rounded-full"
-                          onClick={() => setSelected(null)}
-                          title="Clear selection"
-                        >
-                          <X className="size-3" />
-                        </Button>
+                        />
                       </div>
                     </div>
                   )}
                 </div>
                 <p className="mt-2 text-center text-[9px] font-medium uppercase tracking-widest text-muted-foreground/40">
-                  Click to select · double-click to re-center · ± to change depth
+                  Hover for details · click to select · double-click to re-center · ± to change depth
                 </p>
               </div>
 
@@ -473,6 +582,58 @@ export function SymbolGraphSheet({
         )}
       </SheetContent>
     </Sheet>
+  )
+}
+
+// Symbol details for the hover popup and the pinned selection card — kind,
+// qualname, location, BFS distance from the anchor, call degree, signature.
+function SymbolInfoCard({
+  info,
+  isAnchor,
+  actions,
+}: {
+  info: SymbolNodeInfo
+  isAnchor: boolean
+  actions?: React.ReactNode
+}) {
+  const { symbol, depth, inCount, outCount } = info
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="shrink-0 text-[8px] uppercase font-bold tracking-widest">
+          {symbol.kind || "symbol"}
+        </Badge>
+        <span
+          className="truncate font-mono text-xs font-bold"
+          title={symbol.qualname || symbol.name}
+        >
+          {symbol.name}
+        </span>
+        {actions && <span className="ml-auto flex shrink-0 items-center gap-1">{actions}</span>}
+      </div>
+      <p className="truncate font-mono text-[10px] text-muted-foreground" title={symbol.path}>
+        {symbol.path}
+        <span className="ml-1.5 text-muted-foreground/60">
+          L{symbol.line}–{symbol.end_line}
+        </span>
+      </p>
+      <p className="text-[10px] text-muted-foreground/70">
+        {isAnchor ? "Anchor" : `${depth} hop${depth === 1 ? "" : "s"} from anchor`}
+        <span className="mx-1.5 text-muted-foreground/30">·</span>
+        <span className="text-amber-600 dark:text-amber-400">
+          {outCount} call{outCount === 1 ? "" : "s"} out
+        </span>
+        <span className="mx-1.5 text-muted-foreground/30">·</span>
+        <span className="text-emerald-600 dark:text-emerald-400">
+          {inCount} called by
+        </span>
+      </p>
+      {symbol.signature && (
+        <pre className="max-h-16 overflow-y-auto scrollbar-thin rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-foreground/80">
+          {symbol.signature}
+        </pre>
+      )}
+    </div>
   )
 }
 

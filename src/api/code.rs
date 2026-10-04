@@ -42,6 +42,7 @@ fn code_store(state: &AppState) -> Result<std::sync::Arc<crate::db::CodeStore>, 
     })
 }
 
+#[allow(dead_code)]
 fn code_embedder(
     state: &AppState,
 ) -> Result<std::sync::Arc<super::state::EmbedderHandle>, ApiError> {
@@ -133,9 +134,7 @@ pub struct CodeSearchRequest {
     pub limit: Option<usize>,
 }
 
-/// POST /api/code/search — semantic symbol search. Query embedding comes
-/// from the dedicated all-MiniLM-L6-v2 session, matching how the snapshots
-/// were embedded upstream.
+/// POST /api/code/search — BM25 / full-text symbol search across code snapshots.
 pub async fn search_code(
     State(state): State<AppState>,
     Json(req): Json<CodeSearchRequest>,
@@ -146,15 +145,10 @@ pub async fn search_code(
     }
 
     let store = code_store(&state)?;
-    let embedder = code_embedder(&state)?.get_ready()?;
-    let embedding = spawn_blocking(move || embedder.embed(&query))
-        .await?
-        .map_err(ApiError::Internal)?;
-
     let limit = req.limit.unwrap_or(20);
     let hits = spawn_blocking(move || {
         store.search(
-            &embedding,
+            &query,
             req.repo.as_deref(),
             req.language.as_deref(),
             req.path_prefix.as_deref(),

@@ -313,7 +313,7 @@ impl RoundContext {
     fn claim_action(&self) -> Option<()> {
         use std::sync::atomic::Ordering;
         self.action_budget
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
             .ok()
             .map(|_| ())
     }
