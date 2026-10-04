@@ -68,7 +68,7 @@ pub struct ItemRecord {
 
 /// One row in `dream_actions`: what the dreaming worker decided about an item,
 /// what it actually did, and why. `dry_run` rows are proposals only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DreamActionRecord {
     pub id: String,
     pub round_id: String,
@@ -511,8 +511,9 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
         OntologyPredicateRecord {
             name: "EVIDENCED_BY".to_owned(),
             source_id: None,
-            description: "from (a todo) is motivated by session evidence to (a POC or promoted memory)"
-                .to_owned(),
+            description:
+                "from (a todo) is motivated by session evidence to (a POC or promoted memory)"
+                    .to_owned(),
             direction: "from is evidenced by to".to_owned(),
             example_from: Some("harness_todo".to_owned()),
             example_to: Some("harness_poc".to_owned()),
@@ -1231,7 +1232,12 @@ pub trait VectorStore: Send + Sync {
     }
 
     /// Public shares
-    fn create_public_share(&self, _item_id: &str, _token: &str, _expires_at: Option<i64>) -> Result<PublicShareRecord> {
+    fn create_public_share(
+        &self,
+        _item_id: &str,
+        _token: &str,
+        _expires_at: Option<i64>,
+    ) -> Result<PublicShareRecord> {
         anyhow::bail!("public shares not supported by this store")
     }
     fn get_public_share(&self, _token: &str) -> Result<Option<PublicShareRecord>> {
@@ -2767,7 +2773,12 @@ impl VectorStore for SqliteVectorStore {
         Ok(true)
     }
 
-    fn create_public_share(&self, item_id: &str, token: &str, expires_at: Option<i64>) -> Result<PublicShareRecord> {
+    fn create_public_share(
+        &self,
+        item_id: &str,
+        token: &str,
+        expires_at: Option<i64>,
+    ) -> Result<PublicShareRecord> {
         let guard = self.connection.lock().expect("sqlite mutex poisoned");
         let connection = guard
             .as_ref()
@@ -4370,23 +4381,63 @@ mod tests {
         let edges = store.list_graph_edges(None, None, None).unwrap();
         let same_edge = edges
             .iter()
-            .find(|e| (e.from_item_id == "base" && e.to_item_id == "same-repo") || (e.from_item_id == "same-repo" && e.to_item_id == "base"))
+            .find(|e| {
+                (e.from_item_id == "base" && e.to_item_id == "same-repo")
+                    || (e.from_item_id == "same-repo" && e.to_item_id == "base")
+            })
             .expect("expected similarity edge between base and same-repo");
         let diff_edge = edges
             .iter()
-            .find(|e| (e.from_item_id == "base" && e.to_item_id == "diff-repo") || (e.from_item_id == "diff-repo" && e.to_item_id == "base"))
+            .find(|e| {
+                (e.from_item_id == "base" && e.to_item_id == "diff-repo")
+                    || (e.from_item_id == "diff-repo" && e.to_item_id == "base")
+            })
             .expect("expected similarity edge between base and diff-repo");
 
-        assert_eq!(same_edge.metadata.get("same_repo").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(diff_edge.metadata.get("same_repo").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            same_edge
+                .metadata
+                .get("same_repo")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            diff_edge
+                .metadata
+                .get("same_repo")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
 
-        let same_raw = same_edge.metadata.get("raw_distance").and_then(|v| v.as_f64()).unwrap();
-        let same_dist = same_edge.metadata.get("distance").and_then(|v| v.as_f64()).unwrap();
-        let diff_raw = diff_edge.metadata.get("raw_distance").and_then(|v| v.as_f64()).unwrap();
-        let diff_dist = diff_edge.metadata.get("distance").and_then(|v| v.as_f64()).unwrap();
+        let same_raw = same_edge
+            .metadata
+            .get("raw_distance")
+            .and_then(|v| v.as_f64())
+            .unwrap();
+        let same_dist = same_edge
+            .metadata
+            .get("distance")
+            .and_then(|v| v.as_f64())
+            .unwrap();
+        let diff_raw = diff_edge
+            .metadata
+            .get("raw_distance")
+            .and_then(|v| v.as_f64())
+            .unwrap();
+        let diff_dist = diff_edge
+            .metadata
+            .get("distance")
+            .and_then(|v| v.as_f64())
+            .unwrap();
 
-        assert!((same_dist - same_raw * 0.80).abs() < 1e-4, "same_repo should have 20% distance discount");
-        assert!((diff_dist - diff_raw * 1.15).abs() < 1e-4, "diff_repo should have 15% distance penalty");
+        assert!(
+            (same_dist - same_raw * 0.80).abs() < 1e-4,
+            "same_repo should have 20% distance discount"
+        );
+        assert!(
+            (diff_dist - diff_raw * 1.15).abs() < 1e-4,
+            "diff_repo should have 15% distance penalty"
+        );
         assert!(same_dist < diff_dist);
     }
 

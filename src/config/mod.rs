@@ -306,6 +306,85 @@ pub struct DreamingConfig {
     pub concurrency: usize,
     pub source_id: String,
     pub target_source_id: String,
+    /// Namespaces dreaming may never move entries out of. A `promote` or
+    /// `merge` touching an entry in one of these namespaces is downgraded to
+    /// `keep` and recorded as `blocked`. Defaults to the harness memory
+    /// namespace, which the `eventsourced-ai` enricher searches on every
+    /// turn — silently emptying it of durable facts would silently degrade
+    /// that client. Set `RAG_DREAMING_PROTECTED_SOURCE_IDS=` (empty) to opt
+    /// out, or comma-separate extra namespaces.
+    pub protected_source_ids: Vec<String>,
+    /// Actions dreaming may actually apply. `merge` and `prune` are opt-in
+    /// (`keep,promote,merge,prune` unlocks everything) because both delete
+    /// data the harness client owns. Default: `keep,promote`.
+    pub allowed_actions: Vec<String>,
+    /// Run the round without writing anything. `POST /api/dream` defaults to
+    /// dry-run unless the request passes `"apply": true`; the worker honours
+    /// this too so a mis-set env var cannot start destructive automation.
+    pub dry_run: bool,
+    /// Hard cap on actions applied per round. The LLM is asked once per item
+    /// and we stop feeding it new items once this many actions have been
+    /// applied, so a chatty model cannot fan a round out without limit.
+    pub max_actions_per_round: usize,
+    /// Hard cap on items whose `dreamed_at` marker is written per round.
+    /// Unprocessed items beyond the cap stay eligible for the next round.
+    pub max_items_per_round: usize,
+}
+
+/// The four things the dreaming worker may decide about an entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamActionKind {
+    Promote,
+    Merge,
+    Prune,
+    Keep,
+}
+
+impl DreamActionKind {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "promote" => Some(Self::Promote),
+            "merge" => Some(Self::Merge),
+            "prune" => Some(Self::Prune),
+            "keep" => Some(Self::Keep),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Merge => "merge",
+            Self::Prune => "prune",
+            Self::Keep => "keep",
+        }
+    }
+
+    /// Whether applying this action would move or remove the reviewed entry
+    /// from the namespace it currently lives in.
+    pub fn moves_entry_out_of_namespace(self) -> bool {
+        matches!(self, Self::Promote | Self::Merge | Self::Prune)
+    }
+}
+
+impl DreamingConfig {
+    /// Whether `kind` may be applied at all. An empty allowlist falls back to
+    /// the conservative default (`keep`, `promote`) rather than "allow all".
+    pub fn allows(&self, kind: DreamActionKind) -> bool {
+        if self.allowed_actions.is_empty() {
+            return matches!(kind, DreamActionKind::Keep | DreamActionKind::Promote);
+        }
+        self.allowed_actions
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(kind.as_str()))
+    }
+
+    /// Whether `source_id` is off-limits for destructive/moving actions.
+    pub fn is_protected(&self, source_id: &str) -> bool {
+        self.protected_source_ids
+            .iter()
+            .any(|p| p.trim().eq_ignore_ascii_case(source_id))
+    }
 }
 
 impl Default for DreamingConfig {
@@ -317,6 +396,11 @@ impl Default for DreamingConfig {
             concurrency: 1,
             source_id: "memory".to_owned(),
             target_source_id: "knowledge".to_owned(),
+            protected_source_ids: vec!["memory".to_owned()],
+            allowed_actions: vec!["keep".to_owned(), "promote".to_owned()],
+            dry_run: true,
+            max_actions_per_round: 16,
+            max_items_per_round: 32,
         }
     }
 }
@@ -625,6 +709,18 @@ impl AppConfig {
                     .unwrap_or_else(|_| "memory".to_owned()),
                 target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
                     .unwrap_or_else(|_| "knowledge".to_owned()),
+                protected_source_ids: match env::var("RAG_DREAMING_PROTECTED_SOURCE_IDS") {
+                    Err(_) => vec!["memory".to_owned()],
+                    Ok(raw) => parse_csv(&raw).unwrap_or_default(),
+                },
+                allowed_actions: parse_csv(
+                    &env::var("RAG_DREAMING_ALLOWED_ACTIONS")
+                        .unwrap_or_else(|_| "keep,promote".to_owned()),
+                )
+                .unwrap_or_else(|| vec!["keep".to_owned(), "promote".to_owned()]),
+                dry_run: parse_env("RAG_DREAMING_DRY_RUN", "true")?,
+                max_actions_per_round: parse_env("RAG_DREAMING_MAX_ACTIONS_PER_ROUND", "16")?,
+                max_items_per_round: parse_env("RAG_DREAMING_MAX_ITEMS_PER_ROUND", "32")?,
             },
             google_oauth: GoogleOAuthConfig {
                 client_id: non_empty_var("GOOGLE_OAUTH_CLIENT_ID"),
@@ -711,7 +807,13 @@ fn non_empty_var(name: &str) -> Option<String> {
 }
 
 fn parse_csv_env(name: &str) -> Option<Vec<String>> {
-    let raw = non_empty_var(name)?;
+    parse_csv(&non_empty_var(name)?)
+}
+
+/// Split a comma-separated env value into trimmed, non-empty parts.
+/// Returns `None` when the result would be empty (i.e. the value was unset,
+/// blank, or only commas) so callers can distinguish "opt out entirely".
+fn parse_csv(raw: &str) -> Option<Vec<String>> {
     let parts: Vec<String> = raw
         .split(',')
         .map(|part| part.trim().to_owned())
