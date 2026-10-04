@@ -320,6 +320,7 @@ mod tests {
                     type_name: Some(type_name.to_owned()),
                     data: Some(json!({"title": title, "markdown": text})),
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[updated_at as f32, 0.0, 0.0],
             )

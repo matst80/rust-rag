@@ -221,6 +221,13 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
         "ontology_status",
         "TEXT NOT NULL DEFAULT 'pending'",
     )?;
+    // Dreaming cursor: NULL = the dreaming worker has never reached a terminal
+    // decision about this row. `list_items` filters on it so a processed item
+    // is never re-picked (and so `keep` advances the cursor too).
+    ensure_column_exists(connection, "items", "dreamed_at", "INTEGER")?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_items_dreamed_at ON items(source_id, dreamed_at, created_at);",
+    )?;
     ensure_column_exists(connection, "items", "path", "TEXT")?;
     connection.execute_batch("CREATE INDEX IF NOT EXISTS idx_items_path ON items(path);")?;
     ensure_column_exists(
@@ -295,7 +302,21 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
              FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
          );
          CREATE INDEX IF NOT EXISTS idx_public_shares_item_id ON public_shares(item_id);
-         CREATE INDEX IF NOT EXISTS idx_public_shares_expires_at ON public_shares(expires_at);",
+         CREATE INDEX IF NOT EXISTS idx_public_shares_expires_at ON public_shares(expires_at);
+                  CREATE TABLE IF NOT EXISTS dream_actions (
+                      id TEXT PRIMARY KEY,
+                      round_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      action TEXT NOT NULL,
+                      target_id TEXT,
+                      result_item_id TEXT,
+                      reason TEXT NOT NULL DEFAULT '',
+                      outcome TEXT NOT NULL,
+                      dry_run INTEGER NOT NULL DEFAULT 0 CHECK (dry_run IN (0, 1)),
+                      created_at INTEGER NOT NULL
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_dream_actions_created_at ON dream_actions(created_at DESC);
+                  CREATE INDEX IF NOT EXISTS idx_dream_actions_item_id ON dream_actions(item_id);",
     )?;
 
     connection.execute_batch(&format!(

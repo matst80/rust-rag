@@ -610,6 +610,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             path_prefix,
             type_name: query.type_name,
             has_path: query.has_path,
+            dreamed: None,
         };
         let (items, total) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
@@ -684,6 +685,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
                 type_name: type_override.or(existing.type_name),
                 data: data_override.or(existing.data),
                 analysis: existing.analysis,
+                dreamed_at: None,
             };
             let embedding = embedder.embed(&item.text)?;
             store.upsert_item(item.clone(), &embedding)?;

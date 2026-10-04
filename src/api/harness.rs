@@ -1098,6 +1098,7 @@ mod tests {
             type_name: Some(type_name.to_owned()),
             data: Some(data),
             analysis: None,
+            dreamed_at: None,
         }
     }
 
@@ -1392,6 +1393,7 @@ mod tests {
             type_name: None,
             data: None,
             analysis: None,
+            dreamed_at: None,
         }
     }
 

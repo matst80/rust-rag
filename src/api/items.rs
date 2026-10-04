@@ -200,6 +200,7 @@ pub(crate) async fn list_items(
         path_prefix,
         type_name: query.type_name,
         has_path: query.has_path,
+        dreamed: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -474,6 +475,7 @@ pub(crate) async fn update_item(
             type_name: type_override.or(existing.type_name),
             data: data_override.or(existing.data),
             analysis: existing.analysis,
+            dreamed_at: None,
         };
         let embedding = embedder.embed(&item.text)?;
         store.upsert_item(item.clone(), &embedding)?;

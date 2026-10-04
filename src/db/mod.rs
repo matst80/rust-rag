@@ -59,6 +59,29 @@ pub struct ItemRecord {
     /// Persisted LLM-on-store analysis (verdicts, tags, doc_type, title, etc.).
     /// This is stored in the documents/items table and populated by the worker.
     pub analysis: Option<Value>,
+    /// Epoch millis of the last time the dreaming worker reached a terminal
+    /// decision about this entry. `None` = never reviewed. Rows carrying a
+    /// value are skipped by `list_items` when `dreamed: false` is requested,
+    /// which is what stops a dreaming round from re-picking the same batch.
+    pub dreamed_at: Option<i64>,
+}
+
+/// One row in `dream_actions`: what the dreaming worker decided about an item,
+/// what it actually did, and why. `dry_run` rows are proposals only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DreamActionRecord {
+    pub id: String,
+    pub round_id: String,
+    pub item_id: String,
+    pub action: String,
+    pub target_id: Option<String>,
+    /// Item the action produced (`promote` copy, `merge` consolidated target).
+    pub result_item_id: Option<String>,
+    pub reason: String,
+    /// `applied`, `blocked`, `skipped`, `failed` or `proposed`.
+    pub outcome: String,
+    pub dry_run: bool,
+    pub created_at: i64,
 }
 
 /// Registered JSON Schema entry. Used to validate typed entries' `data`
@@ -185,6 +208,9 @@ pub struct SearchHit {
     /// Tags associated with the entry.
     pub tags: Vec<String>,
     pub analysis: Option<Value>,
+    /// Mirrors `ItemRecord::dreamed_at` so callers can tell whether an entry
+    /// has already been through a dreaming round.
+    pub dreamed_at: Option<i64>,
 }
 
 impl From<ItemRecord> for SearchHit {
@@ -216,6 +242,7 @@ impl From<ItemRecord> for SearchHit {
             type_name: item.type_name,
             tags,
             analysis: item.analysis,
+            dreamed_at: item.dreamed_at,
         }
     }
 }
@@ -787,6 +814,11 @@ pub struct ListItemsRequest {
     /// `Some(true)` restricts to entries with a wiki path set; `Some(false)`
     /// restricts to entries with no path (unorganized). `None` is unfiltered.
     pub has_path: Option<bool>,
+    /// `Some(false)` restricts to entries never reviewed by the dreaming
+    /// worker (`dreamed_at IS NULL`); `Some(true)` restricts to entries that
+    /// already have a `dreamed_at`. `None` is unfiltered. This is the durable
+    /// cursor complement to `max_created_at`.
+    pub dreamed: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1055,6 +1087,30 @@ pub trait VectorStore: Send + Sync {
     fn update_item_metadata(&self, _id: &str, _metadata: Value) -> Result<()> {
         anyhow::bail!("update_item_metadata not supported by this store")
     }
+    /// Set (or clear) the dreaming marker on an existing item without touching
+    /// its text, metadata, embeddings or namespace. Returns `Ok(false)` when
+    /// the id does not exist. Used by the dreaming worker as its durable
+    /// cursor and to restore a soft-deleted entry.
+    fn set_item_dreamed_at(&self, _id: &str, _at: Option<i64>) -> Result<bool> {
+        anyhow::bail!("set_item_dreamed_at not supported by this store")
+    }
+
+    /// Append an audit row describing a proposed or applied dreaming action.
+    fn insert_dream_action(&self, _record: DreamActionRecord) -> Result<()> {
+        anyhow::bail!("dream audit log not supported by this store")
+    }
+
+    /// Dream audit rows, newest first. `dry_run = Some(true)` returns only
+    /// proposals, `Some(false)` only applied records.
+    fn list_dream_actions(
+        &self,
+        _limit: usize,
+        _item_id: Option<&str>,
+        _dry_run: Option<bool>,
+    ) -> Result<Vec<DreamActionRecord>> {
+        anyhow::bail!("dream audit log not supported by this store")
+    }
+
     fn delete_item(&self, id: &str) -> Result<bool>;
 
     /// Insert an attachment row. Caller persists the file to disk first.
@@ -1314,8 +1370,8 @@ impl VectorStore for SqliteVectorStore {
 
         transaction.execute(
             "
-            INSERT INTO items (id, text, metadata, source_id, created_at, updated_at, path, type, data)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO items (id, text, metadata, source_id, created_at, updated_at, path, type, data, dreamed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE
             SET text = excluded.text,
                 metadata = excluded.metadata,
@@ -1325,6 +1381,7 @@ impl VectorStore for SqliteVectorStore {
                 path = excluded.path,
                 type = excluded.type,
                 data = excluded.data,
+                dreamed_at = excluded.dreamed_at,
                 ontology_status = CASE WHEN excluded.text != text THEN 'pending' ELSE ontology_status END
             ",
             params![
@@ -1337,6 +1394,7 @@ impl VectorStore for SqliteVectorStore {
                 item.path,
                 item.type_name,
                 data_json,
+                item.dreamed_at,
             ],
         )?;
 
@@ -1385,7 +1443,8 @@ impl VectorStore for SqliteVectorStore {
                     items.type,
                     items.data,
                     items.analysis_json,
-                    items.updated_at
+                    items.updated_at,
+                    items.dreamed_at
                 FROM items
                 JOIN vec_items ON vec_items.id = items.id
                 WHERE items.source_id = ?1
@@ -1433,7 +1492,8 @@ impl VectorStore for SqliteVectorStore {
                     items.type,
                     items.data,
                     items.analysis_json,
-                    items.updated_at
+                    items.updated_at,
+                    items.dreamed_at
                 FROM matches
                 JOIN vec_items ON vec_items.id = matches.id
                 JOIN items ON items.id = matches.id
@@ -1502,7 +1562,8 @@ impl VectorStore for SqliteVectorStore {
                     items.type,
                     items.data,
                     items.analysis_json,
-                    items.updated_at
+                    items.updated_at,
+                    items.dreamed_at
                 FROM items
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1
@@ -1593,7 +1654,8 @@ impl VectorStore for SqliteVectorStore {
                 items.type,
                 items.data,
                 items.analysis_json,
-                items.updated_at
+                items.updated_at,
+                items.dreamed_at
             FROM items
             JOIN vec_items ON vec_items.id = items.id
             WHERE items.id IN ({placeholders})
@@ -1720,6 +1782,91 @@ impl VectorStore for SqliteVectorStore {
         }
 
         Ok(deleted > 0)
+    }
+
+    fn set_item_dreamed_at(&self, id: &str, at: Option<i64>) -> Result<bool> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let changed = connection.execute(
+            "UPDATE items SET dreamed_at = ?2 WHERE id = ?1",
+            params![id, at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn insert_dream_action(&self, record: DreamActionRecord) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "INSERT INTO dream_actions (id, round_id, item_id, action, target_id, result_item_id, reason, outcome, dry_run, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                 round_id = excluded.round_id,
+                 item_id = excluded.item_id,
+                 action = excluded.action,
+                 target_id = excluded.target_id,
+                 result_item_id = excluded.result_item_id,
+                 reason = excluded.reason,
+                 outcome = excluded.outcome,
+                 dry_run = excluded.dry_run,
+                 created_at = excluded.created_at",
+            params![
+                record.id,
+                record.round_id,
+                record.item_id,
+                record.action,
+                record.target_id,
+                record.result_item_id,
+                record.reason,
+                record.outcome,
+                bool_to_sqlite(record.dry_run),
+                record.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn list_dream_actions(
+        &self,
+        limit: usize,
+        item_id: Option<&str>,
+        dry_run: Option<bool>,
+    ) -> Result<Vec<DreamActionRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "SELECT id, round_id, item_id, action, target_id, result_item_id, reason, outcome, dry_run, created_at
+             FROM dream_actions
+             WHERE (?1 IS NULL OR item_id = ?1)
+               AND (?2 IS NULL OR dry_run = ?2)
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![item_id, dry_run.map(bool_to_sqlite), limit as i64],
+            |row| {
+                Ok(DreamActionRecord {
+                    id: row.get(0)?,
+                    round_id: row.get(1)?,
+                    item_id: row.get(2)?,
+                    action: row.get(3)?,
+                    target_id: row.get(4)?,
+                    result_item_id: row.get(5)?,
+                    reason: row.get(6)?,
+                    outcome: row.get(7)?,
+                    dry_run: row.get::<_, i64>(8)? != 0,
+                    created_at: row.get(9)?,
+                })
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| anyhow::Error::from(e).context("failed to list dream actions"))
     }
 
     fn insert_attachment(&self, record: AttachmentRecord) -> Result<()> {
@@ -2312,6 +2459,7 @@ impl VectorStore for SqliteVectorStore {
                     type_name,
                     data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
                     analysis: analysis_str.and_then(|s| serde_json::from_str(&s).ok()),
+                    dreamed_at: None,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -3471,6 +3619,14 @@ fn list_items_internal(
         });
     }
 
+    if let Some(dreamed) = request.dreamed {
+        where_clauses.push(if dreamed {
+            "dreamed_at IS NOT NULL".to_string()
+        } else {
+            "dreamed_at IS NULL".to_string()
+        });
+    }
+
     let where_sql = if where_clauses.is_empty() {
         "".to_string()
     } else {
@@ -3486,7 +3642,7 @@ fn list_items_internal(
 
     let sql = format!(
         "
-        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json, dreamed_at
         FROM items
         {}
         ORDER BY created_at {sort_order}, id ASC
@@ -3514,7 +3670,7 @@ fn list_items_internal(
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json
+        SELECT id, text, metadata, source_id, created_at, updated_at, path, type, data, analysis_json, dreamed_at
         FROM items
         WHERE id = ?1
         ",
@@ -3557,6 +3713,7 @@ fn map_search_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchHit> {
             Some(s) => Some(parse_json_column(s, 9)?),
             None => None,
         },
+        dreamed_at: row.get(11).ok(),
     })
 }
 
@@ -3579,6 +3736,7 @@ fn map_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ItemRecord> {
             Some(s) => Some(parse_json_column(s, 9)?),
             None => None,
         },
+        dreamed_at: row.get(10).ok(),
     })
 }
 
@@ -3656,6 +3814,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3673,6 +3832,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3705,6 +3865,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3722,6 +3883,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3751,6 +3913,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3768,6 +3931,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3799,6 +3963,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3816,6 +3981,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3833,6 +3999,7 @@ mod tests {
         let (unorganized, total_unorganized) = store
             .list_items(ListItemsRequest {
                 has_path: Some(false),
+                dreamed: None,
                 ..Default::default()
             })
             .unwrap();
@@ -3857,6 +4024,7 @@ mod tests {
                     type_name: Some("todo".to_owned()),
                     data: Some(json!({"status": "pending"})),
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3874,6 +4042,7 @@ mod tests {
                     type_name: Some("note".to_owned()),
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -3915,6 +4084,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -3932,6 +4102,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -3958,6 +4129,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 sort_order: SortOrder::Desc,
+                dreamed: None,
                 ..Default::default()
             })
             .unwrap();
@@ -3987,6 +4159,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -4020,6 +4193,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -4051,6 +4225,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -4068,6 +4243,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.95, 0.05, 0.0],
             )
@@ -4085,6 +4261,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.0, 1.0, 0.0],
             )
@@ -4143,6 +4320,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -4161,6 +4339,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -4179,6 +4358,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -4233,6 +4413,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[1.0, 0.0, 0.0],
             )
@@ -4250,6 +4431,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.9, 0.1, 0.0],
             )
@@ -4267,6 +4449,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 &[0.0, 1.0, 0.0],
             )

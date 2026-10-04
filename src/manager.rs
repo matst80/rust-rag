@@ -1410,6 +1410,7 @@ async fn tool_assign_task(
         type_name: None,
         data: None,
         analysis: None,
+        dreamed_at: None,
     };
     let embedder = state
         .embedder
@@ -1494,6 +1495,7 @@ async fn tool_list_tasks(state: &AppState, cfg: &ManagerConfig, args: &str) -> R
         path_prefix: None,
         type_name: None,
         has_path: None,
+        dreamed: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     let tasks: Vec<Value> = items
@@ -1553,6 +1555,7 @@ async fn tool_update_task(state: &AppState, args: &str) -> Result<String> {
         type_name: None,
         data: None,
         analysis: existing.analysis,
+        dreamed_at: None,
     };
     let embedder = state
         .embedder
@@ -1688,6 +1691,7 @@ async fn tool_remember(state: &AppState, cfg: &ManagerConfig, args: &str) -> Res
         type_name: None,
         data: None,
         analysis: None,
+        dreamed_at: None,
     };
     let embedder = state
         .embedder
@@ -1760,6 +1764,7 @@ async fn tool_promote_memory(state: &AppState, args: &str) -> Result<String> {
         type_name: None,
         data: None,
         analysis: existing.analysis,
+        dreamed_at: None,
     };
     let embedder = state
         .embedder
@@ -1929,6 +1934,7 @@ async fn recall_items(
         path_prefix: None,
         type_name: None,
         has_path: None,
+        dreamed: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     Ok(items)

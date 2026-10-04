@@ -366,6 +366,7 @@ pub(crate) async fn store_entry_core(
                 type_name: request.type_name.clone(),
                 data: request.data.clone(),
                 analysis: None,
+                dreamed_at: None,
             };
             let base_embed_text = slices
                 .into_iter()
@@ -412,6 +413,7 @@ pub(crate) async fn store_entry_core(
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 };
                 let embed_text = match &embed_prefix {
                     Some(p) => format!("{p}{}", slice.embed_text),
@@ -444,6 +446,7 @@ pub(crate) async fn store_entry_core(
             type_name: request.type_name.clone(),
             data: request.data.clone(),
             analysis: None,
+            dreamed_at: None,
         };
         let text = request.text.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -491,6 +494,7 @@ pub(crate) async fn store_entry_core(
             type_name: request.type_name.clone(),
             data: request.data.clone(),
             analysis: None,
+            dreamed_at: None,
         };
         let embed_text = match &embed_prefix {
             Some(p) => format!("{p}{}", item.text),
@@ -652,6 +656,7 @@ pub(crate) async fn search_core(
                             type_name: tn,
                             limit: Some(top_k),
                             sort_order: SortOrder::Desc,
+                            dreamed: None,
                             ..Default::default()
                         })?;
                         items.extend(page);
@@ -1358,6 +1363,7 @@ pub(crate) async fn llm_rechunk_item(
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 };
                 let embedding = embedder.embed(&text)?;
                 store.upsert_item(record, &embedding)?;

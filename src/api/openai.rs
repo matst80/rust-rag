@@ -1098,6 +1098,7 @@ async fn list_items_tool(
         path_prefix: None,
         type_name: None,
         has_path: None,
+        dreamed: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -1608,6 +1609,7 @@ async fn ingest_web_content_tool(
         type_name: None,
         data: None,
         analysis: None,
+        dreamed_at: None,
     };
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -1923,6 +1925,7 @@ mod tests {
             type_name: None,
             data: None,
             analysis: None,
+            dreamed_at: None,
         };
         store
             .upsert_item(item, &[0.1, 0.2, 0.3, 0.4])

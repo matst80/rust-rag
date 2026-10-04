@@ -807,6 +807,7 @@ mod tests {
             type_name: None,
             tags: Vec::new(),
             analysis: None,
+            dreamed_at: None,
         }
     }
 

@@ -273,6 +273,7 @@ mod tests {
                             .unwrap_or_default(),
                         analysis: item.analysis.clone(),
                         updated_at: item.updated_at,
+                        dreamed_at: None,
                     });
                 }
             }
@@ -1132,6 +1133,7 @@ mod tests {
             type_name: None,
             tags: Vec::new(),
             analysis: None,
+            dreamed_at: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(
             embedder,
@@ -1188,6 +1190,7 @@ mod tests {
                 tags: Vec::new(),
                 analysis: None,
                 updated_at: 1,
+                dreamed_at: None,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -1204,6 +1207,7 @@ mod tests {
                 tags: Vec::new(),
                 analysis: None,
                 updated_at: 2,
+                dreamed_at: None,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -1236,6 +1240,7 @@ mod tests {
                         type_name: None,
                         data: None,
                         analysis: None,
+                        dreamed_at: None,
                     },
                     Vec::new(),
                 ),
@@ -1251,6 +1256,7 @@ mod tests {
                         type_name: None,
                         data: None,
                         analysis: None,
+                        dreamed_at: None,
                     },
                     Vec::new(),
                 ),
@@ -1266,6 +1272,7 @@ mod tests {
                         type_name: None,
                         data: None,
                         analysis: None,
+                        dreamed_at: None,
                     },
                     Vec::new(),
                 ),
@@ -1286,6 +1293,7 @@ mod tests {
                 type_name: None,
                 tags: Vec::new(),
                 analysis: None,
+                dreamed_at: None,
             }]),
             search_source_ids: Mutex::new(Vec::new()),
             graph_enabled: true,
@@ -1333,6 +1341,7 @@ mod tests {
             type_name: None,
             tags: Vec::new(),
             analysis: None,
+            dreamed_at: None,
         }]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
 
@@ -1363,6 +1372,7 @@ mod tests {
                         type_name: None,
                         data: None,
                         analysis: None,
+                        dreamed_at: None,
                     },
                     Vec::new(),
                 ),
@@ -1378,6 +1388,7 @@ mod tests {
                         type_name: None,
                         data: None,
                         analysis: None,
+                        dreamed_at: None,
                     },
                     Vec::new(),
                 ),
@@ -1399,6 +1410,7 @@ mod tests {
                     type_name: None,
                     tags: Vec::new(),
                     analysis: None,
+                    dreamed_at: None,
                 },
                 SearchHit {
                     id: "doc-linked".to_owned(),
@@ -1415,6 +1427,7 @@ mod tests {
                     type_name: None,
                     tags: Vec::new(),
                     analysis: None,
+                    dreamed_at: None,
                 },
             ]),
             search_source_ids: Mutex::new(Vec::new()),
@@ -1458,6 +1471,7 @@ mod tests {
                 tags: Vec::new(),
                 analysis: None,
                 updated_at: 1,
+                dreamed_at: None,
             },
             SearchHit {
                 id: "doc-far".to_owned(),
@@ -1474,6 +1488,7 @@ mod tests {
                 tags: Vec::new(),
                 analysis: None,
                 updated_at: 2,
+                dreamed_at: None,
             },
         ]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -1525,6 +1540,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -1537,6 +1553,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 ItemRecord {
                     id: "doc-3".to_owned(),
@@ -1549,6 +1566,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
             ],
             vec![
@@ -1643,6 +1661,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
                 ItemRecord {
                     id: "doc-2".to_owned(),
@@ -1655,6 +1674,7 @@ mod tests {
                     type_name: None,
                     data: None,
                     analysis: None,
+                    dreamed_at: None,
                 },
             ],
             vec![],
@@ -1712,6 +1732,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             }],
             vec![similarity_edge("sim-1", "doc-1", "doc-2")],
         ));
@@ -1748,6 +1769,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -1760,6 +1782,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             },
             ItemRecord {
                 id: "doc-3".to_owned(),
@@ -1772,6 +1795,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -1802,6 +1826,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             },
             ItemRecord {
                 id: "doc-2".to_owned(),
@@ -1814,6 +1839,7 @@ mod tests {
                 type_name: None,
                 data: None,
                 analysis: None,
+                dreamed_at: None,
             },
         ]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -1848,6 +1874,7 @@ mod tests {
             type_name: None,
             data: None,
             analysis: None,
+            dreamed_at: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.0]));
         let server = TestServer::new(router(AppState::new_ready(embedder, store.clone(), store)));
@@ -1887,6 +1914,7 @@ mod tests {
             type_name: None,
             data: None,
             analysis: None,
+            dreamed_at: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -1933,6 +1961,7 @@ mod tests {
             type_name: None,
             data: None,
             analysis: None,
+            dreamed_at: None,
         }]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
         let server = TestServer::new(router(AppState::new_ready(
@@ -2480,6 +2509,7 @@ mod tests {
             type_name: Some("cms_page".to_owned()),
             data: Some(json!({"title": "Landing"})),
             analysis: None,
+            dreamed_at: None,
         };
         let section_a = ItemRecord {
             id: "section-a".to_owned(),
@@ -2492,6 +2522,7 @@ mod tests {
             type_name: Some("cms_section".to_owned()),
             data: Some(json!({"title": "Section A"})),
             analysis: None,
+            dreamed_at: None,
         };
         let section_b = ItemRecord {
             id: "section-b".to_owned(),
@@ -2504,6 +2535,7 @@ mod tests {
             type_name: Some("cms_section".to_owned()),
             data: Some(json!({"title": "Section B"})),
             analysis: None,
+            dreamed_at: None,
         };
         let leaf = ItemRecord {
             id: "leaf-1".to_owned(),
@@ -2516,6 +2548,7 @@ mod tests {
             type_name: Some("cms_markdown".to_owned()),
             data: Some(json!({"markdown": "before"})),
             analysis: None,
+            dreamed_at: None,
         };
         let store = Arc::new(MockStore::seed_graph(
             vec![page, section_a, section_b, leaf],
@@ -3130,6 +3163,7 @@ mod tests {
             type_name: Some("harness_plan".to_owned()),
             data: Some(json!({"title": "Embedding cache plan", "state": "PROPOSED"})),
             analysis: None,
+            dreamed_at: None,
         };
         let sprint = ItemRecord {
             id: "sprint-1".to_owned(),
@@ -3144,6 +3178,7 @@ mod tests {
                 json!({"plan_id": "plan-1", "cadence": "weekly", "goal": "Cache", "state": "ACTIVE"}),
             ),
             analysis: None,
+            dreamed_at: None,
         };
         let todo = ItemRecord {
             id: "todo-1".to_owned(),
@@ -3158,6 +3193,7 @@ mod tests {
                 json!({"sprint_id": "sprint-1", "title": "Implement LRU cache", "action_spec": {"tool": "edit"}, "state": "PENDING", "sequence_order": 1}),
             ),
             analysis: None,
+            dreamed_at: None,
         };
         let doc = ItemRecord {
             id: "adr-1".to_owned(),
@@ -3172,6 +3208,7 @@ mod tests {
                 json!({"doc_type": "ADR", "title": "ADR 7 process-local cache", "version": "1.1", "status": "ACTIVE"}),
             ),
             analysis: None,
+            dreamed_at: None,
         };
         let audit = ItemRecord {
             id: "audit-1".to_owned(),
@@ -3192,6 +3229,7 @@ mod tests {
                 "audited_at": 500
             })),
             analysis: None,
+            dreamed_at: None,
         };
         let edges = vec![
             GraphEdgeRecord {
@@ -3311,6 +3349,7 @@ mod tests {
             type_name: Some("harness_plan".to_owned()),
             data: Some(json!({"title": "Other plan", "state": "PROPOSED"})),
             analysis: None,
+            dreamed_at: None,
         };
         let store = Arc::new(MockStore::seed(vec![item]));
         let embedder = Arc::new(MockEmbedder::new(vec![0.1, 0.2]));
@@ -3345,6 +3384,7 @@ mod tests {
             type_name: Some(tn.to_owned()),
             tags: Vec::new(),
             analysis: None,
+            dreamed_at: None,
         };
         // Duplicate id at two distances: the merge must keep the best one.
         let store = Arc::new(MockStore::with_results(vec![
@@ -3409,6 +3449,7 @@ mod tests {
             type_name: None,
             tags: Vec::new(),
             analysis: None,
+            dreamed_at: None,
         };
         let store = Arc::new(MockStore::with_results(vec![
             hit("doc-1", "matst80/rust-rag", 0.1),

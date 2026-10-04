@@ -41,6 +41,7 @@ fn item(id: &str, type_name: &str, data: serde_json::Value) -> ItemRecord {
         type_name: Some(type_name.to_owned()),
         data: Some(data),
         analysis: None,
+        dreamed_at: None,
     }
 }
 

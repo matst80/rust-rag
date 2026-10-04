@@ -370,6 +370,11 @@ fn row_to_item(row: &tokio_postgres::Row) -> Result<ItemRecord> {
             .try_get::<_, Option<Value>>("analysis_json")
             .ok()
             .flatten(),
+        dreamed_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("dreamed_at")
+            .ok()
+            .flatten()
+            .map(ts_to_ms),
     })
 }
 
@@ -384,6 +389,7 @@ impl VectorStore for PostgresVectorStore {
         let pool = self.pool.clone();
         let vector = pgvector::Vector::from(embedding.to_vec());
         let created_at = ms_to_ts(item.created_at);
+        let dreamed_at = item.dreamed_at.map(ms_to_ts);
         let author = item
             .metadata
             .get("author")
@@ -410,8 +416,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data, dreamed_at) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11, $12) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -422,6 +428,7 @@ impl VectorStore for PostgresVectorStore {
                      path = EXCLUDED.path, \
                      type = EXCLUDED.type, \
                      data = EXCLUDED.data, \
+                     dreamed_at = EXCLUDED.dreamed_at, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -435,6 +442,7 @@ impl VectorStore for PostgresVectorStore {
                     &item.path,
                     &item.type_name,
                     &item.data,
+                    &dreamed_at,
                 ],
             )
             .await?;
@@ -467,6 +475,7 @@ impl VectorStore for PostgresVectorStore {
         }
         let pool = self.pool.clone();
         let created_at = ms_to_ts(item.created_at);
+        let dreamed_at = item.dreamed_at.map(ms_to_ts);
         let author = item
             .metadata
             .get("author")
@@ -493,8 +502,8 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await?;
             let tx = client.transaction().await?;
             tx.execute(
-                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data) \
-                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11) \
+                "INSERT INTO documents (id, source_id, kind, author, content, metadata, tags, status, created_at, updated_at, path, type, data, dreamed_at) \
+                 VALUES ($1, $2, 'text', $3, $4, $5, $6, $7, $8, now(), $9, $10, $11, $12) \
                  ON CONFLICT (id) DO UPDATE SET \
                      source_id = EXCLUDED.source_id, \
                      author = EXCLUDED.author, \
@@ -505,6 +514,7 @@ impl VectorStore for PostgresVectorStore {
                      path = EXCLUDED.path, \
                      type = EXCLUDED.type, \
                      data = EXCLUDED.data, \
+                     dreamed_at = EXCLUDED.dreamed_at, \
                      updated_at = now()",
                 &[
                     &item.id,
@@ -518,6 +528,7 @@ impl VectorStore for PostgresVectorStore {
                     &item.path,
                     &item.type_name,
                     &item.data,
+                    &dreamed_at,
                 ],
             )
             .await?;
@@ -601,7 +612,7 @@ impl VectorStore for PostgresVectorStore {
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
                             ranked.distance, ranked.section_path, ranked.chunk_content, \
-                            d.type, d.tags, d.analysis_json \
+                            d.type, d.tags, d.analysis_json, d.dreamed_at \
                      FROM ( \
                          SELECT DISTINCT ON (c.document_id) \
                                 c.document_id, \
@@ -645,6 +656,7 @@ impl VectorStore for PostgresVectorStore {
                             .try_get::<_, Option<Vec<String>>>("tags")?
                             .unwrap_or_default(),
                         analysis: item.analysis.clone(),
+                        dreamed_at: item.dreamed_at,
                     })
                 })
                 .collect()
@@ -766,7 +778,7 @@ impl VectorStore for PostgresVectorStore {
                     FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
                 )
                 SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at,
-                       d.type, d.tags, d.analysis_json,
+                       d.type, d.tags, d.analysis_json, d.dreamed_at,
                        (f.rrf_score
                           * exp(- EXTRACT(EPOCH FROM (now() - d.updated_at))
                                 / (86400.0 * $7::float))
@@ -840,6 +852,7 @@ impl VectorStore for PostgresVectorStore {
                             .try_get::<_, Option<Vec<String>>>("tags")?
                             .unwrap_or_default(),
                         analysis: item.analysis.clone(),
+                        dreamed_at: item.dreamed_at,
                     })
                 })
                 .collect()
@@ -881,6 +894,8 @@ impl VectorStore for PostgresVectorStore {
         let path_prefix = request.path_prefix.clone().filter(|p| !p.is_empty());
         let type_filter = request.type_name.clone().filter(|t| !t.is_empty());
         let has_path = request.has_path;
+        // Dreaming cursor filter: NULL = never reviewed.
+        let dreamed = request.dreamed;
 
         self.block(async move {
             let client = pool.get().await?;
@@ -891,27 +906,29 @@ impl VectorStore for PostgresVectorStore {
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
                    AND ($5::text IS NULL OR type = $5) \
-                   AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = '')))";
+                   AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = ''))) \
+                   AND ($7::bool IS NULL OR ($7 AND dreamed_at IS NOT NULL) OR (NOT $7 AND dreamed_at IS NULL))";
             let total: i64 = client
-                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path])
+                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed])
                 .await?
                 .get(0);
 
             let sql = format!(
-                "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json FROM documents \
+                "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json, dreamed_at FROM documents \
                  WHERE ($1::text IS NULL OR source_id = $1) \
                    AND ($2::timestamptz IS NULL OR created_at >= $2) \
                    AND ($3::timestamptz IS NULL OR created_at <= $3) \
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
                    AND ($5::text IS NULL OR type = $5) \
                    AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = ''))) \
+                   AND ($7::bool IS NULL OR ($7 AND dreamed_at IS NOT NULL) OR (NOT $7 AND dreamed_at IS NULL)) \
                  ORDER BY created_at {order} \
-                 LIMIT $7 OFFSET $8"
+                 LIMIT $8 OFFSET $9"
             );
             let rows = client
                 .query(
                     &sql,
-                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &limit, &offset],
+                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed, &limit, &offset],
                 )
                 .await?;
             let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
@@ -926,7 +943,7 @@ impl VectorStore for PostgresVectorStore {
             let client = pool.get().await?;
             let row = client
                 .query_opt(
-                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json FROM documents WHERE id = $1",
+                    "SELECT id, content, metadata, source_id, created_at, updated_at, path, type, data, analysis_json, dreamed_at FROM documents WHERE id = $1",
                     &[&id],
                 )
                 .await?;
@@ -987,6 +1004,101 @@ impl VectorStore for PostgresVectorStore {
                 .execute("DELETE FROM documents WHERE id = $1", &[&id])
                 .await?;
             Ok(n > 0)
+        })
+    }
+
+    fn set_item_dreamed_at(&self, id: &str, at: Option<i64>) -> Result<bool> {
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        let at = at.map(ms_to_ts);
+        self.block(async move {
+            let client = pool.get().await?;
+            let n = client
+                .execute(
+                    "UPDATE documents SET dreamed_at = $1 WHERE id = $2",
+                    &[&at, &id],
+                )
+                .await?;
+            Ok(n > 0)
+        })
+    }
+
+    fn insert_dream_action(&self, record: super::DreamActionRecord) -> Result<()> {
+        let pool = self.pool.clone();
+        let created_at = ms_to_ts(record.created_at);
+        self.block(async move {
+            let client = pool.get().await?;
+            client
+                .execute(
+                    "INSERT INTO dream_actions (id, round_id, item_id, action, target_id, result_item_id, reason, outcome, dry_run, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                     ON CONFLICT (id) DO UPDATE SET \
+                         round_id = EXCLUDED.round_id, \
+                         item_id = EXCLUDED.item_id, \
+                         action = EXCLUDED.action, \
+                         target_id = EXCLUDED.target_id, \
+                         result_item_id = EXCLUDED.result_item_id, \
+                         reason = EXCLUDED.reason, \
+                         outcome = EXCLUDED.outcome, \
+                         dry_run = EXCLUDED.dry_run, \
+                         created_at = EXCLUDED.created_at",
+                    &[
+                        &record.id,
+                        &record.round_id,
+                        &record.item_id,
+                        &record.action,
+                        &record.target_id,
+                        &record.result_item_id,
+                        &record.reason,
+                        &record.outcome,
+                        &record.dry_run,
+                        &created_at,
+                    ],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn list_dream_actions(
+        &self,
+        limit: usize,
+        item_id: Option<&str>,
+        dry_run: Option<bool>,
+    ) -> Result<Vec<super::DreamActionRecord>> {
+        let pool = self.pool.clone();
+        let item_id = item_id.map(str::to_owned);
+        let limit = limit.clamp(1, 1000) as i64;
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT id, round_id, item_id, action, target_id, result_item_id, reason, outcome, dry_run, created_at \
+                     FROM dream_actions \
+                     WHERE ($1::text IS NULL OR item_id = $1) \
+                       AND ($2::bool IS NULL OR dry_run = $2) \
+                     ORDER BY created_at DESC, id DESC \
+                     LIMIT $3",
+                    &[&item_id, &dry_run, &limit],
+                )
+                .await?;
+            rows.iter()
+                .map(|row| {
+                    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                    Ok(super::DreamActionRecord {
+                        id: row.try_get("id")?,
+                        round_id: row.try_get("round_id")?,
+                        item_id: row.try_get("item_id")?,
+                        action: row.try_get("action")?,
+                        target_id: row.try_get("target_id")?,
+                        result_item_id: row.try_get("result_item_id")?,
+                        reason: row.try_get("reason")?,
+                        outcome: row.try_get("outcome")?,
+                        dry_run: row.try_get("dry_run")?,
+                        created_at: ts_to_ms(created_at),
+                    })
+                })
+                .collect()
         })
     }
 
@@ -1163,7 +1275,7 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at, \
-                            d.path, d.type, d.tags, d.analysis_json, \
+                            d.path, d.type, d.tags, d.analysis_json, d.dreamed_at, \
                             MIN(c.dense_embedding <=> $1::vector) AS distance \
                      FROM chunks c JOIN documents d ON d.id = c.document_id \
                      WHERE d.id = ANY($2) \
@@ -1192,6 +1304,7 @@ impl VectorStore for PostgresVectorStore {
                             .try_get::<_, Option<Vec<String>>>("tags")?
                             .unwrap_or_default(),
                         analysis: item.analysis.clone(),
+                        dreamed_at: item.dreamed_at,
                     })
                 })
                 .collect()
