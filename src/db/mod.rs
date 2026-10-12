@@ -840,6 +840,31 @@ pub fn format_edge_sort_order(value: i64) -> String {
     format!("{value:0width$}", width = EDGE_SORT_ORDER_WIDTH)
 }
 
+/// Parses `ext:{kind}:{key}` into `(kind, key)`. Used as a manual-edge
+/// endpoint id for linking to something outside the item store (an
+/// external card, repo, ticket) without mirroring it in as a fake,
+/// searchable item. `kind`/`key` are restricted to `[a-zA-Z0-9_-]+` so the
+/// id is always safe to embed in JSON/SQL without escaping concerns.
+pub fn parse_external_ref_id(id: &str) -> Option<(&str, &str)> {
+    let rest = id.strip_prefix("ext:")?;
+    let (kind, key) = rest.split_once(':')?;
+    let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    (valid(kind) && valid(key)).then_some((kind, key))
+}
+
+/// Metadata for the placeholder `items`/`documents` row backing an external
+/// ref endpoint: `embed: false` marks it to be skipped by the embedding
+/// pipeline, `external: true` marks it for exclusion from search/listing
+/// filters that care to check.
+pub fn external_ref_metadata(kind: &str, key: &str) -> Value {
+    serde_json::json!({
+        "external": true,
+        "embed": false,
+        "kind": kind,
+        "key": key,
+    })
+}
+
 pub fn normalize_edge_sort_order(value: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2272,11 +2297,18 @@ impl VectorStore for SqliteVectorStore {
             .context("sqlite connection has already been closed")?;
         let transaction = connection.transaction()?;
 
-        if get_item_internal(&transaction, &input.from_item_id)?.is_none() {
-            anyhow::bail!("item {} not found", input.from_item_id);
-        }
-        if get_item_internal(&transaction, &input.to_item_id)?.is_none() {
-            anyhow::bail!("item {} not found", input.to_item_id);
+        for endpoint in [&input.from_item_id, &input.to_item_id] {
+            if get_item_internal(&transaction, endpoint)?.is_some() {
+                continue;
+            }
+            let Some((kind, key)) = parse_external_ref_id(endpoint) else {
+                anyhow::bail!("item {} not found", endpoint);
+            };
+            transaction.execute(
+                "INSERT OR IGNORE INTO items (id, text, metadata, source_id, created_at, updated_at)
+                 VALUES (?1, '', ?2, 'external', ?3, ?3)",
+                params![endpoint, external_ref_metadata(kind, key).to_string(), timestamp],
+            )?;
         }
         let sort_order = match input.sort_order.as_deref() {
             Some(value) => normalize_edge_sort_order(value)?,

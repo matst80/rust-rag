@@ -301,7 +301,9 @@ impl AdminMcpServer {
     #[tool(description = "Create a manual graph edge between two items. \
 PREDICATES: use one of the canonical predicates (`is_a`, `part_of`, `caused_by`, `works_for`, `contradicts`, `depends_on`, `contains`, `implemented_by`) so the edge composes with ontology-worker edges, graph traversal, and the analyze pipeline. See `list_memory_conventions` for direction semantics (e.g. `from is_a to` means FROM is a subtype of TO, NOT the reverse). Off-list `relation` strings are accepted but are essentially private to your caller — other agents and the ontology worker will not recognize them. \
 WEIGHT defaults to 1.0; use -1.0 (with `directed: false`) for anti-edges that should DEMOTE the target in graph-related search. \
-DIRECTED defaults to false — set to true when the predicate's direction is meaningful (it always is for the canonical set).")]
+DIRECTED defaults to false — set to true when the predicate's direction is meaningful (it always is for the canonical set). \
+EXTERNAL ENDPOINTS: pass `from_item_id`/`to_item_id` as `ext:{kind}:{key}` (kind/key limited to `[a-zA-Z0-9_-]+`) to link to something outside the item store — a placeholder item is created automatically, flagged `external: true, embed: false`, never embedded or returned by search. \
+IDEMPOTENT RETRY (Postgres only): set `metadata.source` to a non-empty string OTHER than `ontology_worker` to get upsert semantics keyed on (from, to, relation, source) — retrying the same call converges to the latest weight/metadata instead of duplicating the edge. Edges with no `source` tag always insert fresh.")]
     async fn create_manual_edge(
         &self,
         Parameters(request): Parameters<CreateManualEdgeRequest>,

@@ -203,6 +203,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0019_code_search_bm25",
         include_str!("../../migrations/0019_code_search_bm25.sql"),
     ),
+    (
+        "0020_manual_edge_source_dedup",
+        include_str!("../../migrations/0020_manual_edge_source_dedup.sql"),
+    ),
 ];
 
 async fn run_migrations(client: &tokio_postgres::Client) -> Result<()> {
@@ -1796,22 +1800,49 @@ impl VectorStore for PostgresVectorStore {
         let relation_owned = input.relation.map(|r| r.into_owned());
         let explicit_sort_order = input.sort_order.clone();
         // Detect ontology-worker source so we can de-dup against the partial
-        // unique index from migration 0011. Other manual edges (human curator)
-        // are not covered by that index and always insert fresh.
+        // unique index from migration 0012 (DO NOTHING — freezes to first
+        // write, preserving any HITL approval/rejection state in metadata).
         let from_ontology =
             input.metadata.get("source").and_then(|v| v.as_str()) == Some("ontology_worker");
+        // Any other caller-tagged source gets a second, additive dedup lane
+        // (migration 0020): a true upsert keyed on (from, to, relation,
+        // source), so retrying a link call (e.g. replaying a projection
+        // event stream) converges to the latest metadata/weight instead of
+        // duplicating the row.
+        let dedup_source = if from_ontology {
+            None
+        } else {
+            input
+                .metadata
+                .get("source")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
         let record = self.block(async move {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
             // FK in the schema enforces both endpoints exist; surface a
-            // friendlier error if the lookup fails.
+            // friendlier error if the lookup fails, unless the endpoint is
+            // an external ref (`ext:{kind}:{key}`), in which case we create
+            // a placeholder `documents` row for it instead of erroring.
             for endpoint in [&input.from_item_id, &input.to_item_id] {
                 let exists = tx
                     .query_opt("SELECT 1 FROM documents WHERE id = $1", &[endpoint])
                     .await?;
-                if exists.is_none() {
-                    anyhow::bail!("item {endpoint} not found");
+                if exists.is_some() {
+                    continue;
                 }
+                let Some((kind, key)) = super::parse_external_ref_id(endpoint) else {
+                    anyhow::bail!("item {endpoint} not found");
+                };
+                tx.execute(
+                    "INSERT INTO documents (id, source_id, content, metadata)
+                     VALUES ($1, 'external', '', $2)
+                     ON CONFLICT (id) DO NOTHING",
+                    &[endpoint, &super::external_ref_metadata(kind, key)],
+                )
+                .await?;
             }
             let sort_order = match explicit_sort_order.as_deref() {
                 Some(value) => super::normalize_edge_sort_order(value)?,
@@ -1831,6 +1862,17 @@ impl VectorStore for PostgresVectorStore {
             // (from, to, relation) tuple is a no-op — keep the original
             // verdict (and any HITL approval/rejection state). Return the
             // existing record so callers can log it consistently.
+            let insert_params: [&(dyn tokio_postgres::types::ToSql + Sync); 9] = [
+                &edge_id,
+                &input.from_item_id,
+                &input.to_item_id,
+                &relation_owned,
+                &sort_order,
+                &input.weight,
+                &input.directed,
+                &input.metadata,
+                &timestamp,
+            ];
             let inserted_row = if from_ontology {
                 tx.query_opt(
                     "INSERT INTO graph_edges \
@@ -1842,19 +1884,29 @@ impl VectorStore for PostgresVectorStore {
                      DO NOTHING \
                      RETURNING id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                directed, metadata, created_at, updated_at",
-                    &[
-                        &edge_id,
-                        &input.from_item_id,
-                        &input.to_item_id,
-                        &relation_owned,
-                        &sort_order,
-                        &input.weight,
-                        &input.directed,
-                        &input.metadata,
-                        &timestamp,
-                    ],
+                    &insert_params,
                 )
                 .await?
+            } else if dedup_source.is_some() {
+                // True upsert: converges to the latest write on retry
+                // instead of freezing to the first one.
+                Some(
+                    tx.query_one(
+                        "INSERT INTO graph_edges \
+                             (id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
+                              directed, metadata, created_at, updated_at) \
+                         VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $9, $9) \
+                         ON CONFLICT (from_item_id, to_item_id, relation, (metadata->>'source')) \
+                             WHERE edge_type = 'manual' AND metadata->>'source' IS NOT NULL \
+                                 AND metadata->>'source' != 'ontology_worker' \
+                         DO UPDATE SET weight = EXCLUDED.weight, directed = EXCLUDED.directed, \
+                                       metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at \
+                         RETURNING id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
+                                   directed, metadata, created_at, updated_at",
+                        &insert_params,
+                    )
+                    .await?,
+                )
             } else {
                 Some(
                     tx.query_one(
@@ -1864,17 +1916,7 @@ impl VectorStore for PostgresVectorStore {
                          VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8, $9, $9) \
                          RETURNING id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
                                    directed, metadata, created_at, updated_at",
-                        &[
-                            &edge_id,
-                            &input.from_item_id,
-                            &input.to_item_id,
-                            &relation_owned,
-                            &sort_order,
-                            &input.weight,
-                            &input.directed,
-                            &input.metadata,
-                            &timestamp,
-                        ],
+                        &insert_params,
                     )
                     .await?,
                 )
