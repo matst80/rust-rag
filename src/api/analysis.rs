@@ -713,6 +713,25 @@ pub fn spawn_analysis(state: AppState, item_id: String, text: String, source_id:
                         }
                     }
 
+                    // Promote the LLM-derived title onto metadata.title, but
+                    // only when the item has no title yet (never overwrite a
+                    // user-entered one). Best-effort.
+                    if let Some(title) = analysis.title.clone() {
+                        if !title.trim().is_empty() {
+                            let store = state.store.clone();
+                            let id_owned = item_id.clone();
+                            let res = tokio::task::spawn_blocking(move || {
+                                store.merge_item_title_if_missing(&id_owned, &title)
+                            })
+                            .await;
+                            if let Err(e) =
+                                res.unwrap_or_else(|e| Err(anyhow!("title merge join: {e}")))
+                            {
+                                tracing::warn!(error=%e, "title merge failed");
+                            }
+                        }
+                    }
+
                     // Create graph edges for high-quality analysis verdicts.
                     for verdict in &analysis.verdicts {
                         let (input, label) = if verdict.relation == "unrelated" {

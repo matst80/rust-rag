@@ -72,6 +72,12 @@ export function EntryForm({
   const [metadata, setMetadata] = useState<EntryMetadata>(
     entry?.metadata ?? initialData?.metadata ?? {},
   );
+  const [title, setTitle] = useState<string>(
+    String(
+      (entry?.metadata ?? initialData?.metadata ?? ({} as EntryMetadata))
+        .title ?? "",
+    ),
+  );
   const [newMetaKey, setNewMetaKey] = useState("");
   const [newMetaValue, setNewMetaValue] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -89,6 +95,7 @@ export function EntryForm({
       setSourceId(entry.source_id);
       setPath(entry.path ?? "");
       setMetadata(entry.metadata ?? {});
+      setTitle(String(entry.metadata?.title ?? ""));
       setTypeName(entry.type ?? "");
       setData(entry.data ?? {});
     }
@@ -133,6 +140,13 @@ export function EntryForm({
       const typedFields = typeName
         ? { type: typeName, data: data }
         : { type: null, data: null };
+      const trimmedTitle = title.trim();
+      const metadataToSend: EntryMetadata = { ...metadata };
+      if (trimmedTitle) {
+        metadataToSend.title = trimmedTitle;
+      } else {
+        delete metadataToSend.title;
+      }
 
       let result: Entry;
       if (mode === "create") {
@@ -140,7 +154,7 @@ export function EntryForm({
           ...(id.trim() && { id: id.trim() }),
           text: text.trim(),
           source_id: sourceId.trim(),
-          metadata,
+          metadata: metadataToSend,
           ...(trimmedPath && { path: trimmedPath }),
           ...(typeName && typedFields),
         });
@@ -148,7 +162,7 @@ export function EntryForm({
         result = await updateItem({
           text: text.trim(),
           source_id: sourceId.trim(),
-          metadata,
+          metadata: metadataToSend,
           path: trimmedPath,
           ...typedFields,
         });
@@ -191,6 +205,16 @@ export function EntryForm({
       )}
 
       <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="title">Title (optional)</Label>
+          <Input
+            id="title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Auto-generated from content/analysis if left blank"
+          />
+        </div>
+
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <Label htmlFor="text" className="flex items-center gap-1.5">

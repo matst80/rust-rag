@@ -1256,6 +1256,14 @@ pub trait VectorStore: Send + Sync {
         Ok(false)
     }
 
+    /// Set `metadata.title` to `title` only when the item has no non-empty
+    /// `metadata.title` yet. Best-effort; intended for analysis output
+    /// promotion so a user-entered title is never overwritten. Returns true
+    /// when the item exists.
+    fn merge_item_title_if_missing(&self, _id: &str, _title: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Public shares
     fn create_public_share(
         &self,
@@ -2797,6 +2805,46 @@ impl VectorStore for SqliteVectorStore {
             existing.push(t.to_owned());
         }
         obj.insert("tags".to_owned(), serde_json::json!(existing));
+        let serialized = serde_json::to_string(&metadata)?;
+        connection.execute(
+            "UPDATE items SET metadata = ?1 WHERE id = ?2",
+            params![serialized, id],
+        )?;
+        Ok(true)
+    }
+
+    fn merge_item_title_if_missing(&self, id: &str, title: &str) -> Result<bool> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(true);
+        }
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let row: Option<String> = connection
+            .query_row(
+                "SELECT metadata FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(metadata_str) = row else {
+            return Ok(false);
+        };
+        let mut metadata: Value = serde_json::from_str(&metadata_str)
+            .unwrap_or_else(|_| Value::Object(Default::default()));
+        let obj = metadata
+            .as_object_mut()
+            .context("metadata is not a JSON object")?;
+        let has_title = obj
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty());
+        if has_title {
+            return Ok(true);
+        }
+        obj.insert("title".to_owned(), serde_json::json!(title));
         let serialized = serde_json::to_string(&metadata)?;
         connection.execute(
             "UPDATE items SET metadata = ?1 WHERE id = ?2",

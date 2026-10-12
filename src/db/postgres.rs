@@ -2384,6 +2384,49 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn merge_item_title_if_missing(&self, id: &str, title: &str) -> Result<bool> {
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return Ok(true);
+        }
+        let pool = self.pool.clone();
+        let id = id.to_owned();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            let row = tx
+                .query_opt(
+                    "SELECT metadata FROM documents WHERE id = $1 FOR UPDATE",
+                    &[&id],
+                )
+                .await?;
+            let Some(row) = row else {
+                return Ok(false);
+            };
+            let mut metadata: Value = row
+                .try_get("metadata")
+                .unwrap_or(Value::Object(Default::default()));
+            let obj = metadata
+                .as_object_mut()
+                .context("metadata is not a JSON object")?;
+            let has_title = obj
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.trim().is_empty());
+            if has_title {
+                return Ok(true);
+            }
+            obj.insert("title".to_owned(), serde_json::json!(title));
+            tx.execute(
+                "UPDATE documents SET metadata = $1, updated_at = now() WHERE id = $2",
+                &[&metadata, &id],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(true)
+        })
+    }
+
     fn create_public_share(
         &self,
         item_id: &str,

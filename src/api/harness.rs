@@ -311,6 +311,11 @@ struct AuditData {
 }
 
 pub(crate) fn display_title(item: &ItemRecord) -> String {
+    if let Some(t) = item.metadata.get("title").and_then(|v| v.as_str()) {
+        if !t.trim().is_empty() {
+            return t.to_owned();
+        }
+    }
     if let Some(data) = &item.data {
         for key in ["title", "name", "goal", "role", "stream_name", "summary", "statement"] {
             if let Some(t) = data.get(key).and_then(|v| v.as_str()) {
