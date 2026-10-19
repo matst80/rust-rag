@@ -310,6 +310,7 @@ async fn main() -> Result<()> {
     .with_analysis(config.analysis.clone())
     .with_dreaming(config.dreaming.clone())
     .with_ontology(config.ontology.clone(), ontology_llm_config(&config))
+    .with_loose_links(config.loose_links.clone())
     .with_google_oauth(config.google_oauth.clone(), oauth_creds, oauth_token_key)
     .with_web_push(
         config.web_push.clone(),
@@ -474,6 +475,15 @@ async fn main() -> Result<()> {
         )));
     }
 
+    let mut loose_links_handle = None;
+    if config.loose_links.enabled {
+        loose_links_handle = Some(tokio::spawn(rust_rag::loose_links::run_loose_links_worker(
+            store_service.clone(),
+            config.loose_links.clone(),
+            shutdown_rx.clone(),
+        )));
+    }
+
     let mut ontology_handle = None;
     if config.ontology.enabled {
         ontology_handle = Some(tokio::spawn(ontology::run_ontology_worker(
@@ -568,6 +578,11 @@ async fn main() -> Result<()> {
             state_for_shutdown.message_notify.notify_waiters();
         })
         .await?;
+
+    if let Some(handle) = loose_links_handle {
+        info!("waiting for loose links worker to finish");
+        let _ = handle.await;
+    }
 
     if let Some(handle) = ontology_handle {
         info!("waiting for ontology worker to finish");

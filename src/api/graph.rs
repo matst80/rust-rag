@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::db::{
     DuplicateEdgeGroup, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood, GraphNodeDistance,
-    GraphStatus, ManualEdgeInput, VectorStore,
+    GraphStatus, LooseLinkReport, LooseLinkRule, ManualEdgeInput, VectorStore,
 };
 
 use super::error::{
@@ -138,6 +138,28 @@ pub struct GraphRebuildResponse {
     pub rebuilt_edges: usize,
 }
 
+/// Overrides for `POST /admin/graph/rebuild-links`. Omitted fields fall back
+/// to the process-wide `RAG_LOOSE_LINK_*` config, so an empty body `{}` runs
+/// the server's configured rules.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct RebuildLinksRequest {
+    /// Replaces the configured rules entirely when present.
+    pub rules: Option<Vec<LooseLinkRuleRequest>>,
+    pub clique_max_members: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, JsonSchema)]
+pub struct LooseLinkRuleRequest {
+    pub metadata_key: String,
+    pub relation: String,
+    #[serde(default = "default_loose_link_weight")]
+    pub weight: f32,
+}
+
+fn default_loose_link_weight() -> f32 {
+    0.6
+}
+
 impl From<GraphStatus> for GraphStatusResponse {
     fn from(value: GraphStatus) -> Self {
         Self {
@@ -154,7 +176,10 @@ impl From<GraphStatus> for GraphStatusResponse {
     }
 }
 
-pub(crate) fn edge_payload(value: GraphEdgeRecord, titles: &HashMap<String, String>) -> GraphEdgePayload {
+pub(crate) fn edge_payload(
+    value: GraphEdgeRecord,
+    titles: &HashMap<String, String>,
+) -> GraphEdgePayload {
     let from_title = titles.get(&value.from_item_id).cloned();
     let to_title = titles.get(&value.to_item_id).cloned();
     GraphEdgePayload {
@@ -280,6 +305,73 @@ pub(crate) async fn rebuild_graph(
         .map_err(map_graph_error)?;
 
     Ok(Json(GraphRebuildResponse { rebuilt_edges }))
+}
+
+/// Recompute every metadata-derived "loose link" edge from scratch.
+///
+/// Two entries carrying the same value under a configured metadata key (e.g.
+/// both `repo: rust-rag`) get linked, so the wiki shows backlinks between
+/// entries that never resemble each other in text. Cheap and deterministic —
+/// no embeddings, no LLM — which is what separates it from the ontology worker's
+/// semantic edges.
+///
+/// Only edges tagged `metadata.source = "loose_links"` are deleted, so a run
+/// never touches hand-curated or ontology-worker edges.
+#[tracing::instrument(name = "api.graph.rebuild_links", skip(state))]
+pub(crate) async fn rebuild_links(
+    State(state): State<AppState>,
+    body: Option<Json<RebuildLinksRequest>>,
+) -> Result<Json<LooseLinkReport>, ApiError> {
+    let request = body.map(|Json(body)| body).unwrap_or_default();
+    let cfg = state.loose_links.clone();
+
+    let rules = match request.rules {
+        Some(rules) => rules
+            .into_iter()
+            .filter(|rule| {
+                let valid = !rule.metadata_key.trim().is_empty()
+                    && !rule.relation.trim().is_empty()
+                    && rule.weight > 0.0;
+                if !valid {
+                    tracing::warn!(
+                        metadata_key = %rule.metadata_key,
+                        relation = %rule.relation,
+                        weight = rule.weight,
+                        "ignoring invalid loose-link rule"
+                    );
+                }
+                valid
+            })
+            .map(|rule| LooseLinkRule {
+                metadata_key: rule.metadata_key,
+                relation: rule.relation,
+                weight: rule.weight,
+            })
+            .collect(),
+        None => cfg.rules.clone(),
+    };
+    if rules.is_empty() {
+        return Err(ApiError::BadRequest(
+            "no valid loose-link rules configured".to_owned(),
+        ));
+    }
+    let clique_max_members = request.clique_max_members.unwrap_or(cfg.clique_max_members);
+
+    let store = state.store.clone();
+    let report =
+        tokio::task::spawn_blocking(move || store.rebuild_loose_links(&rules, clique_max_members))
+            .await
+            .map_err(ApiError::TaskJoin)?
+            .map_err(map_graph_error)?;
+
+    tracing::info!(
+        clusters = report.clusters,
+        hub_edges = report.hub_edges,
+        clique_edges = report.clique_edges,
+        unchanged = report.unchanged,
+        "rebuilt loose-link edges"
+    );
+    Ok(Json(report))
 }
 
 #[tracing::instrument(name = "api.graph.list_duplicates", skip(state))]

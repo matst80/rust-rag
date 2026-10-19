@@ -2479,6 +2479,7 @@ mod tests {
                 || [
                     "rebuild_graph",
                     "list_graph_edges",
+                    "link_peers",
                     "create_manual_edge",
                     "delete_graph_edge",
                     "update_graph_edge",

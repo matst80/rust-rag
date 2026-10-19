@@ -525,7 +525,7 @@ func entryDeleteCmd() *cobra.Command {
 
 func entryListCmd() *cobra.Command {
 	var sourceID, pathPrefix, typeName string
-	var limit int
+	var limit, offset int
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -542,6 +542,9 @@ func entryListCmd() *cobra.Command {
 				q.Set("type", typeName)
 			}
 			q.Set("limit", fmt.Sprintf("%d", limit))
+			if offset > 0 {
+				q.Set("offset", fmt.Sprintf("%d", offset))
+			}
 			var resp struct {
 				Items []map[string]any `json:"items"`
 				TotalCount int64 `json:"total_count"`
@@ -562,6 +565,7 @@ func entryListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pathPrefix, "path-prefix", "", "filter by path prefix")
 	cmd.Flags().StringVar(&typeName, "type", "", "filter by typed-entry schema")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "result limit")
+	cmd.Flags().IntVar(&offset, "offset", 0, "result offset (for paging)")
 	return cmd
 }
 

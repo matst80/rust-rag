@@ -76,6 +76,7 @@ pub fn router(state: AppState) -> Router {
             post(store_search::llm_rechunk_item),
         )
         .route("/admin/graph/rebuild", post(graph::rebuild_graph))
+        .route("/admin/graph/rebuild-links", post(graph::rebuild_links))
         .route("/admin/graph/duplicates", get(graph::list_duplicate_edges))
         .route("/admin/graph/edges", post(graph::create_manual_edge))
         .route("/admin/ontology/run", post(ontology::run_batch))

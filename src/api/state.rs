@@ -1,7 +1,8 @@
 use crate::{
     config::{
         AnalysisConfig, AuthConfig, ChunkingConfig, DreamingConfig, GoogleOAuthConfig,
-        ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig, WebPushConfig,
+        LooseLinksConfig, ManagerConfig, MultimodalConfig, OntologyConfig, OpenAiChatConfig,
+        WebPushConfig,
     },
     crypto::EncryptionKey,
     db::{
@@ -61,6 +62,9 @@ pub struct AppState {
     pub analysis: Arc<AnalysisConfig>,
     pub dreaming: Arc<DreamingConfig>,
     pub ontology: Arc<OntologyConfig>,
+    /// Metadata keys that link entries into clusters (e.g. `repo` →
+    /// `shares_repo`). Read by `POST /admin/graph/rebuild-links`.
+    pub loose_links: Arc<LooseLinksConfig>,
     /// Effective LLM endpoint for the ontology worker. Prefers
     /// `RAG_ANALYSIS_*` when fully configured (so analysis + ontology share
     /// the typed-output-friendly model); otherwise falls back to
@@ -143,6 +147,7 @@ impl AppState {
             analysis: Arc::new(AnalysisConfig::default()),
             dreaming: Arc::new(DreamingConfig::default()),
             ontology: Arc::new(OntologyConfig::default()),
+            loose_links: Arc::new(LooseLinksConfig::default()),
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),
@@ -202,6 +207,11 @@ impl AppState {
     pub fn with_ontology(mut self, ontology: OntologyConfig, llm: OpenAiChatConfig) -> Self {
         self.ontology = Arc::new(ontology);
         self.ontology_llm = Arc::new(llm);
+        self
+    }
+
+    pub fn with_loose_links(mut self, loose_links: LooseLinksConfig) -> Self {
+        self.loose_links = Arc::new(loose_links);
         self
     }
 
@@ -285,6 +295,7 @@ impl AppState {
             analysis: Arc::new(AnalysisConfig::default()),
             dreaming: Arc::new(DreamingConfig::default()),
             ontology: Arc::new(OntologyConfig::default()),
+            loose_links: Arc::new(LooseLinksConfig::default()),
             ontology_llm: Arc::new(OpenAiChatConfig::default()),
             schema_cache: Arc::new(crate::validation::SchemaCache::new()),
             pending_tokens: Arc::new(auth::PendingTokenCache::default()),

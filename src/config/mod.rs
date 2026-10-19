@@ -1,4 +1,7 @@
-use crate::{db::GraphConfig, embedding::Pooling};
+use crate::{
+    db::{GraphConfig, LooseLinkRule},
+    embedding::Pooling,
+};
 use anyhow::{Context, Result, anyhow};
 use std::{
     env,
@@ -10,6 +13,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiKeyConfig {
@@ -202,6 +206,44 @@ impl Default for OntologyConfig {
     }
 }
 
+/// Metadata-derived "loose links": wiki backlinks between entries that share a
+/// metadata value (e.g. both carrying `repo: rust-rag`).
+///
+/// Distinct from [`OntologyConfig`], which is LLM-driven and semantic. These
+/// links are deterministic, cost nothing to compute, and never leave an entry
+/// unlinked just because its text doesn't resemble its neighbours'.
+///
+/// Rules are configured as `RAG_LOOSE_LINK_RULES`, a comma-separated list of
+/// `metadata_key:relation:weight` triples, e.g.
+/// `repo:shares_repo:0.6,component:same_component:0.7`.
+#[derive(Debug, Clone)]
+pub struct LooseLinksConfig {
+    /// Run the background worker. When false, links are still built by
+    /// `POST /admin/graph/rebuild-links` on demand.
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub rules: Vec<LooseLinkRule>,
+    /// Also emit pairwise edges inside a cluster, but only for clusters with at
+    /// most this many members (`0` = hub edges only). Clusters above the cap
+    /// stay hub-linked, which is what keeps the graph O(n) rather than O(n²).
+    pub clique_max_members: usize,
+}
+
+impl Default for LooseLinksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 300,
+            rules: vec![LooseLinkRule {
+                metadata_key: "repo".to_owned(),
+                relation: "shares_repo".to_owned(),
+                weight: 0.6,
+            }],
+            clique_max_members: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagerConfig {
     pub enabled: bool,
@@ -302,39 +344,41 @@ impl AnalysisConfig {
 pub struct DreamingConfig {
     pub enabled: bool,
     pub interval_secs: u64,
-    pub batch_size: usize,
-    pub concurrency: usize,
     pub source_id: String,
-    pub target_source_id: String,
-    /// Namespaces whose entries dreaming may never destroy or move: `merge`
-    /// and `prune` are blocked and recorded as such. A `promote` *copy* is
-    /// still allowed out of these namespaces — it writes a new row under
-    /// `<id>:dream:<uuid>` in the target namespace and leaves the original
-    /// in place, so nothing leaves the client's search space. Defaults to the
-    /// harness memory namespace, which the `eventsourced-ai` enricher
-    /// searches on every turn; the copy makes a durable fact available to
-    /// the repo scope without removing it from memory. Set
-    /// `RAG_DREAMING_PROTECTED_SOURCE_IDS=` (empty) to opt out, or
-    /// comma-separate extra namespaces.
-    pub protected_source_ids: Vec<String>,
-    /// Actions dreaming may actually apply. `merge` and `prune` are opt-in
-    /// (`keep,promote,merge,prune` unlocks everything) because both delete
-    /// data the harness client owns. Default: `keep,promote`.
-    pub allowed_actions: Vec<String>,
     /// Run the round without writing anything. `POST /api/dream` defaults to
     /// dry-run unless the request passes `"apply": true`; the worker honours
     /// this too so a mis-set env var cannot start destructive automation.
+    /// Corpus rounds only persist `dream_clusters` / members when not dry.
     pub dry_run: bool,
-    /// Hard cap on actions applied per round. The LLM is asked once per item
-    /// and we stop feeding it new items once this many actions have been
-    /// applied, so a chatty model cannot fan a round out without limit.
-    pub max_actions_per_round: usize,
-    /// Hard cap on items whose `dreamed_at` marker is written per round.
-    /// Unprocessed items beyond the cap stay eligible for the next round.
-    pub max_items_per_round: usize,
+    /// Ceiling on entries fed to the deterministic pre-pass in one round.
+    /// Bounds the O(n^2) similarity work for very large namespaces.
+    pub max_docs_per_round: usize,
+    /// Groups smaller than this are not reported as clusters; their members
+    /// fall through to singletons.
+    pub cluster_min_size: usize,
+    /// Cosine floor for two entries to be candidate neighbours in the
+    /// deterministic pass.
+    pub cluster_min_similarity: f32,
+    /// Minimum fraction of the smaller entry's identifying-token mass that two
+    /// entries must share.
+    pub cluster_min_shared_ratio: f32,
+    /// Mean "best similarity to another member" required for a group to count
+    /// as a cluster rather than a chain of loosely related entries.
+    pub cluster_min_cohesion: f32,
+    /// Shingle containment above which two entries are reported as
+    /// near-duplicates.
+    pub dup_containment: f32,
+    /// Token budget for the taxonomy pass. `0` disables it, leaving the round
+    /// purely deterministic.
+    pub max_context_tokens: usize,
+    /// Re-review a kept entry after this long. `0` disables re-review, which
+    /// means an entry is decided once and never looked at again.
+    pub review_interval_secs: u64,
 }
 
-/// The four things the dreaming worker may decide about an entry.
+/// Audit labels for near-duplicate proposals emitted by the deterministic
+/// corpus pass. They are proposals only — the corpus pipeline never deletes
+/// or rewrites entries, so there is no allowlist or protected-namespace gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DreamActionKind {
     Promote,
@@ -372,40 +416,21 @@ impl DreamActionKind {
     }
 }
 
-impl DreamingConfig {
-    /// Whether `kind` may be applied at all. An empty allowlist falls back to
-    /// the conservative default (`keep`, `promote`) rather than "allow all".
-    pub fn allows(&self, kind: DreamActionKind) -> bool {
-        if self.allowed_actions.is_empty() {
-            return matches!(kind, DreamActionKind::Keep | DreamActionKind::Promote);
-        }
-        self.allowed_actions
-            .iter()
-            .any(|a| a.trim().eq_ignore_ascii_case(kind.as_str()))
-    }
-
-    /// Whether `source_id` is off-limits for destructive/moving actions.
-    pub fn is_protected(&self, source_id: &str) -> bool {
-        self.protected_source_ids
-            .iter()
-            .any(|p| p.trim().eq_ignore_ascii_case(source_id))
-    }
-}
-
 impl Default for DreamingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             interval_secs: 3600,
-            batch_size: 5,
-            concurrency: 1,
             source_id: "memory".to_owned(),
-            target_source_id: "knowledge".to_owned(),
-            protected_source_ids: vec!["memory".to_owned()],
-            allowed_actions: vec!["keep".to_owned(), "promote".to_owned()],
             dry_run: true,
-            max_actions_per_round: 16,
-            max_items_per_round: 32,
+            max_docs_per_round: 5000,
+            cluster_min_size: 3,
+            cluster_min_similarity: 0.28,
+            cluster_min_shared_ratio: 0.35,
+            cluster_min_cohesion: 0.45,
+            dup_containment: 0.8,
+            max_context_tokens: 0,
+            review_interval_secs: 0,
         }
     }
 }
@@ -440,6 +465,7 @@ pub struct AppConfig {
     pub multimodal: MultimodalConfig,
     pub chunking: ChunkingConfig,
     pub ontology: OntologyConfig,
+    pub loose_links: LooseLinksConfig,
     pub manager: ManagerConfig,
     pub acp_ws: AcpWsConfig,
     pub analysis: AnalysisConfig,
@@ -705,27 +731,32 @@ impl AppConfig {
                 target_preview_chars: parse_env("RAG_ONTOLOGY_TARGET_PREVIEW_CHARS", "600")?,
                 candidate_preview_chars: parse_env("RAG_ONTOLOGY_CANDIDATE_PREVIEW_CHARS", "300")?,
             },
+            loose_links: LooseLinksConfig {
+                enabled: parse_env("RAG_LOOSE_LINKS_ENABLED", "false")?,
+                interval_secs: parse_env("RAG_LOOSE_LINKS_INTERVAL_SECS", "300")?,
+                rules: parse_loose_link_rules(
+                    &non_empty_var("RAG_LOOSE_LINK_RULES")
+                        .unwrap_or_else(|| "repo:shares_repo:0.6".to_owned()),
+                ),
+                clique_max_members: parse_env("RAG_LOOSE_LINK_CLIQUE_MAX_MEMBERS", "0")?,
+            },
             dreaming: DreamingConfig {
                 enabled: parse_env("RAG_DREAMING_ENABLED", "false")?,
                 interval_secs: parse_env("RAG_DREAMING_INTERVAL_SECS", "3600")?,
-                batch_size: parse_env("RAG_DREAMING_BATCH_SIZE", "5")?,
-                concurrency: parse_env("RAG_DREAMING_CONCURRENCY", "1")?,
                 source_id: env::var("RAG_DREAMING_SOURCE_ID")
                     .unwrap_or_else(|_| "memory".to_owned()),
-                target_source_id: env::var("RAG_DREAMING_TARGET_SOURCE_ID")
-                    .unwrap_or_else(|_| "knowledge".to_owned()),
-                protected_source_ids: match env::var("RAG_DREAMING_PROTECTED_SOURCE_IDS") {
-                    Err(_) => vec!["memory".to_owned()],
-                    Ok(raw) => parse_csv(&raw).unwrap_or_default(),
-                },
-                allowed_actions: parse_csv(
-                    &env::var("RAG_DREAMING_ALLOWED_ACTIONS")
-                        .unwrap_or_else(|_| "keep,promote".to_owned()),
-                )
-                .unwrap_or_else(|| vec!["keep".to_owned(), "promote".to_owned()]),
                 dry_run: parse_env("RAG_DREAMING_DRY_RUN", "true")?,
-                max_actions_per_round: parse_env("RAG_DREAMING_MAX_ACTIONS_PER_ROUND", "16")?,
-                max_items_per_round: parse_env("RAG_DREAMING_MAX_ITEMS_PER_ROUND", "32")?,
+                max_docs_per_round: parse_env("RAG_DREAMING_MAX_DOCS_PER_ROUND", "5000")?,
+                cluster_min_size: parse_env("RAG_DREAMING_CLUSTER_MIN_SIZE", "3")?,
+                cluster_min_similarity: parse_env("RAG_DREAMING_CLUSTER_MIN_SIMILARITY", "0.28")?,
+                cluster_min_shared_ratio: parse_env(
+                    "RAG_DREAMING_CLUSTER_MIN_SHARED_RATIO",
+                    "0.35",
+                )?,
+                cluster_min_cohesion: parse_env("RAG_DREAMING_CLUSTER_MIN_COHESION", "0.45")?,
+                dup_containment: parse_env("RAG_DREAMING_DUP_CONTAINMENT", "0.8")?,
+                max_context_tokens: parse_env("RAG_DREAMING_MAX_CONTEXT_TOKENS", "0")?,
+                review_interval_secs: parse_env("RAG_DREAMING_REVIEW_INTERVAL_SECS", "0")?,
             },
             google_oauth: GoogleOAuthConfig {
                 client_id: non_empty_var("GOOGLE_OAUTH_CLIENT_ID"),
@@ -825,4 +856,116 @@ fn parse_csv(raw: &str) -> Option<Vec<String>> {
         .filter(|part| !part.is_empty())
         .collect();
     if parts.is_empty() { None } else { Some(parts) }
+}
+
+/// Parse `RAG_LOOSE_LINK_RULES` — `metadata_key:relation:weight` triples.
+///
+/// Malformed entries are skipped with a warning rather than aborting startup:
+/// a typo in one rule shouldn't stop the server booting. `weight` is optional
+/// and defaults to `LooseLinksConfig`'s.
+fn parse_loose_link_rules(raw: &str) -> Vec<LooseLinkRule> {
+    let fallback_weight = LooseLinksConfig::default().rules[0].weight;
+    let mut rules = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let mut fields = part.split(':');
+        let (Some(metadata_key), Some(relation)) = (fields.next(), fields.next()) else {
+            warn!(
+                "ignoring malformed RAG_LOOSE_LINK_RULES entry '{part}': expected metadata_key:relation[:weight]"
+            );
+            continue;
+        };
+        let (metadata_key, relation) = (metadata_key.trim(), relation.trim());
+        if metadata_key.is_empty() || relation.is_empty() {
+            warn!("ignoring malformed RAG_LOOSE_LINK_RULES entry '{part}': empty key or relation");
+            continue;
+        }
+        let weight = match fields.next().map(str::trim) {
+            None => fallback_weight,
+            Some(raw_weight) => match raw_weight.parse::<f32>() {
+                Ok(weight) if weight > 0.0 => weight,
+                _ => {
+                    warn!(
+                        "ignoring RAG_LOOSE_LINK_RULES entry '{part}': weight must be a positive number"
+                    );
+                    continue;
+                }
+            },
+        };
+        rules.push(LooseLinkRule {
+            metadata_key: metadata_key.to_owned(),
+            relation: relation.to_owned(),
+            weight,
+        });
+    }
+    rules
+}
+
+#[cfg(test)]
+mod loose_link_rule_tests {
+    use super::*;
+
+    #[test]
+    fn parses_key_relation_and_weight() {
+        let rules = parse_loose_link_rules("repo:shares_repo:0.8,component:same_component:0.5");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].metadata_key, "repo");
+        assert_eq!(rules[0].relation, "shares_repo");
+        assert_eq!(rules[0].weight, 0.8);
+        assert_eq!(rules[1].metadata_key, "component");
+        assert_eq!(rules[1].weight, 0.5);
+    }
+
+    #[test]
+    fn weight_defaults_when_omitted() {
+        let rules = parse_loose_link_rules("repo:shares_repo");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].weight, 0.6);
+    }
+
+    #[test]
+    fn tolerates_whitespace_and_empty_segments() {
+        let rules =
+            parse_loose_link_rules("  repo : shares_repo : 0.4 , , component:same_component ");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].metadata_key, "repo");
+        assert_eq!(rules[0].weight, 0.4);
+    }
+
+    #[test]
+    fn skips_malformed_entries_instead_of_failing_startup() {
+        // A typo in one rule shouldn't stop the server booting.
+        let rules = parse_loose_link_rules("justkey,repo:shares_repo:0.7,:missing_key,repo:");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].metadata_key, "repo");
+        assert_eq!(rules[0].weight, 0.7);
+    }
+
+    #[test]
+    fn rejects_non_positive_and_unparseable_weights() {
+        let rules = parse_loose_link_rules("a:x:0,b:y:-1,c:z:notanumber");
+        assert!(rules.is_empty(), "expected all rejected, got {rules:?}");
+    }
+
+    #[test]
+    fn empty_input_yields_no_rules() {
+        assert!(parse_loose_link_rules("").is_empty());
+        assert!(parse_loose_link_rules("   ").is_empty());
+        assert!(parse_loose_link_rules(",,,").is_empty());
+    }
+
+    #[test]
+    fn default_config_matches_the_documented_default_rule() {
+        let cfg = LooseLinksConfig::default();
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].metadata_key, "repo");
+        assert_eq!(cfg.rules[0].relation, "shares_repo");
+        assert_eq!(cfg.clique_max_members, 0);
+        // Off by default: the admin endpoint can build links on demand, and a
+        // periodic rewrite of the whole graph shouldn't start unasked.
+        assert!(!cfg.enabled);
+    }
 }

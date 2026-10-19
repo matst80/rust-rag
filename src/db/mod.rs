@@ -66,6 +66,26 @@ pub struct ItemRecord {
     pub dreamed_at: Option<i64>,
 }
 
+/// One cluster discovered by a corpus dreaming round.
+///
+/// Written by the deterministic pass, so it exists even when no model is
+/// configured. `vocabulary` is the highest-IDF identifying tokens shared by the
+/// members — the honest, cheap answer to "what is this group about".
+#[derive(Debug, Clone)]
+pub struct DreamClusterRecord {
+    pub id: String,
+    pub round_id: String,
+    pub source_id: String,
+    pub label: String,
+    pub member_count: usize,
+    pub vocabulary: Vec<String>,
+    pub cohesion: f32,
+    /// JSON blob of the clustering parameters used, so a cluster can be
+    /// re-derived after a knob change.
+    pub params: String,
+    pub created_at: i64,
+}
+
 /// One row in `dream_actions`: what the dreaming worker decided about an item,
 /// what it actually did, and why. `dry_run` rows are proposals only.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -421,6 +441,49 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
             created_at: now,
             updated_at: now,
         },
+        // Metadata-derived ("loose link") predicates. These are produced
+        // deterministically by the loose-link batch job (`rebuild_loose_links`)
+        // from shared metadata keys, not by the LLM ontology worker. They are
+        // deliberately NOT in the canonical set above: two entries that happen
+        // to carry `repo=rust-rag` are not in a `part_of`/`is_a` relationship,
+        // and claiming otherwise would poison the CMS tree (which renders
+        // manual edges as a hierarchy via `sort_order`) and mislead the
+        // ontology reviewer.
+        OntologyPredicateRecord {
+            name: "shares_repo".to_owned(),
+            source_id: None,
+            description: "from and to are entries about the same repository (shared metadata.repo)"
+                .to_owned(),
+            direction: "from shares repo metadata with to".to_owned(),
+            example_from: Some("rust-rag decision entry".to_owned()),
+            example_to: Some("rust-rag todo entry".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "same_component".to_owned(),
+            source_id: None,
+            description:
+                "from and to are entries about the same component/service (shared metadata key)"
+                    .to_owned(),
+            direction: "from belongs to the same component as to".to_owned(),
+            example_from: Some("auth service runbook".to_owned()),
+            example_to: Some("auth service postmortem".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
+        OntologyPredicateRecord {
+            name: "relates_to".to_owned(),
+            source_id: None,
+            description:
+                "from and to share an arbitrary metadata key value and are loosely related"
+                    .to_owned(),
+            direction: "from loosely relates to to via shared metadata".to_owned(),
+            example_from: Some("entry tagged project:atlas".to_owned()),
+            example_to: Some("entry tagged project:atlas".to_owned()),
+            created_at: now,
+            updated_at: now,
+        },
         // Harness-domain predicates (`src/api/harness.rs`): audit/POC lifecycle
         // relations with no generic-knowledge-graph equivalent, so they stay
         // UPPER_SNAKE rather than being force-fit into the canonical set above.
@@ -524,17 +587,14 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
 }
 
 fn seed_default_predicates(connection: &Connection) -> Result<()> {
-    let count: i64 =
-        connection.query_row("SELECT count(*) FROM ontology_predicates", [], |row| {
-            row.get(0)
-        })?;
-    if count > 0 {
-        return Ok(());
-    }
+    // Additive, not all-or-nothing: a database seeded by an older build already
+    // has rows, and an early `count(*) > 0` return would permanently skip any
+    // predicate added later. INSERT OR IGNORE keeps user-edited descriptions
+    // intact while still landing the newly-added names.
     let predicates = default_ontology_predicates();
     for p in predicates {
         connection.execute(
-            "INSERT INTO ontology_predicates (name, source_id, description, direction, example_from, example_to, created_at, updated_at)
+            "INSERT OR IGNORE INTO ontology_predicates (name, source_id, description, direction, example_from, example_to, created_at, updated_at)
              VALUES (?1, '*', ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 p.name,
@@ -836,6 +896,70 @@ pub struct ManualEdgeInput {
 pub const EDGE_SORT_ORDER_WIDTH: usize = 20;
 pub const EDGE_SORT_ORDER_STEP: i64 = 1024;
 
+/// `metadata.source` tag stamped on every edge written by
+/// [`VectorStore::rebuild_loose_links`].
+///
+/// This is what makes the batch job idempotent: migration 0020 gives manual
+/// edges with a non-null, non-`ontology_worker` source a unique index on
+/// `(from_item_id, to_item_id, relation, (metadata->>'source'))`, so a rerun
+/// upserts instead of duplicating. It also gives the rebuild a cheap,
+/// non-destructive delete scope — we only ever delete our own rows.
+pub const LOOSE_LINK_SOURCE: &str = "loose_links";
+
+/// One metadata-key ⇒ relation rule for the loose-link batch job. When two
+/// entries carry the same normalized value under `metadata_key`, a
+/// `LOOSE_LINK_SOURCE`-tagged manual edge is created between them.
+///
+/// `relation` should name a metadata-shaped predicate (`shares_repo`,
+/// `same_component`, `relates_to`) — not a canonical ontology predicate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LooseLinkRule {
+    pub metadata_key: String,
+    pub relation: String,
+    pub weight: f32,
+}
+
+/// A hub placeholder (`ext:` entry) standing in for one metadata cluster.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct LooseLinkHub {
+    /// Id of the `ext:` placeholder, e.g. `ext:link:repo-rust-rag`.
+    pub id: String,
+    pub metadata_key: String,
+    pub value: String,
+    pub members: usize,
+}
+
+/// Summary of one [`VectorStore::rebuild_loose_links`] pass.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
+pub struct LooseLinkReport {
+    /// Clusters with at least `min_cluster_members` entries.
+    pub clusters: usize,
+    /// Value groups that matched only one entry — no edges to draw.
+    pub clusters_skipped_singleton: usize,
+    /// Edges from entries to their cluster's hub placeholder.
+    pub hub_edges: usize,
+    /// Optional pairwise edges inside a cluster, capped per cluster.
+    pub clique_edges: usize,
+    /// `hub_edges + clique_edges`.
+    pub edges_committed: usize,
+    /// The recomputed plan was byte-identical to what was already stored, so
+    /// the write was skipped entirely. The background worker uses this to stay
+    /// quiet (and to avoid churning `updated_at` and sort_order) on idle ticks.
+    pub unchanged: bool,
+    /// Rule key ⇒ number of distinct values seen (incl. singletons), for
+    /// debugging rules that match nothing.
+    pub rule_matches: Vec<LooseLinkRuleCount>,
+    pub hubs: Vec<LooseLinkHub>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct LooseLinkRuleCount {
+    pub metadata_key: String,
+    pub relation: String,
+    pub distinct_values: usize,
+    pub linked_entries: usize,
+}
+
 pub fn format_edge_sort_order(value: i64) -> String {
     format!("{value:0width$}", width = EDGE_SORT_ORDER_WIDTH)
 }
@@ -848,7 +972,11 @@ pub fn format_edge_sort_order(value: i64) -> String {
 pub fn parse_external_ref_id(id: &str) -> Option<(&str, &str)> {
     let rest = id.strip_prefix("ext:")?;
     let (kind, key) = rest.split_once(':')?;
-    let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
     (valid(kind) && valid(key)).then_some((kind, key))
 }
 
@@ -863,6 +991,24 @@ pub fn external_ref_metadata(kind: &str, key: &str) -> Value {
         "kind": kind,
         "key": key,
     })
+}
+
+/// Normalize an entry's `metadata[key]` (falling back to `data[key]`) into a
+/// cluster identity: trimmed and lowercased. Shared by the loose-link planner
+/// and the `link_peers` admin tool so both agree on what "same value" means.
+pub fn extract_metadata_key(
+    metadata: Option<&Value>,
+    data: Option<&Value>,
+    key: &str,
+) -> Option<String> {
+    graph::extract_metadata_key(metadata, data, key)
+}
+
+/// Id of the placeholder entry that hubs a metadata cluster, e.g.
+/// `ext:repo:rust-rag`. Exposed so callers can resolve the hub for a given
+/// `(metadata_key, value)` without re-deriving the sanitization rules.
+pub fn loose_link_hub_id(metadata_key: &str, value: &str) -> String {
+    graph::loose_link_hub_id(metadata_key, value)
 }
 
 pub fn normalize_edge_sort_order(value: &str) -> Result<String> {
@@ -1137,6 +1283,36 @@ pub trait VectorStore: Send + Sync {
         anyhow::bail!("dream audit log not supported by this store")
     }
 
+    /// Persist a cluster discovered by the deterministic corpus pass.
+    fn upsert_dream_cluster(&self, _record: DreamClusterRecord) -> Result<()> {
+        anyhow::bail!("dream clusters not supported by this store")
+    }
+
+    /// Replace a cluster's membership. Safe to call repeatedly for the same
+    /// cluster id, which is stable across runs.
+    fn replace_dream_cluster_members(
+        &self,
+        _cluster_id: &str,
+        _members: &[String],
+    ) -> Result<()> {
+        anyhow::bail!("dream clusters not supported by this store")
+    }
+
+    /// Clusters, newest first, optionally filtered by namespace and round.
+    fn list_dream_clusters(
+        &self,
+        _limit: usize,
+        _source_id: Option<&str>,
+        _round_id: Option<&str>,
+    ) -> Result<Vec<DreamClusterRecord>> {
+        anyhow::bail!("dream clusters not supported by this store")
+    }
+
+    /// Member ids of one cluster, sorted.
+    fn dream_cluster_members(&self, _cluster_id: &str) -> Result<Vec<String>> {
+        anyhow::bail!("dream clusters not supported by this store")
+    }
+
     fn delete_item(&self, id: &str) -> Result<bool>;
 
     /// Insert an attachment row. Caller persists the file to disk first.
@@ -1192,6 +1368,24 @@ pub trait VectorStore: Send + Sync {
         status: Option<&str>,
     ) -> Result<Vec<GraphEdgeRecord>>;
     fn rebuild_similarity_graph(&self) -> Result<usize>;
+    /// Recompute every metadata-derived "loose link" edge from scratch.
+    ///
+    /// Entries sharing a value under any `rules[].metadata_key` are linked with
+    /// the rule's `relation`. Each cluster gets an `ext:` hub placeholder so the
+    /// graph stays O(n) instead of O(n²) — the hub is a real (placeholder) entry,
+    /// so existing BFS reaches the whole cluster at depth 2 with no changes.
+    ///
+    /// Full rebuild by design: the pass is a metadata-only table walk (no
+    /// embeddings, no LLM), so redoing it from zero each time is cheap and
+    /// self-heals when an entry's metadata changes. All edges written carry
+    /// [`LOOSE_LINK_SOURCE`] and only those are deleted.
+    fn rebuild_loose_links(
+        &self,
+        _rules: &[LooseLinkRule],
+        _clique_max_members: usize,
+    ) -> Result<LooseLinkReport> {
+        anyhow::bail!("loose links not supported by this store")
+    }
     fn list_duplicate_edges(&self) -> Result<Vec<DuplicateEdgeGroup>>;
     fn add_manual_edge(&self, input: ManualEdgeInput) -> Result<GraphEdgeRecord>;
     fn update_graph_edge(
@@ -1579,12 +1773,16 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
 
-        // FTS5 MATCH syntax preparation
+        // FTS5 MATCH syntax preparation. Terms are OR-ed: space in FTS5 is
+        // AND, which kills recall on multi-word queries (all terms must match).
+        // Prefix `*` keeps identifier-prefix matches (e.g. `dream` ->
+        // `dreaming.rs`). Empty tokens are dropped so a blank query skips FTS.
         let fts_query = query_text
             .split_whitespace()
             .map(|w| format!("\"{}\"*", w.replace('"', "")))
+            .filter(|t| t.len() > 3)
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(" OR ");
 
         let mut keyword_hits = Vec::new();
         if !fts_query.is_empty() {
@@ -1623,20 +1821,28 @@ impl VectorStore for SqliteVectorStore {
             }
         }
 
-        // 3. Reciprocal Rank Fusion (RRF)
-        // score = 1 / (RRF_K + rank_vector) + 1 / (RRF_K + rank_keyword)
+        // 3. Weighted Reciprocal Rank Fusion (RRF).
+        // score = W_DENSE / (RRF_K + rank_vector) + W_KEYWORD / (RRF_K + rank_keyword)
+        //
+        // BM25-first by design: dense measured at chance on real memory
+        // (P(same project) 0.267 vs 0.263 chance, AUC 0.409; every pairwise
+        // distance in a 0.44-0.54 band), while lexical separates projects.
+        // Equal weighting let dense noise drown the keyword signal, so dense
+        // is a tiebreaker (0.3) and BM25 carries the round (1.0).
         let k = RRF_K;
+        const W_DENSE: f32 = 0.3;
+        const W_KEYWORD: f32 = 1.0;
         let mut rrf_scores: HashMap<String, f32> = HashMap::new();
         let mut hit_map: HashMap<String, SearchHit> = HashMap::new();
 
         for (rank, hit) in vector_hits.into_iter().enumerate() {
-            let score = 1.0 / (k + (rank + 1) as f32);
+            let score = W_DENSE / (k + (rank + 1) as f32);
             rrf_scores.insert(hit.id.clone(), score);
             hit_map.insert(hit.id.clone(), hit);
         }
 
         for (rank, hit) in keyword_hits.into_iter().enumerate() {
-            let score = 1.0 / (k + (rank + 1) as f32);
+            let score = W_KEYWORD / (k + (rank + 1) as f32);
             *rrf_scores.entry(hit.id.clone()).or_insert(0.0) += score;
             hit_map.entry(hit.id.clone()).or_insert(hit);
         }
@@ -1646,10 +1852,10 @@ impl VectorStore for SqliteVectorStore {
             .map(|(id, score)| {
                 let mut hit = hit_map.remove(&id).unwrap();
                 // We normalize RRF score back to a 'pseudo-distance' for UI compatibility.
-                // The max possible RRF score is (1/k + 1/k) = 2/60 = 0.0333...
+                // The max possible weighted score is (W_DENSE + W_KEYWORD)/k.
                 // We want the result to be well within the default 0.8 filter.
                 // Distance = 1.0 - (score / max_possible_score)
-                let max_score = 2.0 / k;
+                let max_score = (W_DENSE + W_KEYWORD) / k;
                 hit.distance = (1.0 - (score / max_score)).clamp(0.0, 1.0);
                 hit
             })
@@ -1906,6 +2112,114 @@ impl VectorStore for SqliteVectorStore {
         )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| anyhow::Error::from(e).context("failed to list dream actions"))
+    }
+
+    fn upsert_dream_cluster(&self, record: DreamClusterRecord) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let vocabulary = serde_json::to_string(&record.vocabulary)?;
+        connection.execute(
+            "INSERT INTO dream_clusters (id, round_id, source_id, label, member_count, vocabulary, cohesion, params, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                round_id = excluded.round_id,
+                source_id = excluded.source_id,
+                label = excluded.label,
+                member_count = excluded.member_count,
+                vocabulary = excluded.vocabulary,
+                cohesion = excluded.cohesion,
+                params = excluded.params,
+                created_at = excluded.created_at",
+            params![
+                record.id,
+                record.round_id,
+                record.source_id,
+                record.label,
+                record.member_count as i64,
+                vocabulary,
+                record.cohesion,
+                record.params,
+                record.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn replace_dream_cluster_members(
+        &self,
+        cluster_id: &str,
+        members: &[String],
+    ) -> Result<()> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let mut connection = guard;
+        let connection = connection
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        let tx = connection.transaction()?;
+        tx.execute(
+            "DELETE FROM dream_cluster_members WHERE cluster_id = ?1",
+            params![cluster_id],
+        )?;
+        {
+            let mut statement =
+                tx.prepare("INSERT OR IGNORE INTO dream_cluster_members (cluster_id, item_id) VALUES (?1, ?2)")?;
+            for member in members {
+                statement.execute(params![cluster_id, member])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn list_dream_clusters(
+        &self,
+        limit: usize,
+        source_id: Option<&str>,
+        round_id: Option<&str>,
+    ) -> Result<Vec<DreamClusterRecord>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "SELECT id, round_id, source_id, label, member_count, vocabulary, cohesion, params, created_at
+             FROM dream_clusters
+             WHERE (?1 IS NULL OR source_id = ?1)
+               AND (?2 IS NULL OR round_id = ?2)
+             ORDER BY member_count DESC, id ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![source_id, round_id, limit as i64], |row| {
+            let vocabulary: String = row.get(5)?;
+            Ok(DreamClusterRecord {
+                id: row.get(0)?,
+                round_id: row.get(1)?,
+                source_id: row.get(2)?,
+                label: row.get(3)?,
+                member_count: row.get::<_, i64>(4)? as usize,
+                vocabulary: serde_json::from_str(&vocabulary).unwrap_or_default(),
+                cohesion: row.get(6)?,
+                params: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| anyhow::Error::from(e).context("failed to list dream clusters"))
+    }
+
+    fn dream_cluster_members(&self, cluster_id: &str) -> Result<Vec<String>> {
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        let mut statement = connection.prepare(
+            "SELECT item_id FROM dream_cluster_members WHERE cluster_id = ?1 ORDER BY item_id",
+        )?;
+        let rows = statement.query_map(params![cluster_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|e| anyhow::Error::from(e).context("failed to list dream cluster members"))
     }
 
     fn insert_attachment(&self, record: AttachmentRecord) -> Result<()> {
@@ -2274,6 +2588,120 @@ impl VectorStore for SqliteVectorStore {
             .as_ref()
             .context("sqlite connection has already been closed")?;
         graph::list_duplicate_edges_internal(connection)
+    }
+
+    fn rebuild_loose_links(
+        &self,
+        rules: &[LooseLinkRule],
+        clique_max_members: usize,
+    ) -> Result<LooseLinkReport> {
+        self.ensure_graph_enabled()?;
+
+        let mut guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_mut()
+            .context("sqlite connection has already been closed")?;
+        let transaction = connection.transaction()?;
+
+        let rows = load_loose_link_rows_tx(&transaction)?;
+        // Append after every *other* edge so loose links never jump ahead of
+        // hand-curated ones in the CMS tree, which renders manual edges as a
+        // hierarchy ordered by `sort_order`. The rows we're about to delete are
+        // deliberately excluded from the base — including them would push the
+        // next run's edges further back on every tick, growing sort_order
+        // without bound.
+        let sort_order_base: i64 = transaction.query_row(
+            // Spelled "not a manual edge OR its source isn't loose_links"
+            // rather than NOT(edge_type='manual' AND source=?): json_extract
+            // yields NULL for edges with no source, and NOT(TRUE AND NULL) is
+            // NULL, not true — which would silently exclude every hand-curated
+            // edge from the base. `IS NOT` is the null-safe form that treats a
+            // missing source as "not loose", so those rows are kept.
+            "SELECT COALESCE(MAX(CAST(sort_order AS INTEGER)), 0)
+             FROM graph_edges
+             WHERE edge_type <> 'manual' OR json_extract(metadata, '$.source') IS NOT ?1",
+            params![LOOSE_LINK_SOURCE],
+            |row| row.get(0),
+        )?;
+        let plan = graph::plan_loose_links(&rows, rules, clique_max_members, sort_order_base);
+
+        // Idempotent tick: an identical plan means there is nothing to write.
+        // Skipping keeps `updated_at` and sort_order stable instead of churning
+        // them on every background tick.
+        if existing_loose_links_match_tx(&transaction, &plan) {
+            let mut report = plan.report;
+            report.unchanged = true;
+            return Ok(report);
+        }
+
+        // Scope the delete to our own source so a rebuild can never touch
+        // hand-curated or ontology-worker edges.
+        transaction.execute(
+            "DELETE FROM graph_edges
+             WHERE edge_type = 'manual' AND json_extract(metadata, '$.source') = ?1",
+            params![LOOSE_LINK_SOURCE],
+        )?;
+
+        let timestamp = current_timestamp_millis()?;
+        for hub in &plan.hubs {
+            let Some((kind, key)) = parse_external_ref_id(&hub.id) else {
+                anyhow::bail!("generated hub id {} is not a valid external ref", hub.id);
+            };
+            transaction.execute(
+                "INSERT OR IGNORE INTO items (id, text, metadata, source_id, created_at, updated_at)
+                 VALUES (?1, '', ?2, 'external', ?3, ?3)",
+                params![
+                    hub.id,
+                    serde_json::json!({
+                        "external": true,
+                        "embed": false,
+                        "kind": kind,
+                        "key": key,
+                        "metadata_key": hub.metadata_key,
+                        "value": hub.value,
+                        "members": hub.members,
+                    })
+                    .to_string(),
+                    timestamp,
+                ],
+            )?;
+        }
+
+        // SQLite's `add_manual_edge` has no ON CONFLICT lane (migration 0020's
+        // partial unique index only exists in Postgres), so the delete above is
+        // what keeps a rerun from duplicating rows. `deduped` guards against a
+        // pair being planned twice — e.g. two rules matching the same entries.
+        let mut deduped: HashSet<(String, String, String)> = HashSet::new();
+        for edge in &plan.edges {
+            if !deduped.insert((
+                edge.from_item_id.clone(),
+                edge.to_item_id.clone(),
+                edge.relation.clone(),
+            )) {
+                continue;
+            }
+            transaction.execute(
+                "INSERT INTO graph_edges (
+                    id, from_item_id, to_item_id, edge_type, relation, sort_order, weight,
+                    directed, metadata, created_at, updated_at
+                 )
+                 VALUES (?1, ?2, ?3, 'manual', ?4, ?5, ?6, 0, ?7, ?8, ?8)",
+                params![
+                    edge.id,
+                    edge.from_item_id,
+                    edge.to_item_id,
+                    edge.relation,
+                    edge.sort_order,
+                    edge.weight,
+                    edge.metadata.to_string(),
+                    timestamp,
+                ],
+            )?;
+        }
+
+        transaction.commit()?;
+        self.graph_dirty.store(false, Ordering::Release);
+        Ok(plan.report)
     }
 
     fn add_manual_edge(&self, mut input: ManualEdgeInput) -> Result<GraphEdgeRecord> {
@@ -3758,6 +4186,86 @@ fn list_items_internal(
     Ok((items, total_count))
 }
 
+/// Load `(id, metadata, data)` for every entry eligible to anchor a loose link.
+///
+/// External `ext:` placeholders are excluded: they are hubs themselves, and
+/// chaining links between them would fabricate a mesh that no real entry
+/// supports. Sorted by id so the plan is byte-identical run to run.
+fn load_loose_link_rows_tx(
+    connection: &Connection,
+) -> Result<Vec<(String, Option<Value>, Option<Value>)>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT id, metadata, data
+        FROM items
+        WHERE COALESCE(json_extract(metadata, '$.external'), 0) = 0
+        ORDER BY id ASC
+        ",
+    )?;
+    let raw = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    Ok(raw
+        .into_iter()
+        .map(|(id, metadata, data)| {
+            let parse =
+                |raw: Option<String>| raw.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+            (id, parse(metadata), parse(data))
+        })
+        .collect())
+}
+
+/// Do the loose-link edges already in the table match `plan` exactly?
+/// Compares `(from, to, relation, weight)` multisets; ids, sort_order and
+/// timestamps are deliberately excluded since a rebuild regenerates those.
+fn existing_loose_links_match_tx(connection: &Connection, plan: &graph::LooseLinkPlan) -> bool {
+    let mut statement = match connection.prepare(
+        "SELECT from_item_id, to_item_id, relation, weight
+         FROM graph_edges
+         WHERE edge_type = 'manual' AND json_extract(metadata, '$.source') = ?1",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return false,
+    };
+    let existing: HashSet<(String, String, Option<String>, i64)> = statement
+        .query_map(params![LOOSE_LINK_SOURCE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                (row.get::<_, f64>(3)? * 1000.0) as i64,
+            ))
+        })
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    drop(statement);
+
+    // Weights are f32; compare on a fixed-point key so float noise can't make
+    // an unchanged plan look different.
+    let planned: HashSet<(String, String, Option<String>, i64)> = plan
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.from_item_id.clone(),
+                edge.to_item_id.clone(),
+                Some(edge.relation.clone()),
+                (edge.weight * 1000.0) as i64,
+            )
+        })
+        .collect();
+
+    existing == planned
+}
+
 fn get_item_internal(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
     let mut statement = connection.prepare(
         "
@@ -4614,5 +5122,367 @@ mod tests {
                 .iter()
                 .any(|edge| edge.edge_type == GraphEdgeType::Similarity)
         );
+    }
+}
+
+#[cfg(test)]
+mod loose_link_store_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+
+    fn store_with_graph() -> SqliteVectorStore {
+        static NEXT_DB_ID: AtomicUsize = AtomicUsize::new(0);
+        let db_id = NEXT_DB_ID.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:loose-link-test-{db_id}?mode=memory&cache=shared");
+        SqliteVectorStore::connect_uri(
+            &uri,
+            3,
+            GraphConfig {
+                enabled: true,
+                ..GraphConfig::default()
+            },
+        )
+        .expect("in-memory sqlite store should initialize")
+    }
+
+    fn put(store: &SqliteVectorStore, id: &str, repo: &str) {
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: id.to_owned(),
+                    text: format!("body of {id}"),
+                    metadata: json!({"repo": repo}),
+                    source_id: "knowledge".to_owned(),
+                    created_at: 1000,
+                    updated_at: 1000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                    dreamed_at: None,
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .unwrap();
+    }
+
+    fn repo_rule() -> LooseLinkRule {
+        LooseLinkRule {
+            metadata_key: "repo".to_owned(),
+            relation: "shares_repo".to_owned(),
+            weight: 0.6,
+        }
+    }
+
+    fn edges_of(store: &SqliteVectorStore, id: &str) -> Vec<GraphEdgeRecord> {
+        store.list_graph_edges(Some(id), None, None).unwrap()
+    }
+
+    #[test]
+    fn links_entries_sharing_a_metadata_value() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        put(&store, "c", "other-repo");
+
+        let report = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        assert_eq!(report.clusters, 1);
+        assert_eq!(report.hub_edges, 2);
+
+        let edges = edges_of(&store, "a");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].relation.as_deref(), Some("shares_repo"));
+        assert_eq!(edges[0].metadata["source"], "loose_links");
+        // Positive weight: negative weights are the anti-edge signal used by
+        // search to penalize a target.
+        assert!(edges[0].weight > 0.0);
+        assert!(edges_of(&store, "c").is_empty());
+    }
+
+    #[test]
+    fn creates_the_hub_placeholder_as_a_real_entry() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        // Without this row the graph FKs would reject every edge.
+        let hub = store
+            .get_item("ext:repo:rust-rag")
+            .unwrap()
+            .expect("hub exists");
+        assert_eq!(hub.metadata["external"], json!(true));
+        assert_eq!(hub.metadata["embed"], json!(false));
+        assert_eq!(hub.metadata["members"], json!(2));
+        assert_eq!(hub.source_id, "external");
+    }
+
+    #[test]
+    fn rerunning_is_idempotent() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        let first = edges_of(&store, "a");
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        let second = edges_of(&store, "a");
+
+        // SQLite has no ON CONFLICT lane (migration 0020 is Postgres-only), so
+        // the source-scoped DELETE is the only thing preventing duplicates here.
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(store.list_graph_edges(None, None, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn leaves_hand_curated_and_ontology_edges_untouched() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        put(&store, "c", "rust-rag");
+
+        // Distinct pairs: SQLite's `add_manual_edge` derives its id purely from
+        // `manual:{ms}:{from}:{to}`, so two edges between the same pair within
+        // one millisecond collide on the primary key.
+        let manual = store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "a".to_owned(),
+                to_item_id: "b".to_owned(),
+                relation: Some(Cow::Borrowed("part_of")),
+                sort_order: None,
+                weight: 1.0,
+                directed: false,
+                metadata: json!({}),
+            })
+            .unwrap();
+        let ontology = store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "a".to_owned(),
+                to_item_id: "c".to_owned(),
+                relation: Some(Cow::Borrowed("depends_on")),
+                sort_order: None,
+                weight: 0.8,
+                directed: false,
+                metadata: json!({"source": "ontology_worker", "status": "suggested"}),
+            })
+            .unwrap();
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        assert!(store.get_graph_edge(&manual.id).unwrap().is_some());
+        let ontology_after = store
+            .get_graph_edge(&ontology.id)
+            .unwrap()
+            .expect("ontology edge survives");
+        // The HITL verdict must not be reset by an unrelated rebuild.
+        assert_eq!(ontology_after.metadata["status"], "suggested");
+        assert_eq!(
+            store.list_graph_edges(None, None, None).unwrap().len(),
+            5,
+            "2 hand-curated + 3 loose-link hub edges"
+        );
+    }
+
+    #[test]
+    fn rebuild_follows_metadata_edits() {
+        // Full rebuild (rather than incremental) is what lets a cluster shrink
+        // when an entry is re-pointed at a different repo.
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert_eq!(edges_of(&store, "a").len(), 1);
+
+        put(&store, "b", "somewhere-else");
+        let report = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        assert!(edges_of(&store, "a").is_empty());
+        assert!(edges_of(&store, "b").is_empty());
+        assert_eq!(report.clusters, 0);
+        assert_eq!(report.edges_committed, 0);
+    }
+
+    #[test]
+    fn cluster_is_reachable_from_a_member_within_two_hops() {
+        // The point of hub edges: BFS reaches every member from any other one.
+        let store = store_with_graph();
+        for id in ["a", "b", "c", "d"] {
+            put(&store, id, "rust-rag");
+        }
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        let neighborhood = store.graph_neighborhood("a", 2, 100, None).unwrap();
+        let reached: Vec<&str> = neighborhood.nodes.iter().map(|n| n.id.as_str()).collect();
+        for expected in ["a", "b", "c", "d", "ext:repo:rust-rag"] {
+            assert!(
+                reached.contains(&expected),
+                "{expected} not reached: {reached:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clique_edges_are_opt_in() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        put(&store, "c", "rust-rag");
+
+        let hub_only = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert_eq!(hub_only.hub_edges, 3);
+        assert_eq!(hub_only.clique_edges, 0);
+
+        let with_clique = store.rebuild_loose_links(&[repo_rule()], 3).unwrap();
+        assert_eq!(with_clique.hub_edges, 3);
+        assert_eq!(with_clique.clique_edges, 3);
+        // a now links to the hub plus both clique partners.
+        assert_eq!(edges_of(&store, "a").len(), 3);
+    }
+
+    #[test]
+    fn appends_sort_order_after_existing_edges() {
+        // The CMS tree renders manual edges as a hierarchy ordered by
+        // sort_order, so loose links must land at the end, not the front.
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "a".to_owned(),
+                to_item_id: "b".to_owned(),
+                relation: Some(Cow::Borrowed("part_of")),
+                sort_order: Some("00000000000000100000".to_owned()),
+                weight: 1.0,
+                directed: false,
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        let manual = edges_of(&store, "a")
+            .into_iter()
+            .find(|e| e.relation.as_deref() == Some("part_of"))
+            .unwrap();
+        let loose = edges_of(&store, "a")
+            .into_iter()
+            .find(|e| e.relation.as_deref() == Some("shares_repo"))
+            .unwrap();
+        assert!(loose.sort_order > manual.sort_order);
+    }
+
+    #[test]
+    fn refuses_when_graph_is_disabled() {
+        static NEXT_DB_ID: AtomicUsize = AtomicUsize::new(0);
+        let db_id = NEXT_DB_ID.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:loose-link-disabled-{db_id}?mode=memory&cache=shared");
+        let store = SqliteVectorStore::connect_uri(&uri, 3, GraphConfig::default()).unwrap();
+
+        let error = store.rebuild_loose_links(&[repo_rule()], 0).unwrap_err();
+        assert!(error.to_string().contains("graph support is disabled"));
+    }
+
+    #[test]
+    fn sort_order_is_stable_across_repeated_rebuilds() {
+        // The sort_order base excludes loose-link rows themselves. Including
+        // them would push each run's edges further back, growing sort_order
+        // without bound on a 5-minute worker tick.
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        let first = edges_of(&store, "a")[0].sort_order.clone();
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert_eq!(edges_of(&store, "a")[0].sort_order, first);
+    }
+
+    #[test]
+    fn sort_order_base_includes_edges_without_a_source() {
+        // Regression guard for a SQL three-valued-logic trap: hand-curated
+        // edges carry no metadata.source, and `NOT (edge_type='manual' AND
+        // source='loose_links')` evaluates to NULL for them, silently dropping
+        // them from the base and letting loose links sort ahead of them.
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "a".to_owned(),
+                to_item_id: "b".to_owned(),
+                relation: Some(Cow::Borrowed("part_of")),
+                sort_order: Some("00000000000000005000".to_owned()),
+                weight: 1.0,
+                directed: false,
+                metadata: json!({}),
+            })
+            .unwrap();
+
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        let loose = edges_of(&store, "a")
+            .into_iter()
+            .find(|e| e.relation.as_deref() == Some("shares_repo"))
+            .unwrap();
+        assert!(
+            loose.sort_order.as_str() > "00000000000000005000",
+            "loose link sorted ahead of a hand-curated edge: {}",
+            loose.sort_order
+        );
+    }
+
+    #[test]
+    fn identical_plan_is_a_no_op() {
+        // Keeps the background worker from churning updated_at/sort_order on
+        // idle ticks.
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+
+        let first = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert!(!first.unchanged);
+        let updated_at = edges_of(&store, "a")[0].updated_at;
+
+        let second = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert!(second.unchanged, "unchanged rebuild still reported a write");
+        assert_eq!(second.edges_committed, first.edges_committed);
+        assert_eq!(edges_of(&store, "a")[0].updated_at, updated_at);
+    }
+
+    #[test]
+    fn changed_plan_is_not_treated_as_a_no_op() {
+        let store = store_with_graph();
+        put(&store, "a", "rust-rag");
+        put(&store, "b", "rust-rag");
+        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+
+        put(&store, "c", "rust-rag");
+        let report = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert!(!report.unchanged);
+        assert_eq!(report.hub_edges, 3);
+    }
+
+    #[test]
+    fn seeds_loose_link_predicates_additively() {
+        let store = store_with_graph();
+        let predicates = store.list_ontology_predicates(Some("knowledge")).unwrap();
+        let names: Vec<&str> = predicates.iter().map(|p| p.name.as_str()).collect();
+        for expected in ["shares_repo", "same_component", "relates_to"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+        // The canonical set must survive the seed change untouched.
+        for expected in ["is_a", "part_of", "depends_on"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {names:?}"
+            );
+        }
     }
 }

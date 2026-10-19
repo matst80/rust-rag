@@ -316,7 +316,28 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
                       created_at INTEGER NOT NULL
                   );
                   CREATE INDEX IF NOT EXISTS idx_dream_actions_created_at ON dream_actions(created_at DESC);
-                  CREATE INDEX IF NOT EXISTS idx_dream_actions_item_id ON dream_actions(item_id);",
+                  CREATE INDEX IF NOT EXISTS idx_dream_actions_item_id ON dream_actions(item_id);
+                  CREATE TABLE IF NOT EXISTS dream_clusters (
+                      id TEXT PRIMARY KEY,
+                      round_id TEXT NOT NULL,
+                      source_id TEXT NOT NULL,
+                      label TEXT NOT NULL DEFAULT '',
+                      member_count INTEGER NOT NULL DEFAULT 0,
+                      vocabulary TEXT NOT NULL DEFAULT '[]',
+                      cohesion REAL NOT NULL DEFAULT 0,
+                      params TEXT NOT NULL DEFAULT '{}',
+                      created_at INTEGER NOT NULL
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_dream_clusters_round ON dream_clusters(round_id);
+                  CREATE INDEX IF NOT EXISTS idx_dream_clusters_source ON dream_clusters(source_id, created_at DESC);
+                  CREATE TABLE IF NOT EXISTS dream_cluster_members (
+                      cluster_id TEXT NOT NULL,
+                      item_id TEXT NOT NULL,
+                      created_at INTEGER NOT NULL,
+                      PRIMARY KEY (cluster_id, item_id),
+                      FOREIGN KEY (cluster_id) REFERENCES dream_clusters(id) ON DELETE CASCADE
+                  );
+                  CREATE INDEX IF NOT EXISTS idx_dream_cluster_members_item ON dream_cluster_members(item_id);",
     )?;
 
     connection.execute_batch(&format!(

@@ -1252,12 +1252,9 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     }
 
     #[tool(
-        description = "Manually trigger a dreaming round to consolidate 'memory' entries. Moves durable facts to 'knowledge', merges duplicates, and prunes transient notes. Returns accepted status immediately; work continues in background."
+        description = "Manually trigger a deterministic dreaming round over 'memory' entries. Partitions the source into clusters (no model, nothing deleted) and reports near-duplicates as proposals. Returns accepted status immediately; work continues in background."
     )]
     async fn dream(&self) -> Result<String, String> {
-        if !self.state.analysis.is_configured() {
-            return Err("dreaming requires analysis (LLM) to be configured".to_owned());
-        }
         let state = self.state.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::api::process_dreaming_round(&state).await {

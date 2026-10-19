@@ -15,8 +15,8 @@ use rust_rag::api::harness::{
 use rust_rag::db::postgres::{PostgresVectorStore, connect};
 use rust_rag::db::{
     CodeStore, CodeSymbolGraph, GraphConfig, GraphEdgeType, ItemRecord, ListItemsRequest,
-    ManualEdgeInput, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo, ParsedCodeSymbol, SortOrder,
-    VectorStore,
+    LooseLinkRule, ManualEdgeInput, ParsedCodeCall, ParsedCodeFile, ParsedCodeRepo,
+    ParsedCodeSymbol, SortOrder, VectorStore,
 };
 
 use testcontainers::core::{ContainerPort, WaitFor};
@@ -548,6 +548,122 @@ async fn code_search_bm25_without_embeddings_on_postgres() {
         assert!(!hits_bm25.is_empty(), "expected hits for doc keyword");
         assert_eq!(hits_bm25[0].symbol_name.as_deref(), Some("search_symbols"));
         assert!(hits_bm25[0].score > 0.0);
+    })
+    .await
+    .expect("blocking test body");
+}
+
+fn repo_item(id: &str, repo: &str) -> ItemRecord {
+    ItemRecord {
+        id: id.to_owned(),
+        text: format!("content of {id}"),
+        metadata: serde_json::json!({ "repo": repo }),
+        source_id: "knowledge".to_owned(),
+        created_at: 1,
+        updated_at: 1,
+        path: None,
+        type_name: None,
+        data: None,
+        analysis: None,
+        dreamed_at: None,
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn loose_links_on_postgres() {
+    // Same shape as the harness test: the store blocks on its own pool runtime,
+    // so every call must happen inside spawn_blocking.
+    let (container, store, _code) = start_postgres().await;
+    tokio::task::spawn_blocking(move || {
+        let _container = container;
+        let rule = LooseLinkRule {
+            metadata_key: "repo".to_owned(),
+            relation: "shares_repo".to_owned(),
+            weight: 0.6,
+        };
+
+        for (id, repo) in [
+            ("ll-a", "rust-rag"),
+            ("ll-b", "rust-rag"),
+            ("ll-c", "other"),
+        ] {
+            store
+                .upsert_item(repo_item(id, repo), &embedding())
+                .expect("seeding document");
+        }
+        // A hand-curated edge that must survive every rebuild.
+        store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "ll-a".to_owned(),
+                to_item_id: "ll-b".to_owned(),
+                relation: Some("part_of".into()),
+                sort_order: None,
+                weight: 1.0,
+                directed: false,
+                metadata: serde_json::json!({}),
+            })
+            .expect("seeding manual edge");
+
+        let report = store
+            .rebuild_loose_links(std::slice::from_ref(&rule), 0)
+            .expect("rebuild");
+        assert_eq!(report.clusters, 1, "the `other` repo is a singleton");
+        assert_eq!(report.hub_edges, 2);
+
+        // The hub is a real row, so the graph FKs hold.
+        let hub = store
+            .get_item("ext:repo:rust-rag")
+            .expect("loading hub")
+            .expect("hub placeholder exists");
+        assert_eq!(hub.metadata["external"], serde_json::json!(true));
+        assert_eq!(hub.metadata["members"], serde_json::json!(2));
+
+        // Rerunning must upsert (migration 0020's source dedup lane), not
+        // duplicate. Postgres has an ON CONFLICT path here; SQLite does not.
+        store
+            .rebuild_loose_links(std::slice::from_ref(&rule), 0)
+            .expect("rerun");
+        let edges = store
+            .list_graph_edges(None, None, None)
+            .expect("listing edges");
+        // A third identical pass must be a recognized no-op, not a rewrite.
+        let third = store
+            .rebuild_loose_links(std::slice::from_ref(&rule), 0)
+            .expect("third pass");
+        assert!(third.unchanged, "idle Postgres tick reported a write");
+        // 1 hand-curated + 2 hub edges.
+        assert_eq!(edges.len(), 3, "rerun duplicated edges: {edges:?}");
+
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.relation.as_deref() == Some("part_of")
+                    && e.metadata["source"].is_null()),
+            "rebuild deleted or rewrote a hand-curated edge: {edges:?}"
+        );
+
+        // Depth-2 BFS from a member reaches the whole cluster through the hub.
+        let neighborhood = store
+            .graph_neighborhood("ll-a", 2, 100, None)
+            .expect("traversal");
+        let ids: Vec<&str> = neighborhood.nodes.iter().map(|n| n.id.as_str()).collect();
+        for expected in ["ll-a", "ll-b", "ext:repo:rust-rag"] {
+            assert!(ids.contains(&expected), "{expected} unreachable: {ids:?}");
+        }
+
+        // Re-pointing an entry shrinks the cluster on the next full rebuild.
+        store
+            .upsert_item(repo_item("ll-b", "moved"), &embedding())
+            .expect("re-seeding document");
+        let after = store.rebuild_loose_links(&[rule], 0).expect("rebuild");
+        assert!(!after.unchanged, "a changed plan must not be a no-op");
+        assert_eq!(after.clusters, 0);
+        assert_eq!(after.edges_committed, 0);
+        let remaining = store
+            .list_graph_edges(None, None, None)
+            .expect("listing edges");
+        assert_eq!(remaining.len(), 1, "stale loose links left behind");
     })
     .await
     .expect("blocking test body");

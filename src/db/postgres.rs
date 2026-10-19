@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
 use serde_json::Value;
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 use tokio::runtime::Handle;
 use tokio_postgres::{Config as PgConfig, NoTls};
 use tracing::info;
@@ -10,12 +10,13 @@ use tracing::info;
 use super::{
     AttachmentRecord, AuthStore, CategorySummary, ChannelSummary, DeviceAuthRecord,
     DeviceAuthStatus, DocChunk, GraphConfig, GraphEdgeRecord, GraphEdgeType, GraphNeighborhood,
-    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, ManualEdgeInput, McpTokenRecord,
-    MessageQuery, MessageRecord, MessageSenderKind, MessageStore, MessageUpdate, NewDeviceAuth,
-    NewMcpToken, NewMessage, NewOAuthAuthCode, NewUserEvent, OAuthAuthCodeRecord,
-    OAuthCredentialsRecord, OAuthCredsStore, OntologyPredicateRecord, PathChild, PathRow,
-    PublicShareRecord, PushStore, PushSubscriptionRecord, SchemaRecord, SearchHit, SortOrder,
-    UpsertOAuthCredentials, UpsertPushSubscription, UserMemoryStore, UserProfile, VectorStore,
+    GraphStatus, ItemAnalysisRecord, ItemRecord, ListItemsRequest, LooseLinkReport, LooseLinkRule,
+    ManualEdgeInput, McpTokenRecord, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
+    MessageUpdate, NewDeviceAuth, NewMcpToken, NewMessage, NewOAuthAuthCode, NewUserEvent,
+    OAuthAuthCodeRecord, OAuthCredentialsRecord, OAuthCredsStore, OntologyPredicateRecord,
+    PathChild, PathRow, PublicShareRecord, PushStore, PushSubscriptionRecord, SchemaRecord,
+    SearchHit, SortOrder, UpsertOAuthCredentials, UpsertPushSubscription, UserMemoryStore,
+    UserProfile, VectorStore, graph,
 };
 
 pub use deadpool_postgres::Pool as PgPool;
@@ -86,15 +87,10 @@ pub async fn connect(database_url: &str, max_size: usize) -> Result<PgPool> {
 /// Without this, every edge the LLM emits gets dropped with
 /// `predicate not in schema`. Idempotent — bails when the table already has rows.
 async fn seed_default_ontology_predicates(client: &tokio_postgres::Client) -> Result<()> {
-    let row = client
-        .query_one("SELECT count(*) FROM ontology_predicates", &[])
-        .await
-        .context("counting ontology_predicates")?;
-    let count: i64 = row.get(0);
-    if count > 0 {
-        return Ok(());
-    }
-
+    // Additive, not all-or-nothing: an already-seeded database must still pick
+    // up predicates added by a later build, so there's deliberately no
+    // `count(*) > 0` early return here. ON CONFLICT DO NOTHING keeps
+    // user-edited rows intact.
     use crate::db::default_ontology_predicates;
     let predicates = default_ontology_predicates();
     info!(
@@ -1114,6 +1110,132 @@ impl VectorStore for PostgresVectorStore {
         })
     }
 
+    fn upsert_dream_cluster(&self, record: super::DreamClusterRecord) -> Result<()> {
+        let pool = self.pool.clone();
+        let created_at = ms_to_ts(record.created_at);
+        self.block(async move {
+            let client = pool.get().await?;
+            let vocabulary = serde_json::to_string(&record.vocabulary)?;
+            let member_count = record.member_count as i64;
+            let cohesion = record.cohesion;
+            client
+                .execute(
+                    "INSERT INTO dream_clusters (id, round_id, source_id, label, member_count, vocabulary, cohesion, params, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                     ON CONFLICT (id) DO UPDATE SET \
+                         round_id = EXCLUDED.round_id, \
+                         source_id = EXCLUDED.source_id, \
+                         label = EXCLUDED.label, \
+                         member_count = EXCLUDED.member_count, \
+                         vocabulary = EXCLUDED.vocabulary, \
+                         cohesion = EXCLUDED.cohesion, \
+                         params = EXCLUDED.params, \
+                         created_at = EXCLUDED.created_at",
+                    &[
+                        &record.id,
+                        &record.round_id,
+                        &record.source_id,
+                        &record.label,
+                        &member_count,
+                        &vocabulary,
+                        &cohesion,
+                        &record.params,
+                        &created_at,
+                    ],
+                )
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn replace_dream_cluster_members(
+        &self,
+        cluster_id: &str,
+        members: &[String],
+    ) -> Result<()> {
+        let pool = self.pool.clone();
+        let cluster_id = cluster_id.to_owned();
+        let members = members.to_vec();
+        self.block(async move {
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            tx.execute(
+                "DELETE FROM dream_cluster_members WHERE cluster_id = $1",
+                &[&cluster_id],
+            )
+            .await?;
+            for member in &members {
+                tx.execute(
+                    "INSERT INTO dream_cluster_members (cluster_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&cluster_id, member],
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        })
+    }
+
+    fn list_dream_clusters(
+        &self,
+        limit: usize,
+        source_id: Option<&str>,
+        round_id: Option<&str>,
+    ) -> Result<Vec<super::DreamClusterRecord>> {
+        let pool = self.pool.clone();
+        let source_id = source_id.map(str::to_owned);
+        let round_id = round_id.map(str::to_owned);
+        let limit = limit.clamp(1, 1000) as i64;
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT id, round_id, source_id, label, member_count, vocabulary, cohesion, params, created_at \
+                     FROM dream_clusters \
+                     WHERE ($1::text IS NULL OR source_id = $1) \
+                       AND ($2::text IS NULL OR round_id = $2) \
+                     ORDER BY member_count DESC, id ASC \
+                     LIMIT $3",
+                    &[&source_id, &round_id, &limit],
+                )
+                .await?;
+            rows.iter()
+                .map(|row| {
+                    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                    let vocabulary: String = row.try_get("vocabulary")?;
+                    Ok(super::DreamClusterRecord {
+                        id: row.try_get("id")?,
+                        round_id: row.try_get("round_id")?,
+                        source_id: row.try_get("source_id")?,
+                        label: row.try_get("label")?,
+                        member_count: row.try_get::<_, i64>("member_count")? as usize,
+                        vocabulary: serde_json::from_str(&vocabulary).unwrap_or_default(),
+                        cohesion: row.try_get("cohesion")?,
+                        params: row.try_get("params")?,
+                        created_at: ts_to_ms(created_at),
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn dream_cluster_members(&self, cluster_id: &str) -> Result<Vec<String>> {
+        let pool = self.pool.clone();
+        let cluster_id = cluster_id.to_owned();
+        self.block(async move {
+            let client = pool.get().await?;
+            let rows = client
+                .query(
+                    "SELECT item_id FROM dream_cluster_members WHERE cluster_id = $1 ORDER BY item_id",
+                    &[&cluster_id],
+                )
+                .await?;
+            rows.iter()
+                .map(|row| row.try_get::<_, String>("item_id").map_err(Into::into))
+                .collect()
+        })
+    }
+
     fn insert_attachment(&self, record: AttachmentRecord) -> Result<()> {
         let pool = self.pool.clone();
         let created_at = ms_to_ts(record.created_at);
@@ -1769,6 +1891,171 @@ impl VectorStore for PostgresVectorStore {
                 });
             }
             Ok(groups)
+        })
+    }
+
+    fn rebuild_loose_links(
+        &self,
+        rules: &[LooseLinkRule],
+        clique_max_members: usize,
+    ) -> Result<LooseLinkReport> {
+        if !self.graph_config.enabled {
+            anyhow::bail!("graph features are disabled");
+        }
+        let pool = self.pool.clone();
+        let rules = rules.to_vec();
+        self.block(async move {
+            let mut client = pool.get().await.context("acquiring postgres connection")?;
+            let tx = client.transaction().await?;
+
+            // `external` placeholders are hubs themselves — linking them to each
+            // other would fabricate a mesh no real entry supports.
+            let raw_rows = tx
+                .query(
+                    "SELECT id, metadata, data
+                     FROM documents
+                     WHERE COALESCE((metadata->>'external')::BOOLEAN, FALSE) = FALSE
+                     ORDER BY id ASC",
+                    &[],
+                )
+                .await?;
+            let rows: Vec<(String, Option<Value>, Option<Value>)> = raw_rows
+                .into_iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2)))
+                .collect();
+
+            // Append after every *other* edge so loose links never jump ahead
+            // of hand-curated ones in the CMS tree, which renders manual edges
+            // as a hierarchy ordered by `sort_order`. The rows we're about to
+            // delete are deliberately excluded from the base — including them
+            // would push the next run's edges further back on every tick,
+            // growing sort_order without bound.
+            let base_row = tx
+                .query_one(
+                    // Spelled "not a manual edge OR its source isn't
+                    // loose_links" rather than NOT(edge_type='manual' AND
+                    // source=$1): metadata->>'source' is NULL for edges with no
+                    // source, and NOT(TRUE AND NULL) is NULL, not true — which
+                    // would silently exclude every hand-curated edge from the
+                    // base. `IS DISTINCT FROM` is the null-safe form that
+                    // treats a missing source as "not loose".
+                    "SELECT COALESCE(MAX(NULLIF(sort_order, '')::BIGINT), 0)::BIGINT
+                     FROM graph_edges
+                     WHERE edge_type <> 'manual' OR metadata->>'source' IS DISTINCT FROM $1",
+                    &[&super::LOOSE_LINK_SOURCE],
+                )
+                .await?;
+            let sort_order_base: i64 = base_row.get(0);
+
+            let plan = graph::plan_loose_links(&rows, &rules, clique_max_members, sort_order_base);
+
+            // Idempotent tick: an identical plan means there is nothing to write.
+            let existing = tx
+                .query(
+                    "SELECT from_item_id, to_item_id, relation, weight
+                     FROM graph_edges
+                     WHERE edge_type = 'manual' AND metadata->>'source' = $1",
+                    &[&super::LOOSE_LINK_SOURCE],
+                )
+                .await?;
+            let existing: HashSet<(String, String, Option<String>, i64)> = existing
+                .into_iter()
+                .map(|row| {
+                    let weight: f32 = row.get(3);
+                    (row.get(0), row.get(1), row.get(2), (weight * 1000.0) as i64)
+                })
+                .collect();
+            let planned: HashSet<(String, String, Option<String>, i64)> = plan
+                .edges
+                .iter()
+                .map(|edge| {
+                    (
+                        edge.from_item_id.clone(),
+                        edge.to_item_id.clone(),
+                        Some(edge.relation.clone()),
+                        (edge.weight * 1000.0) as i64,
+                    )
+                })
+                .collect();
+            if existing == planned {
+                tx.commit().await?;
+                let mut report = plan.report;
+                report.unchanged = true;
+                return Ok(report);
+            }
+
+            // Scope the delete to our own source so a rebuild can never touch
+            // hand-curated or ontology-worker edges.
+            tx.execute(
+                "DELETE FROM graph_edges
+                 WHERE edge_type = 'manual' AND metadata->>'source' = $1",
+                &[&super::LOOSE_LINK_SOURCE],
+            )
+            .await?;
+
+            for hub in &plan.hubs {
+                let Some((kind, key)) = super::parse_external_ref_id(&hub.id) else {
+                    anyhow::bail!("generated hub id {} is not a valid external ref", hub.id);
+                };
+                tx.execute(
+                    "INSERT INTO documents (id, source_id, content, metadata)
+                     VALUES ($1, 'external', '', $2)
+                     ON CONFLICT (id) DO NOTHING",
+                    &[
+                        &hub.id,
+                        &serde_json::json!({
+                            "external": true,
+                            "embed": false,
+                            "kind": kind,
+                            "key": key,
+                            "metadata_key": hub.metadata_key,
+                            "value": hub.value,
+                            "members": hub.members,
+                        }),
+                    ],
+                )
+                .await?;
+            }
+
+            let timestamp = current_ms();
+            // Two rules can legitimately plan the same (from, to, relation)
+            // triple; the 0020 unique index would reject the second one with a
+            // hard error, so collapse duplicates before writing.
+            let mut deduped: HashSet<(String, String, String)> = HashSet::new();
+            for edge in &plan.edges {
+                if !deduped.insert((
+                    edge.from_item_id.clone(),
+                    edge.to_item_id.clone(),
+                    edge.relation.clone(),
+                )) {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO graph_edges \
+                         (id, from_item_id, to_item_id, edge_type, relation, sort_order, weight, \
+                          directed, metadata, created_at, updated_at) \
+                     VALUES ($1, $2, $3, 'manual', $4, $5, $6, FALSE, $7, $8, $8) \
+                     ON CONFLICT (from_item_id, to_item_id, relation, (metadata->>'source')) \
+                         WHERE edge_type = 'manual' AND metadata->>'source' IS NOT NULL \
+                             AND metadata->>'source' != 'ontology_worker' \
+                     DO UPDATE SET weight = EXCLUDED.weight, metadata = EXCLUDED.metadata, \
+                                   updated_at = EXCLUDED.updated_at",
+                    &[
+                        &edge.id,
+                        &edge.from_item_id,
+                        &edge.to_item_id,
+                        &edge.relation,
+                        &edge.sort_order,
+                        &edge.weight,
+                        &edge.metadata,
+                        &timestamp,
+                    ],
+                )
+                .await?;
+            }
+
+            tx.commit().await?;
+            Ok(plan.report)
         })
     }
 

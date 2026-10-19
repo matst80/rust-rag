@@ -12,7 +12,123 @@ use crate::api::{
     GraphNeighborhoodQuery, GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse,
     ListGraphEdgesQuery, edge_payload, metadata_schema, titles_for_edges,
 };
-use crate::db::{GraphEdgeType, ManualEdgeInput};
+
+/// First `max` chars of `text`, on a char boundary, with an ellipsis when
+/// truncated. Byte-slicing would panic on multi-byte content.
+fn snippet(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_owned();
+    }
+    let cut: String = trimmed.chars().take(max).collect();
+    format!("{cut}…")
+}
+
+/// Resolve the loose-link peers of `params.id`.
+///
+/// Reads the materialized graph rather than re-scanning metadata, so this
+/// reflects the last rebuild. Groups are keyed by the configured rule that
+/// matched, mirroring [`crate::loose_links`]: each group is a metadata cluster
+/// the anchor belongs to, reached through its `ext:` hub.
+pub(crate) async fn resolve_link_peers(
+    store: Arc<dyn VectorStore>,
+    rules: Vec<crate::db::LooseLinkRule>,
+    params: LinkPeersParams,
+) -> Result<Json<LinkPeersResponse>, String> {
+    let LinkPeersParams { id, key, limit } = params;
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let anchor_id = id.clone();
+
+    let groups = tokio::task::spawn_blocking(move || {
+        let anchor = store
+            .get_item(&anchor_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("item {anchor_id} not found"))?;
+
+        let mut groups: Vec<LinkPeerGroup> = Vec::new();
+        for rule in rules {
+            if let Some(wanted) = key.as_deref()
+                && !wanted.eq_ignore_ascii_case(&rule.metadata_key)
+            {
+                continue;
+            }
+            // Same normalization the planner used (trim + lowercase, `data`
+            // before `metadata`), so this resolves the same cluster.
+            let Some(value) = crate::db::extract_metadata_key(
+                Some(&anchor.metadata),
+                anchor.data.as_ref(),
+                &rule.metadata_key,
+            ) else {
+                continue;
+            };
+            let hub_id = crate::db::loose_link_hub_id(&rule.metadata_key, &value);
+            // A hub placeholder only exists once a cluster has had at least two
+            // members AND the batch job has run. Its absence means "no peers",
+            // not an error — otherwise a fresh entry would fail the whole call.
+            if store.get_item(&hub_id).ok().flatten().is_none() {
+                continue;
+            }
+            // The BFS limit bounds *nodes visited*, and the anchor and the hub
+            // are both visited then filtered out — so ask for headroom or
+            // `limit` peers would be short by two.
+            let neighborhood = store
+                .graph_neighborhood(&hub_id, 1, limit + 2, Some(GraphEdgeType::Manual))
+                .map_err(|error| error.to_string())?;
+
+            // Only follow edges the loose-link worker actually wrote; the hub
+            // may also carry hand-curated edges we must not report here.
+            let written_by_worker = |edge: &crate::db::GraphEdgeRecord| {
+                edge.metadata.get("source").and_then(|v| v.as_str())
+                    == Some(crate::db::LOOSE_LINK_SOURCE)
+            };
+            let member_ids: std::collections::HashSet<&str> = neighborhood
+                .edges
+                .iter()
+                .filter(|edge| written_by_worker(edge))
+                .flat_map(|edge| [edge.from_item_id.as_str(), edge.to_item_id.as_str()])
+                .collect();
+            let relation = neighborhood
+                .edges
+                .iter()
+                .find(|edge| written_by_worker(edge))
+                .and_then(|edge| edge.relation.clone());
+
+            let mut peers: Vec<LinkPeer> = neighborhood
+                .nodes
+                .iter()
+                // Skip the anchor itself and the hub placeholder; a placeholder
+                // has no body, so it isn't a useful peer.
+                .filter(|node| node.id != anchor_id && node.id != hub_id)
+                .filter(|node| member_ids.contains(node.id.as_str()))
+                .map(|node| LinkPeer {
+                    title: Some(crate::api::harness::display_title(node)),
+                    snippet: snippet(&node.text, 280),
+                    id: node.id.clone(),
+                })
+                .collect();
+            peers.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+            peers.truncate(limit);
+
+            if peers.is_empty() {
+                continue;
+            }
+            groups.push(LinkPeerGroup {
+                metadata_key: rule.metadata_key,
+                value,
+                hub_id,
+                relation,
+                peers,
+            });
+        }
+        Ok::<_, String>(groups)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let stale = groups.is_empty();
+    Ok(Json(LinkPeersResponse { id, stale, groups }))
+}
+use crate::db::{GraphEdgeType, ManualEdgeInput, VectorStore};
 use crate::mcp::{IdParams, stringify_api_error};
 use rmcp::{
     ServerHandler,
@@ -35,6 +151,7 @@ const ADMIN_SERVER_NAME: &str = "rust-rag-admin";
 const ADMIN_SERVER_INSTRUCTIONS: &str = "rust-rag admin surface: graph/ontology curation and projection-map maintenance.\
 \
 GRAPH: `graph_status` / `list_graph_edges` / `graph_neighborhood` to inspect, `create_manual_edge` to link items (prefer the canonical predicates listed in its schema), `rebuild_graph` to regenerate similarity edges.\
+LOOSE LINKS: `link_peers` answers \"what else shares this entry's repo/component?\" for entries that are metadata-related but not textually similar.\
 ONTOLOGY REVIEWS: `list_ontology_reviews` shows edges with status 'suggested'; resolve them with `accept_ontology_review` / `reject_ontology_review`.\
 MAP: `map_clusters` (cheap index) then `map_get` / `map_nearest` to explore the projection, `map_reassign` to pin items to clusters, `map_rebuild` to re-run clustering.\
 \
@@ -67,13 +184,51 @@ impl ServerHandler for AdminMcpServer {
     }
 }
 
-
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct GraphNeighborhoodParams {
     pub id: String,
     pub depth: Option<usize>,
     pub limit: Option<usize>,
     pub edge_type: Option<GraphEdgeType>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LinkPeersParams {
+    /// Entry id to resolve peers for.
+    pub id: String,
+    /// Restrict to one metadata key (e.g. `repo`). Defaults to every key
+    /// configured in `RAG_LOOSE_LINK_RULES`.
+    pub key: Option<String>,
+    /// Max peers per key. Defaults to 50.
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LinkPeersResponse {
+    pub id: String,
+    /// No loose-link edges touch this entry — either the batch job hasn't run
+    /// since it was stored, or none of its metadata keys match a rule.
+    pub stale: bool,
+    pub groups: Vec<LinkPeerGroup>,
+}
+
+/// Peers of the anchor sharing one metadata key/value.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LinkPeerGroup {
+    pub metadata_key: String,
+    pub value: String,
+    /// The `ext:` placeholder all members of this cluster link through.
+    pub hub_id: String,
+    pub relation: Option<String>,
+    pub peers: Vec<LinkPeer>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct LinkPeer {
+    pub id: String,
+    pub title: Option<String>,
+    /// First ~280 chars of the entry body.
+    pub snippet: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -220,8 +375,6 @@ pub struct MapReassignResponse {
 
 #[tool_router(router = tool_router)]
 impl AdminMcpServer {
-
-
     #[tool(description = "Return current graph configuration and edge counts.")]
     async fn graph_status(&self) -> Result<Json<GraphStatusResponse>, String> {
         let store = self.state.store.clone();
@@ -287,6 +440,20 @@ impl AdminMcpServer {
         Ok(Json(neighborhood.into()))
     }
 
+    #[tool(
+        description = "Find entries linked to `id` purely because they share a metadata value — e.g. every other memory with the same `repo`. \
+This is the loose-link view: it answers \"what else touches this repo?\" for entries whose text never resembles each other, which semantic search and the ontology worker both miss. \
+It reads the materialized graph, so it reflects the last `rebuild_graph` pass over loose links; if `stale` is true the batch job has not run since this entry was stored, or none of its metadata keys match a rule. \
+Peers share an `ext:{key}:{value}` hub, so this is one hop rather than a full pairwise listing. Pass `key` to focus on one metadata key."
+    )]
+    async fn link_peers(
+        &self,
+        Parameters(params): Parameters<LinkPeersParams>,
+    ) -> Result<Json<LinkPeersResponse>, String> {
+        let store = self.state.store.clone();
+        let rules = self.state.loose_links.rules.clone();
+        resolve_link_peers(store, rules, params).await
+    }
 
     #[tool(description = "Rebuild similarity edges across the graph.")]
     async fn rebuild_graph(&self) -> Result<Json<GraphRebuildResponse>, String> {
@@ -400,7 +567,8 @@ IDEMPOTENT RETRY (Postgres only): set `metadata.source` to a non-empty string OT
     async fn list_ontology_reviews(&self) -> Result<Json<GraphEdgesResponse>, String> {
         let store = self.state.store.clone();
         let edges = tokio::task::spawn_blocking(move || {
-            let edges = store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))?;
+            let edges =
+                store.list_graph_edges(None, Some(GraphEdgeType::Manual), Some("suggested"))?;
             let titles = titles_for_edges(store.as_ref(), &edges);
             Ok::<_, anyhow::Error>(
                 edges
@@ -437,8 +605,12 @@ IDEMPOTENT RETRY (Postgres only): set `metadata.source` to a non-empty string OT
                 serde_json::Value::String("confirmed".to_string()),
             );
 
-            let edge =
-                store.update_graph_edge(&id, relation, serde_json::Value::Object(metadata), None)?;
+            let edge = store.update_graph_edge(
+                &id,
+                relation,
+                serde_json::Value::Object(metadata),
+                None,
+            )?;
             let titles = titles_for_edges(store.as_ref(), std::slice::from_ref(&edge));
             Ok::<_, anyhow::Error>(edge_payload(edge, &titles))
         })
@@ -462,7 +634,6 @@ IDEMPOTENT RETRY (Postgres only): set `metadata.source` to a non-empty string OT
             .map_err(|error| error.to_string())?;
         Ok(Json(DeleteResponse { id, deleted }))
     }
-
 
     // ===== Projection map =================================================
 
@@ -759,7 +930,6 @@ rebuild is running is a no-op."
     }
 }
 
-
 /// Build the `StreamableHttpService` tower service that serves admin MCP
 /// traffic at `/mcp/admin`. Same guards as the other MCP endpoints.
 pub fn streamable_http_service(
@@ -777,4 +947,261 @@ pub fn streamable_http_service(
         Arc::new(LocalSessionManager::default()),
         config,
     )
+}
+
+#[cfg(test)]
+mod link_peers_tests {
+    use super::*;
+    use crate::db::{GraphConfig, ItemRecord, LooseLinkRule, ManualEdgeInput, SqliteVectorStore};
+    use serde_json::json;
+    use std::{
+        borrow::Cow,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    fn store() -> Arc<dyn VectorStore> {
+        static NEXT_DB_ID: AtomicUsize = AtomicUsize::new(0);
+        let db_id = NEXT_DB_ID.fetch_add(1, Ordering::Relaxed);
+        let uri = format!("file:link-peers-test-{db_id}?mode=memory&cache=shared");
+        Arc::new(
+            SqliteVectorStore::connect_uri(
+                &uri,
+                3,
+                GraphConfig {
+                    enabled: true,
+                    ..GraphConfig::default()
+                },
+            )
+            .expect("in-memory sqlite store should initialize"),
+        )
+    }
+
+    fn rules() -> Vec<LooseLinkRule> {
+        vec![
+            LooseLinkRule {
+                metadata_key: "repo".to_owned(),
+                relation: "shares_repo".to_owned(),
+                weight: 0.6,
+            },
+            LooseLinkRule {
+                metadata_key: "component".to_owned(),
+                relation: "same_component".to_owned(),
+                weight: 0.7,
+            },
+        ]
+    }
+
+    fn put(store: &Arc<dyn VectorStore>, id: &str, metadata: serde_json::Value) {
+        store
+            .upsert_item(
+                ItemRecord {
+                    id: id.to_owned(),
+                    text: format!("body of {id}"),
+                    metadata,
+                    source_id: "knowledge".to_owned(),
+                    created_at: 1000,
+                    updated_at: 1000,
+                    path: None,
+                    type_name: None,
+                    data: None,
+                    analysis: None,
+                    dreamed_at: None,
+                },
+                &[1.0, 0.0, 0.0],
+            )
+            .expect("seeding item");
+    }
+
+    fn params(id: &str) -> LinkPeersParams {
+        LinkPeersParams {
+            id: id.to_owned(),
+            key: None,
+            limit: None,
+        }
+    }
+
+    async fn resolve(store: Arc<dyn VectorStore>, params: LinkPeersParams) -> LinkPeersResponse {
+        let Json(response) = resolve_link_peers(store, rules(), params)
+            .await
+            .expect("resolving peers");
+        response
+    }
+
+    #[tokio::test]
+    async fn finds_peers_sharing_a_metadata_value() {
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        put(&store, "b", json!({"repo": "rust-rag"}));
+        put(&store, "c", json!({"repo": "other"}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        let response = resolve(store, params("a")).await;
+
+        assert!(!response.stale);
+        assert_eq!(response.groups.len(), 1);
+        let group = &response.groups[0];
+        assert_eq!(group.metadata_key, "repo");
+        assert_eq!(group.value, "rust-rag");
+        assert_eq!(group.hub_id, "ext:repo:rust-rag");
+        assert_eq!(group.relation.as_deref(), Some("shares_repo"));
+        // b only — c is a different repo, and the anchor/hub are excluded.
+        let ids: Vec<&str> = group.peers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
+    #[tokio::test]
+    async fn groups_by_every_matching_key() {
+        let store = store();
+        put(
+            &store,
+            "a",
+            json!({"repo": "rust-rag", "component": "ingest"}),
+        );
+        put(&store, "b", json!({"repo": "rust-rag"}));
+        put(&store, "c", json!({"component": "ingest"}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        let response = resolve(store, params("a")).await;
+
+        assert_eq!(response.groups.len(), 2);
+        let by_key = |key: &str| -> &LinkPeerGroup {
+            response
+                .groups
+                .iter()
+                .find(|g| g.metadata_key == key)
+                .expect("group present")
+        };
+        let repo: Vec<&str> = by_key("repo").peers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(repo, vec!["b"]);
+        let component: Vec<&str> = by_key("component")
+            .peers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(component, vec!["c"]);
+    }
+
+    #[tokio::test]
+    async fn key_filter_narrows_to_one_group() {
+        let store = store();
+        put(
+            &store,
+            "a",
+            json!({"repo": "rust-rag", "component": "ingest"}),
+        );
+        put(&store, "b", json!({"repo": "rust-rag"}));
+        put(&store, "c", json!({"component": "ingest"}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        let mut request = params("a");
+        request.key = Some("component".to_owned());
+        let response = resolve(store, request).await;
+
+        assert_eq!(response.groups.len(), 1);
+        assert_eq!(response.groups[0].metadata_key, "component");
+    }
+
+    #[tokio::test]
+    async fn normalizes_case_the_same_way_the_planner_does() {
+        let store = store();
+        put(&store, "a", json!({"repo": "Rust-RAG"}));
+        put(&store, "b", json!({"repo": "  rust-rag "}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        // The anchor's raw value differs from its cluster's normalized value;
+        // the tool must normalize the same way or it resolves the wrong hub.
+        let response = resolve(store, params("a")).await;
+        assert_eq!(response.groups.len(), 1);
+        assert_eq!(response.groups[0].hub_id, "ext:repo:rust-rag");
+        assert_eq!(response.groups[0].peers[0].id, "b");
+    }
+
+    #[tokio::test]
+    async fn reports_stale_before_the_first_rebuild() {
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        put(&store, "b", json!({"repo": "rust-rag"}));
+
+        // No rebuild yet: no loose-link edges exist, so there is nothing to read.
+        let response = resolve(store, params("a")).await;
+        assert!(response.stale);
+        assert!(response.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_stale_for_a_lone_entry() {
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        put(&store, "b", json!({"repo": "other"}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        let response = resolve(store, params("a")).await;
+        assert!(response.stale, "singleton cluster has no peers to report");
+    }
+
+    #[tokio::test]
+    async fn ignores_hand_curated_edges_on_the_hub() {
+        // A peer linked to the hub by hand must not show up as a loose-link peer.
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        put(&store, "b", json!({"repo": "rust-rag"}));
+        put(&store, "manual-only", json!({}));
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+        store
+            .add_manual_edge(ManualEdgeInput {
+                from_item_id: "manual-only".to_owned(),
+                to_item_id: "ext:repo:rust-rag".to_owned(),
+                relation: Some(Cow::Borrowed("part_of")),
+                sort_order: None,
+                weight: 1.0,
+                directed: false,
+                metadata: json!({}),
+            })
+            .expect("seeding manual edge");
+
+        let response = resolve(store, params("a")).await;
+        let ids: Vec<&str> = response.groups[0]
+            .peers
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["b"], "hand-curated neighbor leaked into peers");
+    }
+
+    #[tokio::test]
+    async fn respects_the_limit() {
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        for id in ["b", "c", "d"] {
+            put(&store, id, json!({"repo": "rust-rag"}));
+        }
+        store.rebuild_loose_links(&rules(), 0).unwrap();
+
+        let mut request = params("a");
+        request.limit = Some(2);
+        let response = resolve(store, request).await;
+        assert_eq!(response.groups[0].peers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_entry_is_an_error_not_an_empty_result() {
+        let store = store();
+        put(&store, "a", json!({"repo": "rust-rag"}));
+        put(&store, "b", json!({"repo": "rust-rag"}));
+
+        let Err(err) = resolve_link_peers(store, rules(), params("nope")).await else {
+            panic!("missing entry should fail loudly");
+        };
+        assert!(err.contains("nope"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn snippet_truncates_on_a_char_boundary() {
+        assert_eq!(snippet("  hello  ", 10), "hello");
+        assert_eq!(snippet("abc", 10), "abc");
+        assert_eq!(snippet("åäö", 2), "åä…");
+        assert_eq!(snippet("", 10), "");
+        // Multi-byte input must not panic or split a code point.
+        assert_eq!(snippet("日本語テキスト", 3), "日本語…");
+    }
 }
