@@ -1316,11 +1316,24 @@ mod tests {
 
         response.assert_status_ok();
         let body = response.json::<SearchResponse>();
-        assert_eq!(body.results.len(), 1);
-        assert_eq!(body.results[0].id, "doc-top");
-        assert_eq!(body.related.len(), 1);
-        assert_eq!(body.related[0].id, "doc-linked");
-        assert_eq!(body.related[0].relation.as_deref(), Some("supports"));
+        // Metadata-graph leg: doc-linked shares a manual edge with the top
+        // hit, so it is injected as a first-class candidate with a boosted
+        // distance (0.2 seed - 0.15 * 1.0 weight) instead of waiting in
+        // `related`. Logical links outrank cosine by design.
+        assert_eq!(body.results.len(), 2);
+        let ids: Vec<&str> = body.results.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&"doc-top"));
+        assert!(ids.contains(&"doc-linked"));
+        let linked = body
+            .results
+            .iter()
+            .find(|h| h.id == "doc-linked")
+            .expect("graph-injected hit");
+        assert!(linked.retrievers.iter().any(|r| r == "graph"));
+        assert!(linked.distance < 0.2);
+        // Both manual neighbors are now in results, so the related panel is
+        // empty (similarity edges are excluded from it by design).
+        assert!(body.related.is_empty());
     }
 
     #[tokio::test]

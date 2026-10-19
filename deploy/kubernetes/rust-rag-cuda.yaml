@@ -76,6 +76,15 @@ data:
   ## Full dense+sparse graph rebuilds compare chunk pairs and can exceed
   ## the startup probe deadline. Run rebuilds explicitly after startup.
   RAG_GRAPH_BUILD_ON_STARTUP: "false"
+  ## Metadata-derived loose links: deterministic wiki backlinks between
+  ## entries sharing a metadata value. Cheap table walk, no embedder/model.
+  ## Enabled because cosine is flaky on memory notes (0.44-0.54 band) while
+  ## repo/session/tags separate projects. Search boosts graph neighbors of
+  ## BM25 hits above dense-only hits (see store_search metadata leg).
+  RAG_LOOSE_LINKS_ENABLED: "true"
+  RAG_LOOSE_LINKS_INTERVAL_SECS: "300"
+  RAG_LOOSE_LINK_RULES: "repo:shares_repo:1.2,session_id:same_session:1.0,tags:shares_tag:0.8"
+  RAG_LOOSE_LINK_CLIQUE_MAX_MEMBERS: "0"
   RAG_PROJECTION_ALGO: "hdbscan"
   RAG_HDBSCAN_MIN_CLUSTER_SIZE: "4"
   RAG_HDBSCAN_MIN_SAMPLES: "4"

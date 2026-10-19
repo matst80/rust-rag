@@ -703,7 +703,7 @@ pub(crate) async fn search_core(
                 } else {
                     raw.clone()
                 };
-                let hits = {
+                let mut hits = {
                     let type_targets: Vec<Option<String>> = match &type_names {
                         Some(names) => names.iter().map(|n| Some(n.clone())).collect(),
                         None => vec![type_name.clone()],
@@ -740,6 +740,85 @@ pub(crate) async fn search_core(
                     });
                     hits.dedup_by(|a, b| a.id == b.id);
                     hits.truncate(candidate_top_k);
+                    hits
+                };
+                // Metadata-graph leg: expand the best lexical/dense hits via
+                // manual + loose-link edges (repo/session/tags) and inject
+                // neighbors as first-class candidates. Cosine is flaky on
+                // memory notes (0.44-0.54 band, AUC ~0.71 vs TF-IDF 0.96),
+                // while a shared repo/session is a logical fact — so a graph
+                // neighbor of a good hit outranks a dense-only hit. Covers
+                // both SQLite and Postgres backends in one place. Bounded:
+                // top 10 seeds x 20 neighbors max, best edge wins per id.
+                let mut hits = {
+                    let mut by_distance: Vec<&SearchHit> = hits.iter().collect();
+                    by_distance.sort_by(|a, b| {
+                        a.distance
+                            .partial_cmp(&b.distance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let mut best_edge: HashMap<String, (f32, f32)> = HashMap::new();
+                    for seed in by_distance.into_iter().take(10) {
+                        let edges = store
+                            .list_graph_edges(
+                                Some(seed.id.as_str()),
+                                Some(GraphEdgeType::Manual),
+                                None,
+                            )
+                            .unwrap_or_default();
+                        let mut count = 0;
+                        for edge in edges {
+                            if edge.weight <= 0.0 {
+                                continue;
+                            }
+                            let neighbor = if edge.from_item_id == seed.id {
+                                edge.to_item_id
+                            } else {
+                                edge.from_item_id
+                            };
+                            if neighbor == seed.id {
+                                continue;
+                            }
+                            best_edge
+                                .entry(neighbor)
+                                .and_modify(|e| {
+                                    if edge.weight > e.0 {
+                                        *e = (edge.weight, seed.distance);
+                                    }
+                                })
+                                .or_insert((edge.weight, seed.distance));
+                            count += 1;
+                            if count >= 20 {
+                                break;
+                            }
+                        }
+                    }
+                    for (id, (weight, seed_distance)) in best_edge {
+                        let boost = 0.15 * weight.max(0.0);
+                        let graph_distance = (seed_distance - boost).clamp(0.0, 1.0);
+                        if let Some(existing) = hits.iter_mut().find(|h| h.id == id) {
+                            if graph_distance < existing.distance {
+                                existing.distance = graph_distance;
+                            }
+                            if !existing.retrievers.iter().any(|r| r == "graph") {
+                                existing.retrievers.push("graph".to_owned());
+                            }
+                        } else if let Ok(Some(item)) = store.get_item(&id) {
+                            let mut hit = SearchHit::from(item);
+                            hit.distance = graph_distance;
+                            hit.retrievers = vec!["graph".to_owned()];
+                            hits.push(hit);
+                        }
+                    }
+                    // Re-dedup keeping the best (lowest) distance after boost.
+                    hits.sort_by(|a, b| {
+                        a.id.cmp(&b.id).then_with(|| {
+                            a.distance
+                                .partial_cmp(&b.distance)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    });
+                    hits.dedup_by(|a, b| a.id == b.id);
                     hits
                 };
                 let mut filtered: Vec<SearchHit> = hits
@@ -829,19 +908,37 @@ pub(crate) async fn search_core(
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                let related = if let Some(top) = filtered.first() {
-                    let top_id = top.id.clone();
-                    let edges = store
-                        .list_graph_edges(Some(&top_id), Some(GraphEdgeType::Manual), None)
-                        .ok()
-                        .unwrap_or_default();
+                // Related panel: pool-wide over the top 3 hits (not top-1
+                // only), manual + loose-link edges. A neighbor of any good
+                // hit counts — one flaky top-1 no longer gates the panel.
+                let seed_ids: Vec<String> =
+                    filtered.iter().take(3).map(|h| h.id.clone()).collect();
+                let related = if seed_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut all_edges = Vec::new();
+                    for seed_id in &seed_ids {
+                        all_edges.extend(
+                            store
+                                .list_graph_edges(
+                                    Some(seed_id.as_str()),
+                                    Some(GraphEdgeType::Manual),
+                                    None,
+                                )
+                                .ok()
+                                .unwrap_or_default(),
+                        );
+                    }
+                    let edges = all_edges;
 
-                    // Identify anti-edges from the top hit (weight < 0.0).
+                    // Identify anti-edges from the seed pool (weight < 0.0).
+                    let seed_set: HashSet<&str> =
+                        seed_ids.iter().map(String::as_str).collect();
                     let anti_targets: HashSet<String> = edges
                         .iter()
                         .filter(|e| e.weight < 0.0)
                         .map(|e| {
-                            if e.from_item_id == top_id {
+                            if seed_set.contains(e.from_item_id.as_str()) {
                                 e.to_item_id.clone()
                             } else {
                                 e.from_item_id.clone()
@@ -872,42 +969,62 @@ pub(crate) async fn search_core(
 
                     let existing: HashSet<&str> =
                         filtered.iter().map(|hit| hit.id.as_str()).collect();
-                    let mut relations: HashMap<String, Option<String>> = HashMap::new();
+                    // Best edge wins per neighbor: highest weight, relation
+                    // from that edge. Weight — a logical fact — is the rank,
+                    // not cosine distance (flaky 0.44-0.54 band).
+                    let mut best: HashMap<String, (f32, Option<String>)> = HashMap::new();
                     for edge in edges {
                         // Skip anti-edges for the "Related" panel.
                         if edge.weight < 0.0 {
                             continue;
                         }
-
-                        let neighbor_id = if edge.from_item_id == top_id {
+                        let neighbor_id = if seed_set.contains(edge.from_item_id.as_str()) {
                             edge.to_item_id
                         } else {
                             edge.from_item_id
                         };
-                        if neighbor_id == top_id || existing.contains(neighbor_id.as_str()) {
+                        if seed_set.contains(neighbor_id.as_str())
+                            || existing.contains(neighbor_id.as_str())
+                        {
                             continue;
                         }
-                        relations.entry(neighbor_id).or_insert(edge.relation);
+                        best.entry(neighbor_id)
+                            .and_modify(|e| {
+                                if edge.weight > e.0 {
+                                    *e = (edge.weight, edge.relation.clone());
+                                }
+                            })
+                            .or_insert((edge.weight, edge.relation.clone()));
                     }
-                    if relations.is_empty() {
+                    if best.is_empty() {
                         Vec::new()
                     } else {
-                        let ids: Vec<String> = relations.keys().cloned().collect();
-                        let mut hits = store.distances_for_ids(&embedding, &ids)?;
-                        hits.sort_by(|a, b| {
-                            a.distance
-                                .partial_cmp(&b.distance)
+                        let mut ranked: Vec<(String, f32, Option<String>)> = best
+                            .into_iter()
+                            .map(|(id, (w, r))| (id, w, r))
+                            .collect();
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1)
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
-                        hits.into_iter()
-                            .map(|hit| {
-                                let relation = relations.get(&hit.id).and_then(Clone::clone);
-                                (hit, relation)
+                        let ids: Vec<String> =
+                            ranked.iter().map(|(id, _, _)| id.clone()).collect();
+                        let rel_by_id: HashMap<String, Option<String>> = ranked
+                            .into_iter()
+                            .map(|(id, _, r)| (id, r))
+                            .collect();
+                        // Weight-first order: ids are already sorted by edge
+                        // weight above, so materialize in that sequence and
+                        // never let cosine re-sort a logical link downward.
+                        ids.into_iter()
+                            .filter_map(|id| {
+                                store.get_item(&id).ok().flatten().map(|item| {
+                                    let rel = rel_by_id.get(&id).and_then(Clone::clone);
+                                    (SearchHit::from(item), rel)
+                                })
                             })
                             .collect()
                     }
-                } else {
-                    Vec::new()
                 };
 
                 Ok((filtered, related, raw))
