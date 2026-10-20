@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use sqlite_vec::sqlite3_vec_init;
 use std::sync::Once;
@@ -52,6 +52,12 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
         INSERT OR IGNORE INTO items_fts(rowid, id, text)
         SELECT rowid, id, text FROM items WHERE rowid NOT IN (SELECT rowid FROM items_fts);
 
+        -- NOTE: graph_edges deliberately has NO foreign keys on from/to_item_id.
+        -- External endpoints (`ext:{kind}:{key}`) dangle by design: they need no
+        -- stored row and are resolved synthetically at read time. Existence of
+        -- non-external endpoints is enforced by `add_manual_edge`, and
+        -- `delete_item` removes incident edges explicitly (replacing the old
+        -- ON DELETE CASCADE behavior).
         CREATE TABLE IF NOT EXISTS graph_edges (
             id TEXT PRIMARY KEY,
             from_item_id TEXT NOT NULL,
@@ -63,9 +69,7 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
             directed INTEGER NOT NULL DEFAULT 0 CHECK (directed IN (0, 1)),
             metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata)),
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            FOREIGN KEY(from_item_id) REFERENCES items(id) ON DELETE CASCADE,
-            FOREIGN KEY(to_item_id) REFERENCES items(id) ON DELETE CASCADE
+            updated_at INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_item_id);
@@ -242,6 +246,7 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
          WHERE sort_order IS NULL OR trim(sort_order) = '';
          CREATE INDEX IF NOT EXISTS idx_graph_edges_sort_order ON graph_edges(sort_order ASC, id ASC);",
     )?;
+    drop_legacy_graph_edge_foreign_keys(connection)?;
     ensure_column_exists(connection, "items", "analysis_json", "TEXT")?;
     ensure_column_exists(connection, "items", "analysis_at", "INTEGER")?;
     ensure_column_exists(connection, "items", "analysis_model", "TEXT")?;
@@ -349,6 +354,78 @@ pub(super) fn initialize_schema(connection: &Connection, embedding_dimension: us
         "
     ))?;
 
+    Ok(())
+}
+
+/// One-time migration for databases created before external edge endpoints
+/// were allowed to dangle: rebuild `graph_edges` without its foreign keys
+/// (SQLite cannot drop constraints in place), then delete the empty
+/// placeholder rows those constraints forced into existence. Edges pointing
+/// at the deleted stubs are kept — they dangle and resolve synthetically.
+/// Fresh databases built from the DDL above have no FKs, so this is a no-op.
+fn drop_legacy_graph_edge_foreign_keys(connection: &Connection) -> Result<()> {
+    let fk_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('graph_edges')",
+            [],
+            |row| row.get(0),
+        )
+        .context("inspecting graph_edges foreign keys")?;
+    if fk_count == 0 {
+        return Ok(());
+    }
+    // Foreign-key enforcement cannot change inside a transaction, and the
+    // legacy table cannot drop constraints in place, so each step runs as
+    // its own statement with enforcement off throughout.
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .context("disabling foreign keys for graph_edges rebuild")?;
+    let rebuild = connection.execute_batch(
+        "CREATE TABLE graph_edges_new (
+            id TEXT PRIMARY KEY,
+            from_item_id TEXT NOT NULL,
+            to_item_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL CHECK (edge_type IN ('similarity', 'manual')),
+            relation TEXT,
+            sort_order TEXT NOT NULL DEFAULT '00000000000000000000',
+            weight REAL NOT NULL,
+            directed INTEGER NOT NULL DEFAULT 0 CHECK (directed IN (0, 1)),
+            metadata TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata)),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        INSERT INTO graph_edges_new
+            (id, from_item_id, to_item_id, edge_type, relation, sort_order,
+             weight, directed, metadata, created_at, updated_at)
+        SELECT id, from_item_id, to_item_id, edge_type, relation, sort_order,
+             weight, directed, metadata, created_at, updated_at
+        FROM graph_edges;
+        DROP TABLE graph_edges;
+        ALTER TABLE graph_edges_new RENAME TO graph_edges;
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_item_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_to ON graph_edges(to_item_id);
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_type ON graph_edges(edge_type);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_edges_similarity_pair
+            ON graph_edges(from_item_id, to_item_id, edge_type)
+            WHERE edge_type = 'similarity';
+        CREATE INDEX IF NOT EXISTS idx_graph_edges_sort_order ON graph_edges(sort_order ASC, id ASC);",
+    );
+    rebuild.context("rebuilding graph_edges without foreign keys")?;
+    // With the FKs gone the cascade is gone too: drop the empty external
+    // stubs (only empty-text rows — never touch real content), keep edges.
+    connection
+        .execute(
+            "DELETE FROM items
+             WHERE text = ''
+               AND (id LIKE 'ext:%'
+                    OR source_id = 'external'
+                    OR COALESCE(json_extract(metadata, '$.external'), 0) != 0)",
+            [],
+        )
+        .context("deleting legacy external stub rows")?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .context("re-enabling foreign keys after graph_edges rebuild")?;
     Ok(())
 }
 

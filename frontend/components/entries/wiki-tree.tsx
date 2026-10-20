@@ -1,5 +1,6 @@
 "use client"
 
+import { ListSkeleton } from "@/components/ui/list-skeleton"
 import { ChevronDown, ChevronRight, Folder, FolderOpen, Loader2 } from "lucide-react"
 import { useEntriesTree } from "@/lib/api"
 import type { TreeChild } from "@/lib/api"
@@ -114,7 +115,7 @@ function WikiTreeRow({
               className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground"
               style={{ paddingLeft: `${(depth + 1) * 16 + 28}px` }}
             >
-              <Loader2 className="size-3 animate-spin" /> loading…
+              <ListSkeleton count={2} compact />
             </div>
           )}
           {childData && childData.children.length > 0 && (

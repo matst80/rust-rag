@@ -23,6 +23,9 @@ PROD_POD_NAMESPACE ?= home
 
 RAG_MODEL_PATH ?= $(MODEL_DIR)/model.onnx
 RAG_TOKENIZER_PATH ?= $(MODEL_DIR)/tokenizer.json
+# BGE-reference pooling for the default bge-small store (m3 targets override
+# explicitly below). Keep in sync with RAG_EMBEDDING_DIMENSION for the model.
+RAG_EMBEDDING_POOLING ?= cls
 RAG_DB_PATH ?= $(CURDIR)/data/rag.db
 RAG_PORT ?= 4001
 RAG_GRAPH_ENABLED ?= true
@@ -279,6 +282,7 @@ run:
 	RUST_LOG="$(RUST_LOG)" \
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
 	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_POOLING="$(RAG_EMBEDDING_POOLING)" \
 	RAG_DB_PATH="$(RAG_DB_PATH)" \
 	RAG_PORT="$(RAG_PORT)" \
 	RAG_GRAPH_ENABLED="$(RAG_GRAPH_ENABLED)" \
@@ -473,6 +477,19 @@ cleanup-legacy-chunks:
 	RAG_INTRA_THREADS="4" \
 	cargo run --release --bin cleanup_legacy_chunks -- $(if $(DRY),--dry-run,)
 
+# Regenerate every SQLite item's vector with the current model + pooling
+# (e.g. after flipping RAG_EMBEDDING_POOLING to `cls`). Same dims only —
+# a dimension change needs a fresh DB. Pass DRY=1 to plan without writes.
+reembed-sqlite:
+	@test -f "$(RAG_MODEL_PATH)" || { echo "missing $(RAG_MODEL_PATH)"; exit 1; }
+	@test -f "$(RAG_DB_PATH)" || { echo "missing $(RAG_DB_PATH)"; exit 1; }
+	RAG_DB_PATH="$(RAG_DB_PATH)" \
+	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
+	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_POOLING="$(RAG_EMBEDDING_POOLING)" \
+	RAG_INTRA_THREADS="4" \
+	cargo run --release --bin reembed_sqlite -- $(if $(DRY),--dry-run,)
+
 # Recompute and write `chunks.section_path` for existing documents (no
 # re-embedding). Used after the section-path tracking landed but data was
 # already migrated.
@@ -492,6 +509,7 @@ run-cuda:
 	RUST_LOG="$(RUST_LOG)" \
 	RAG_MODEL_PATH="$(RAG_MODEL_PATH)" \
 	RAG_TOKENIZER_PATH="$(RAG_TOKENIZER_PATH)" \
+	RAG_EMBEDDING_POOLING="$(RAG_EMBEDDING_POOLING)" \
 	RAG_DB_PATH="$(RAG_DB_PATH)" \
 	RAG_PORT="$(RAG_PORT)" \
 	RAG_GRAPH_ENABLED="$(RAG_GRAPH_ENABLED)" \

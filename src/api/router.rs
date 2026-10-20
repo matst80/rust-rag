@@ -47,13 +47,15 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/map/rebuild", post(map::rebuild_map))
         .route("/admin/categories", get(items::list_categories))
         .route("/admin/items", get(items::list_items))
-        .route("/admin/tokens/count", post(store_search::count_tokens))
-        .route(
-            "/admin/items/{id}",
+        .route("/admin/items/metadata-facets", get(items::get_metadata_facets))
+        .route("/admin/items/delete", post(items::bulk_delete_items))
+        .route("/admin/tokens/count", post(store_search::count_tokens))        .route("/admin/items/{id}",
             get(items::get_item)
                 .put(items::update_item)
                 .delete(items::delete_item),
         )
+        .route("/api/items/{id}/backlinks", get(items::get_backlinks))
+        .route("/api/items/duplicates/titles", get(items::get_duplicate_titles))
         .route(
             "/admin/items/{id}/share",
             get(items::get_item_share)
@@ -209,6 +211,13 @@ pub fn router(state: AppState) -> Router {
             crate::admin_mcp::streamable_http_service(state.clone()),
         )
         .route("/api/dream", post(dream::dreaming_endpoint))
+        .route("/api/dream/apply", post(dream::apply_dreaming_round))
+        .route("/api/dream/clusters", get(dream::list_dream_clusters))
+        .route(
+            "/api/dream/clusters/{id}/members",
+            get(dream::dream_cluster_members),
+        )
+        .route("/api/dream/actions", get(dream::list_dream_actions))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_key,

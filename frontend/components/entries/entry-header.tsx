@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -12,13 +12,16 @@ import {
   Clock,
   History,
   Share2,
+  Star,
 } from "lucide-react";
+import { cn, entryTitle, formatRelativeTime } from "@/lib/utils";
+import { isStarred, toggleStar } from "@/lib/favorites";
 import { Button } from "@/components/ui/button";
 import { ComboButton } from "@/components/ui/combo-button";
 import { EntryTag } from "../ui/entry-tag";
 import { WikiPathPicker } from "./wiki-path-picker";
 import { ShareModal } from "./share-modal";
-import { cn, formatRelativeTime } from "@/lib/utils";
+
 import { toast } from "sonner";
 
 import { Entry } from "@/lib/api";
@@ -28,6 +31,7 @@ interface EntryHeaderProps {
   isEditing: boolean;
   isDataValid: boolean;
   isDirty?: boolean;
+  saveState?: string;
   onSave: () => Promise<void>;
   onStartEdit: () => void;
   onCancelEdit: () => void;
@@ -39,6 +43,7 @@ export function EntryHeader({
   isEditing,
   isDataValid,
   isDirty,
+  saveState,
   onSave,
   onStartEdit,
   onCancelEdit,
@@ -46,6 +51,10 @@ export function EntryHeader({
 }: EntryHeaderProps) {
   const [idCopied, setIdCopied] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
+  const [starred, setStarred] = useState(() => isStarred(entry.id));
+  useEffect(() => {
+    setStarred(isStarred(entry.id));
+  }, [entry.id]);
 
   const handleCopyId = async () => {
     try {
@@ -150,12 +159,29 @@ export function EntryHeader({
         {isEditing && (
           <span
             className={cn(
-              "text-xs font-medium mr-1 hidden sm:inline transition-opacity",
+              "text-xs font-medium mr-1 transition-opacity",
               isDirty ? "text-primary opacity-100" : "text-muted-foreground opacity-70",
             )}
           >
-            {isDirty ? "Unsaved changes" : "No changes"}
+            {saveState === "Saving…" || saveState === "Save failed" ? saveState : isDirty ? "Unsaved changes" : saveState ?? "Saved"}
           </span>
+        )}
+        {!isEditing && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 text-muted-foreground hover:text-foreground"
+            onClick={() => setStarred(toggleStar(entry.id, entryTitle(entry)))}
+            title={starred ? "Unstar entry" : "Star entry (pins to sidebar)"}
+            aria-label={starred ? "Unstar entry" : "Star entry"}
+          >
+            <Star
+              className={cn(
+                "size-3.5",
+                starred && "fill-amber-400 text-amber-400"
+              )}
+            />
+          </Button>
         )}
         {!isEditing && (
           <Button

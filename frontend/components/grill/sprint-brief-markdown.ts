@@ -1,4 +1,5 @@
 import type { HarnessTreeNode, HarnessTreeResponse } from "@/lib/api"
+import { concernKindOf, normalizeRelation } from "@/lib/harness"
 
 const SEV_LABEL: Record<string, string> = {
   critical: "CRITICAL",
@@ -7,21 +8,22 @@ const SEV_LABEL: Record<string, string> = {
   low: "LOW",
 }
 
-export const rel = (edge: { relation: string | null }) => (edge.relation ?? "").toUpperCase()
+export const rel = (edge: { relation: string | null }) => normalizeRelation(edge.relation).toUpperCase()
 
 /** Structural view of a sprint assembled from the harness graph edges. */
 export function collectSprintContext(tree: HarnessTreeResponse, sprint: HarnessTreeNode) {
   const byId = new Map(tree.nodes.map((n) => [n.id, n]))
   const seen = new Set<string>()
 
-  // Parent plan: explicit plan_id, or a plan that BREAKS_INTO / IMPLEMENTED_BY this sprint.
+  // Parent plan: explicit plan_id, or a plan that contains this sprint
+  // (BREAKS_INTO on old edges) / is implemented by it.
   const planId =
     (sprint.data?.plan_id as string | undefined) ??
     tree.edges.find(
       (e) =>
         e.to_item_id === sprint.id &&
         byId.get(e.from_item_id)?.type_name === "harness_plan" &&
-        ["BREAKS_INTO", "IMPLEMENTED_BY"].includes(rel(e))
+        ["CONTAINS", "IMPLEMENTED_BY"].includes(rel(e))
     )?.from_item_id
   const plan = planId ? byId.get(planId) ?? null : null
 
@@ -38,22 +40,22 @@ export function collectSprintContext(tree: HarnessTreeResponse, sprint: HarnessT
     return out
   }
 
-  const todos = childrenOf(sprint.id, ["CONTAINS_TODO", "CONTAINS"])
+  const todos = childrenOf(sprint.id, ["CONTAINS"])
     .filter((n) => n.type_name === "harness_todo")
     .sort((a, b) => Number(a.data?.sequence_order ?? 0) - Number(b.data?.sequence_order ?? 0))
 
   const governingDocs: HarnessTreeNode[] = []
   const risks: HarnessTreeNode[] = []
   for (const anchor of [plan?.id, sprint.id].filter(Boolean) as string[]) {
-    governingDocs.push(...childrenOf(anchor, ["GOVERNED_BY", "ENFORCES_DOC"]))
-    risks.push(...childrenOf(anchor, ["RAISED"]).filter((n) => n.type_name === "harness_risk"))
+    governingDocs.push(...childrenOf(anchor, ["ENFORCES_DOC"]))
+    risks.push(...childrenOf(anchor, ["RAISED"]).filter((n) => concernKindOf(n) === "risk"))
   }
   for (const todo of todos) governingDocs.push(...childrenOf(todo.id, ["ENFORCES_DOC"]))
 
   const validations: HarnessTreeNode[] = []
   for (const risk of risks) {
     validations.push(
-      ...childrenOf(risk.id, ["ADDRESSED_BY"]).filter((n) => n.type_name === "harness_validation")
+      ...childrenOf(risk.id, ["ADDRESSED_BY"]).filter((n) => concernKindOf(n) === "validation")
     )
   }
   const openValidations = validations.filter((v) => String(v.data?.status ?? v.state ?? "").toLowerCase() !== "done")

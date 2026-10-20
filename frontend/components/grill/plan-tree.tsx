@@ -3,33 +3,12 @@
 import { useMemo, useState } from "react"
 import { ChevronDown, ChevronRight, ShieldAlert, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { concernKindOf, harnessTypeLabel } from "@/lib/harness"
 import type {
   HarnessTreeEdge,
   HarnessTreeNode,
   HarnessTreeResponse,
 } from "@/lib/api"
-
-const TYPE_LABELS: Record<string, string> = {
-  harness_plan: "PLAN",
-  harness_sprint: "SPRINT",
-  harness_todo: "TODO",
-  harness_doc: "DOC",
-  harness_agent: "AGENT",
-  harness_stream: "STREAM",
-  harness_audit: "AUDIT",
-  harness_repo: "REPO",
-  harness_poc: "POC",
-  // harness_decision was folded into the generic `decision` type.
-  decision: "DECISION",
-  harness_risk: "RISK",
-  harness_compliance: "COMPLIANCE",
-  harness_resource: "RESOURCE",
-  harness_scaling: "SCALING",
-  harness_validation: "VALIDATION",
-  harness_rollout: "ROLLOUT",
-  // harness_fact renamed harness_evidence (collided with the generic `fact` type).
-  harness_evidence: "EVIDENCE",
-}
 
 function Badge({ node }: { node: HarnessTreeNode }) {
   if (!node.badge) return null
@@ -84,8 +63,16 @@ function NodeRow({
     >
       <Badge node={node} />
       <span className="text-xs text-muted-foreground tracking-wider">
-        {TYPE_LABELS[node.type_name] ?? node.type_name.toUpperCase()}
+        {harnessTypeLabel(node)}
       </span>
+      {(() => {
+        const kind = concernKindOf(node)
+        return kind ? (
+          <span className="rounded-sm border border-border/60 px-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+            {kind}
+          </span>
+        ) : null
+      })()}
       <span className="truncate text-foreground">{node.title}</span>
       {node.state && (
         <span className="ml-auto shrink-0 text-xs text-muted-foreground uppercase">
@@ -202,14 +189,14 @@ export function PlanTree({
   selectedId: string | null
   onSelect: (id: string) => void
 }) {
-  const { planBranches, docBranches, pocBranches, evidence, unlinked, shownEdges } = useMemo(() => {
+  const { planBranches, docBranches, pocBranches, evidence, unlinked } = useMemo(() => {
     const byId = new Map<string, HarnessTreeNode>()
     const childrenByParent = new Map<string, HarnessTreeEdge[]>()
     const planIds: string[] = []
     const repoIds: string[] = []
     const docIds: string[] = []
     if (!tree)
-      return { planBranches: [], docBranches: [], pocBranches: [], evidence: [], unlinked: [], shownEdges: 0 }
+      return { planBranches: [], docBranches: [], pocBranches: [], evidence: [], unlinked: [] }
 
     for (const node of tree.nodes) byId.set(node.id, node)
     const seenEdges = new Set<string>()
@@ -248,7 +235,7 @@ export function PlanTree({
         n.type_name !== "harness_audit" &&
         n.type_name !== "harness_evidence"
     )
-    return { planBranches, docBranches, pocBranches, evidence, unlinked, shownEdges: seenEdges.size }
+    return { planBranches, docBranches, pocBranches, evidence, unlinked }
   }, [tree])
 
   const empty = planBranches.length === 0 && docBranches.length === 0 && pocBranches.length === 0
@@ -259,12 +246,19 @@ export function PlanTree({
         <h2 className="text-xs font-semibold uppercase tracking-[3px]">
           Plan &amp; Invariants
         </h2>
-        <p
-          className="text-xs text-muted-foreground"
-          title={`${tree?.edges.length ?? 0} raw edges from the graph API; ${shownEdges} are marked "nests" by the server (contains/depends_on/supersedes/… after de-dupe) and drawn as tree lines below. The rest (contradicts, audit links, comments) aren't hierarchical, so they're not shown as nesting.`}
-        >
-          {tree?.nodes.length ?? 0} nodes · {shownEdges} edges shown
-          {tree && tree.edges.length !== shownEdges ? ` (${tree.edges.length} total)` : ""}
+        <p className="text-xs text-muted-foreground">
+          {tree?.nodes.length ?? 0} nodes
+        </p>
+        <p className="mt-1 flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/70">
+          <span className="flex items-center gap-1" title="Invariant collision detected">
+            <span className="inline-block h-2 w-2 rounded-full bg-red-500" /> blocking
+          </span>
+          <span className="flex items-center gap-1" title="Missing document anchor or untracked mutation">
+            <span className="inline-block h-2 w-2 rounded-full bg-amber-500" /> needs anchor
+          </span>
+          <span className="flex items-center gap-1" title="Verified against active ADRs">
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" /> verified
+          </span>
         </p>
       </div>
       <div className="flex-1 overflow-y-auto py-1">

@@ -262,7 +262,7 @@ export function AuditPanel({
             Overview
           </TabsTrigger>
           <TabsTrigger value="verdict" className="h-5 font-mono text-[10px]">
-            Compiler Errors
+            Verdict
           </TabsTrigger>
           <TabsTrigger value="graph" className="h-5 font-mono text-[10px]">
             Graph

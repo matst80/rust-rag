@@ -36,12 +36,7 @@ against it.
 | `harness_repo` | `name`, `url?`, `default_branch?` |
 | `harness_poc` | `repo`, `summary`, `session_id?` (source session id — join key for session memories), `rollout_recommendation?`, `timestamp` (epoch ms) |
 | `decision` *(generic, not harness-prefixed)* | `title`, `context`, `decision`, `consequences`, `status` (proposed\|accepted\|superseded\|rejected), `supersedes?`, `superseded_by?`, `deciders?[]`, `decided_at?`. Link to the raising POC with a `RAISED` edge — no `poc_id` data field. **Replaces the old `harness_decision` type** (was a thinner duplicate: title + status only, no context/consequences/deciders). |
-| `harness_risk` | `title`, `severity` (low\|medium\|high\|critical), `mitigation?` |
-| `harness_compliance` | `title`, `framework` (GDPR, SOC2, …), `requirement?` |
-| `harness_resource` | `title`, `kind`, `provisioned?` |
-| `harness_scaling` | `title`, `bottleneck?`, `measured_metric?` |
-| `harness_validation` | `title`, `status` (needed\|done), `how?`, `result?` |
-| `harness_rollout` | `title`, `phases[]` ({name, description?, gate?}), `prerequisites[]` |
+| `harness_concern` | `title`, `kind` (risk\|compliance\|resource\|scaling\|validation\|rollout) + kind-specific fields: risk → `severity`, `mitigation?`; compliance → `framework`, `requirement?`; resource → `resource_kind`, `provisioned?`; scaling → `bottleneck?`, `measured_metric?`; validation → `status` (needed\|done), `how?`, `result?`; rollout → `phases[]`, `prerequisites[]`. Link to the raising POC with a `RAISED` edge; risk concerns link to validation concerns with `ADDRESSED_BY`. **Replaces the six legacy per-kind types** (`harness_risk`, `harness_compliance`, `harness_resource`, `harness_scaling`, `harness_validation`, `harness_rollout`) — same principle as the `harness_decision` fold. Old entries keep working: the tree normalizes them to `harness_concern` server-side. |
 | `harness_evidence` | `statement` — free-form session-evidence note agents store while working; appears in the tree as evidence, carries no hierarchy. **Renamed from `harness_fact`** — that name collided with the generic, structured `fact` type (claim/source/confidence); this is an unstructured blob, not a citeable claim. No schema file (validation-exempt by design, same as before). |
 
 ### Node-type consolidation (migration notes)
@@ -55,9 +50,10 @@ of the generic one, same principle as the edge-predicate fold above:
 | `harness_decision` | `decision` | Now **requires** `context`, `decision`, `consequences` in `data` (not just `title`/`status`) — the shared schema is stricter. `poc_id` was never a data field; keep linking via the `RAISED` edge from the `harness_poc`. `supersedes`/`superseded_by` can be set as data-field ids on `decision` in addition to (or instead of) a `supersedes` graph edge — both are valid, the edge is what the tree/timeline UI actually walks. |
 | `harness_fact` | `harness_evidence` | Pure rename, same shape (`{"statement": "..."}`, no schema, no required fields). Update the `type` string only. |
 
-`HARNESS_NODE_TYPES` in `src/api/harness.rs` still has 17 entries — `decision`
-replaced `harness_decision` in place, so it still gets fetched into every
-`harness_tree` call. One tradeoff worth knowing: when `harness_tree` is
+`HARNESS_NODE_TYPES` in `src/api/harness.rs` keeps the legacy concern types
+in its fetch list alongside `harness_concern` (same as `decision` replaced
+`harness_decision` in place), so old entries still load into every
+`harness_tree` call and normalize at assembly. One tradeoff worth knowing: when `harness_tree` is
 called **without** `source_id` (a global/cross-project query), it now pulls
 in *every* `decision`-typed entry store-wide, not just POC-raised ones —
 `decision` is a shared, non-namespaced type. This mirrors how the other
@@ -81,7 +77,7 @@ genuinely harness-domain (audit/POC lifecycle) with no canonical equivalent:
 
 ```
 (:harness_plan)-[:ENFORCES_DOC]->(:harness_doc)
-(:harness_plan)-[:BREAKS_INTO]->(:harness_sprint)
+(:harness_plan)-[:contains]->(:harness_sprint)
 (:harness_sprint)-[:contains]->(:harness_todo)
 (:harness_todo)-[:ENFORCES_DOC]->(:harness_doc)
 (:harness_todo)-[:DELEGATES_TO]->(:harness_agent)
@@ -89,10 +85,10 @@ genuinely harness-domain (audit/POC lifecycle) with no canonical equivalent:
 (:harness_doc)-[:contradicts]->(:harness_doc)
 (:harness_audit)-[:AUDITED]->(:harness_plan | harness_sprint | harness_todo | harness_doc)
 
-(:harness_repo)-[:HAD_POC]->(:harness_poc)
-(:harness_poc)-[:RAISED]->(:decision | harness_risk | harness_compliance | harness_scaling | harness_validation | harness_rollout)
-(:harness_risk)-[:ADDRESSED_BY]->(:harness_validation)
-(:harness_rollout)-[:depends_on]->(:harness_resource)
+(:harness_repo)-[:contains]->(:harness_poc)
+(:harness_poc)-[:RAISED]->(:decision | harness_concern)
+(:harness_concern{kind:risk})-[:ADDRESSED_BY]->(:harness_concern{kind:validation})
+(:harness_concern{kind:rollout})-[:depends_on]->(:harness_concern{kind:resource})
 (:decision)-[:supersedes]->(:decision)
 
 (:harness_repo)-[:contains]->(:harness_plan)
@@ -100,12 +96,16 @@ genuinely harness-domain (audit/POC lifecycle) with no canonical equivalent:
 (:harness_todo)-[:EVIDENCED_BY]->(:harness_poc | <promoted memory node>)
 ```
 
+`BREAKS_INTO` (plan→sprint) and `HAD_POC` (repo→poc) are deprecated aliases
+of `contains` — same direction, same nesting. Old edges still nest and read
+fine; write `contains` for new ones.
+
 Folded (old name → canonical, in `src/api/harness.rs`):
 
 | old harness relation | canonical predicate |
 |---|---|
 | `GOVERNED_BY` | `ENFORCES_DOC` (the two were duplicate "anchored to doc" relations; `ENFORCES_DOC` won) |
-| `CONTAINS_TODO`, `HAS_PLAN` | `contains` |
+| `CONTAINS_TODO`, `HAS_PLAN`, `BREAKS_INTO`, `HAD_POC` | `contains` (pure hierarchy — plan→sprint, repo→poc/session, sprint→todo) |
 | `CONFLICTS_WITH` | `contradicts` |
 | `REQUIRES`, `DERIVES_FROM` | `depends_on` (direction unchanged: both already read "from depends on to") |
 | `SUPERSEDES` (upper-case) | `supersedes` (lower-case, was a pure case duplicate) |
@@ -117,8 +117,8 @@ nothing needs a migration. New edges should always use the canonical name.
 
 Remaining harness-only relations (no canonical equivalent — genuinely
 domain-specific lifecycle, not generic knowledge-graph semantics):
-`BREAKS_INTO`, `ENFORCES_DOC`, `DELEGATES_TO`, `MUTATES_STREAM`, `AUDITED`,
-`HAD_POC`, `RAISED`, `ADDRESSED_BY`, `EVIDENCED_BY`. `HAD_POC` links a repo to
+`ENFORCES_DOC`, `DELEGATES_TO`, `MUTATES_STREAM`, `AUDITED`,
+`RAISED`, `ADDRESSED_BY`, `EVIDENCED_BY`. `HAD_POC` links a repo to
 its POC sessions, and `EVIDENCED_BY` ties a todo (or promoted memory) to the
 session evidence that motivated it. Raw session memories need no edges of
 their own — they join by id: `harness_poc.session_id == memory.source_id`.
@@ -199,16 +199,18 @@ the evidence behind the sprint's todos.
 `/grill` — dark, monospace operator UI:
 
 - **Left**: Plan → Sprint → Todo tree plus a POC-sessions section
-  (Repo → PocSession → raised decisions/risks/validations/rollout, with
-  supersedes chains nested under the superseding decision) with red/yellow/green badges.
-- **Center**: compiler-error style violation cards per node (assumption vs.
-  invariant, quote + doc link) with remediation actions ([Apply Suggested
-  Edit], [Amend ADR], [Record Manual Exemption]) and a tab with the 2-hop
-  reagraph neighborhood.
+  (Repo → PocSession → raised decisions/concerns, with supersedes chains
+  nested under the superseding decision). Concerns render as one `CONCERN`
+  type with a kind chip (risk, compliance, …). Red/yellow/green badges carry
+  an inline legend (blocking / needs anchor / verified).
+- **Center**: violation cards per node (assumption vs. invariant, quote + doc
+  link) with remediation actions ([Apply Suggested Edit], [Amend ADR],
+  [Record Manual Exemption]); tabs are Overview / Verdict / Graph, the last
+  with the 2-hop reagraph neighborhood.
 - **Right**: sub-agent context pinning — agent role/capabilities, allowed
   event streams, and the exact Markdown context slice with token count.
-- **Bottom**: chronological audit timeline; clicking an audit loads that
-  verdict.
+- **Bottom**: chronological audit timeline (a slim placeholder until the
+  first audit posts); clicking an audit loads that verdict.
 
 ## Graph Insights (`/insights`)
 

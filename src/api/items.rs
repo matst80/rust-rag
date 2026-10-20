@@ -60,7 +60,26 @@ pub struct ListItemsQuery {
     /// `true` restricts to entries with a wiki path set; `false` restricts to
     /// entries with no path (unorganized). Omit for unfiltered.
     pub has_path: Option<bool>,
-    /// Any other query parameters are treated as metadata filters (e.g. ?todo=mats)
+    /// Only entries without a path, tags, or explicit links.
+    pub needs_home: Option<bool>,
+    /// When `true`, external graph-hub placeholders (`ext:*` ids,
+    /// `source_id == "external"`, `metadata.external == true`) are included.
+    /// Default `false`: they carry empty text and are hidden from listings.
+    #[serde(default)]
+    pub include_external: bool,
+    /// Case-insensitive substring search across entry text, id, `source_id`
+    /// and wiki `path`. Searches the whole corpus server-side (unlike the
+    /// old client-side page filter). Blank is unfiltered.
+    pub search: Option<String>,
+    /// Importance range over `metadata.importance`. Missing or non-numeric
+    /// counts as 0. Powers "important memories" dreaming passes in one query.
+    pub min_importance: Option<i32>,
+    pub max_importance: Option<i32>,
+    /// Any other query parameters are treated as metadata filters (e.g.
+    /// `?repo=rust-rag`). Matching is exact per key, but a comma-separated
+    /// value matches ANY alternative (`?tags=work,home`), and array metadata
+    /// matches when it contains the value (`tags: ["work"]` matches
+    /// `?tags=work`).
     #[serde(flatten)]
     pub metadata: HashMap<String, String>,
 }
@@ -200,7 +219,12 @@ pub(crate) async fn list_items(
         path_prefix,
         type_name: query.type_name,
         has_path: query.has_path,
+        needs_home: query.needs_home,
         dreamed: None,
+        include_external: query.include_external,
+        search: query.search,
+        min_importance: query.min_importance,
+        max_importance: query.max_importance,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))
@@ -212,6 +236,177 @@ pub(crate) async fn list_items(
         items: items.into_iter().map(Into::into).collect(),
         total_count,
     }))
+}
+
+/// Query filters for metadata facets. Mirrors the corresponding
+/// `list_items` filters so suggestions describe the current view.
+#[derive(Debug, Deserialize, JsonSchema, Default)]
+pub struct MetadataFacetsQuery {
+    /// Restrict the scan to a single source_id.
+    pub source_id: Option<String>,
+    /// Restrict to entries under this wiki path prefix.
+    pub path_prefix: Option<String>,
+    /// Restrict to entries of this structured-data type.
+    #[serde(default, rename = "type")]
+    pub type_name: Option<String>,
+    /// Only entries without a path, tags, or explicit links.
+    pub needs_home: Option<bool>,
+    /// Same substring search as `list_items.search`.
+    pub search: Option<String>,
+    /// Max entries to scan (default 2000, capped at 5000).
+    pub sample: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MetadataFacetValue {
+    pub value: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MetadataFacet {
+    pub key: String,
+    /// Number of scanned entries carrying this key.
+    pub count: i64,
+    /// Most frequent values (at most 20), by descending count.
+    pub values: Vec<MetadataFacetValue>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MetadataFacetsResponse {
+    pub facets: Vec<MetadataFacet>,
+    /// Number of entries actually scanned.
+    pub scanned: usize,
+    /// `true` when the corpus exceeded the scan cap and facets are partial.
+    pub truncated: bool,
+}
+
+/// Distinct metadata keys + top values over the (filtered) corpus.
+///
+/// Powers property-filter autocomplete in the entries UI. Pages through
+/// `list_items` (no schema change, works on both SQLite and Postgres).
+/// Array metadata values contribute each scalar element; nested objects
+/// and nulls are skipped. Bounded: at most 100 keys, 20 values per key.
+pub(crate) async fn get_metadata_facets(
+    State(state): State<AppState>,
+    Query(query): Query<MetadataFacetsQuery>,
+) -> Result<Json<MetadataFacetsResponse>, ApiError> {
+    if let Some(source_id) = query.source_id.as_deref() {
+        validate_source_id(source_id)?;
+    }
+    let path_prefix = match query.path_prefix.as_deref() {
+        Some(p) => crate::db::normalize_path(p).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        None => None,
+    };
+    let scan_cap = query.sample.unwrap_or(2000).clamp(1, 5000);
+    let store = state.store.clone();
+    let response = tokio::task::spawn_blocking(move || -> anyhow::Result<MetadataFacetsResponse> {
+        // key -> (entry count, value -> count)
+        let mut keys: HashMap<String, (i64, HashMap<String, i64>)> = HashMap::new();
+        let mut scanned = 0usize;
+        let mut offset = 0usize;
+        const PAGE: usize = 500;
+        let mut truncated = false;
+        loop {
+            if offset >= scan_cap {
+                truncated = true;
+                break;
+            }
+            let (page, _) = store.list_items(ListItemsRequest {
+                source_id: query.source_id.clone(),
+                limit: Some(PAGE),
+                offset: Some(offset),
+                sort_order: SortOrder::Desc,
+                metadata_filter: HashMap::new(),
+                min_created_at: None,
+                max_created_at: None,
+                path_prefix: path_prefix.clone(),
+                type_name: query.type_name.clone(),
+                has_path: None,
+                needs_home: query.needs_home,
+                dreamed: None,
+                include_external: false,
+                search: query.search.clone(),
+            
+        min_importance: None,
+        max_importance: None,
+    })?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            scanned += page_len;
+            for item in page {
+                let Some(obj) = item.metadata.as_object() else {
+                    continue;
+                };
+                for (key, value) in obj {
+                    if key == "external" {
+                        continue;
+                    }
+                    let mut flat: Vec<String> = Vec::new();
+                    match value {
+                        Value::String(s) => {
+                            if !s.trim().is_empty() {
+                                flat.push(s.clone());
+                            }
+                        }
+                        Value::Number(_) | Value::Bool(_) => {
+                            flat.push(value.to_string());
+                        }
+                        Value::Array(items) => {
+                            for v in items {
+                                match v {
+                                    Value::String(s) => {
+                                        if !s.trim().is_empty() {
+                                            flat.push(s.clone());
+                                        }
+                                    }
+                                    Value::Number(_) | Value::Bool(_) => {
+                                        flat.push(v.to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if flat.is_empty() {
+                        continue;
+                    }
+                    let slot = keys.entry(key.clone()).or_insert((0, HashMap::new()));
+                    slot.0 += 1;
+                    for v in flat {
+                        *slot.1.entry(v).or_insert(0) += 1;
+                    }
+                }
+            }
+            if page_len < PAGE {
+                break;
+            }
+            offset += PAGE;
+        }
+        let mut facets: Vec<MetadataFacet> = keys
+            .into_iter()
+            .map(|(key, (count, values))| {
+                let mut values: Vec<MetadataFacetValue> = values
+                    .into_iter()
+                    .map(|(value, count)| MetadataFacetValue { value, count })
+                    .collect();
+                values.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+                values.truncate(20);
+                MetadataFacet { key, count, values }
+            })
+            .collect();
+        facets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+        facets.truncate(100);
+        Ok(MetadataFacetsResponse { facets, scanned, truncated })
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+
+    Ok(Json(response))
 }
 
 pub(crate) async fn get_item(
@@ -497,6 +692,60 @@ pub(crate) async fn update_item(
     Ok(Json(updated.into()))
 }
 
+/// Bulk-delete up to 200 entries in one call. Returns per-id results so
+/// the caller can report partial success; unknown ids land in `not_found`
+/// instead of failing the whole batch.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BulkDeleteRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BulkDeleteResponse {
+    pub deleted: Vec<String>,
+    pub not_found: Vec<String>,
+}
+
+pub(crate) async fn bulk_delete_items(
+    State(state): State<AppState>,
+    Json(payload): Json<BulkDeleteRequest>,
+) -> Result<Json<BulkDeleteResponse>, ApiError> {
+    if payload.ids.is_empty() {
+        return Err(ApiError::BadRequest("ids must not be empty".to_owned()));
+    }
+    if payload.ids.len() > 200 {
+        return Err(ApiError::BadRequest(
+            "bulk delete is limited to 200 ids per request".to_owned(),
+        ));
+    }
+    // De-dupe while preserving order so repeats don't double-report.
+    let mut seen = std::collections::HashSet::new();
+    let ids: Vec<String> = payload
+        .ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    invalidate_cms_nodes(&state, ids.clone()).await?;
+    let store = state.store.clone();
+    let (deleted, not_found) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<String>, Vec<String>)> {
+            let mut deleted = Vec::new();
+            let mut not_found = Vec::new();
+            for id in &ids {
+                if store.delete_item(id)? {
+                    deleted.push(id.clone());
+                } else {
+                    not_found.push(id.clone());
+                }
+            }
+            Ok((deleted, not_found))
+        })
+        .await
+        .map_err(ApiError::TaskJoin)?
+        .map_err(ApiError::Internal)?;
+    Ok(Json(BulkDeleteResponse { deleted, not_found }))
+}
+
 pub(crate) async fn delete_item(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -617,6 +866,422 @@ pub(crate) async fn revoke_item_share(
     .map_err(ApiError::Internal)?;
 
     Ok(Json(super::store_search::DeleteResponse { id, deleted }))
+}
+
+/// One entry whose text references `target_id` via an Obsidian-style
+/// wikilink (`[[id]]`, `[[id|Label]]`, `[[Title]]`) or an internal
+/// `/entries/{id}` markdown link. Returned by `GET /api/items/{id}/backlinks`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct BacklinkHit {
+    pub id: String,
+    pub title: String,
+    pub source_id: String,
+    pub updated_at: i64,
+    /// How the reference looked in the source text (`[[...]]` or `/entries/...`).
+    pub matched_ref: String,
+    /// ~160-char window around the first match, for context in the UI.
+    pub context: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct BacklinksResponse {
+    pub id: String,
+    pub title: String,
+    pub backlinks: Vec<BacklinkHit>,
+}
+
+fn backlink_context(text: &str, match_start: usize, match_len: usize) -> String {
+    const RADIUS: usize = 80;
+    let start = match_start.saturating_sub(RADIUS);
+    let end = (match_start + match_len + RADIUS).min(text.len());
+    // Snap to char boundaries (text may contain multi-byte chars).
+    let mut s = start;
+    while s < match_start && !text.is_char_boundary(s) {
+        s += 1;
+    }
+    let mut e = end;
+    while e > match_start + match_len && !text.is_char_boundary(e) {
+        e -= 1;
+    }
+    let mut snippet: String = text.get(s..e).unwrap_or("").replace('\n', " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    if snippet.len() > 240 {
+        snippet.truncate(240);
+    }
+    if s > 0 {
+        snippet = format!("…{snippet}");
+    }
+    if e < text.len() {
+        snippet = format!("{snippet}…");
+    }
+    snippet
+}
+
+/// Find the first wikilink-style reference to `id` (exact) or `title`
+/// (case-insensitive) inside `text`. Returns (byte_offset, match_len,
+/// matched_ref). Skips fenced code blocks and inline code spans so examples
+/// don't count as backlinks — mirroring the frontend `splitWikilinks` rule.
+fn find_wikilink_ref(text: &str, id: &str, title_lower: &str) -> Option<(usize, usize, String)> {
+    // Mask fenced code blocks and inline code spans with spaces (same byte
+    // length) so example wikilinks in code don't count — mirroring the
+    // frontend splitWikilinks rule — while keeping byte offsets aligned
+    // with the original text.
+    let bytes = text.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut i = 0usize;
+    while i < masked.len() {
+        // Fenced block starting with ``` (must be at line start or string start).
+        let at_line_start = i == 0 || masked[i - 1] == b'\n';
+        if at_line_start && masked[i..].starts_with(b"```") {
+            let mut j = i + 3;
+            let mut closed = false;
+            while j < masked.len() {
+                let js = j == 0 || masked[j - 1] == b'\n';
+                if js && masked[j..].starts_with(b"```") {
+                    for k in i..(j + 3).min(masked.len()) {
+                        masked[k] = b' ';
+                    }
+                    i = (j + 3).min(masked.len());
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !closed {
+                for k in i..masked.len() {
+                    masked[k] = b' ';
+                }
+                break;
+            }
+            continue;
+        }
+        // Inline code span `...` (single backtick, same line).
+        if masked[i] == b'`' {
+            let mut j = i + 1;
+            while j < masked.len() && masked[j] != b'`' && masked[j] != b'\n' {
+                j += 1;
+            }
+            if j < masked.len() && masked[j] == b'`' {
+                for k in i..=j {
+                    masked[k] = b' ';
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let searchable = String::from_utf8_lossy(&masked).into_owned();
+    let open_tag = "\u{5b}\u{5b}";
+    let close_tag = "\u{5d}\u{5d}";
+    let mut cursor = 0usize;
+    while let Some(open_rel) = searchable[cursor..].find(open_tag) {
+        let open = cursor + open_rel;
+        let after_open = &searchable[open + 2..];
+        if let Some(close_rel) = after_open.find(close_tag) {
+            let inner = &after_open[..close_rel];
+            let target = inner.split('|').next().unwrap_or("").trim();
+            let matched = target == id
+                || (!title_lower.is_empty() && target.to_lowercase() == title_lower);
+            let match_len = inner.len() + 4;
+            if matched {
+                let matched_ref = text.get(open..open + match_len).unwrap_or("").to_owned();
+                return Some((open, match_len, matched_ref));
+            }
+            cursor = open + 2 + close_rel + 2;
+        } else {
+            break;
+        }
+    }
+    // `/entries/{id}` markdown links also count as backlinks.
+    let entry_link = format!("/entries/{id}");
+    if let Some(rel) = searchable.find(entry_link.as_str()) {
+        return Some((rel, entry_link.len(), entry_link));
+    }
+    None
+}
+
+/// Backlinks for one entry: every other entry whose text contains a
+/// wikilink reference to it. Manual graph edges already surface in
+/// `GET /api/graph/edges?item_id=…`; this endpoint covers the much more
+/// common case where authors just write `[[id]]` / `[[Title]]` inline and
+/// never create an explicit edge.
+///
+/// Implementation pages through `list_items` (no schema change, works on
+/// both SQLite and Postgres) and matches in Rust. Bounded at 5,000 scanned
+/// items / 200 returned hits — plenty for a second-brain corpus while
+/// keeping the request cheap.
+pub(crate) async fn get_backlinks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<BacklinksResponse>, ApiError> {
+    let store = state.store.clone();
+    let target_id = id.clone();
+    let response = tokio::task::spawn_blocking(move || -> anyhow::Result<BacklinksResponse> {
+        let target = store.get_item(&target_id)?;
+        let title = match &target {
+            Some(item) => super::harness::display_title(item),
+            None => target_id.clone(),
+        };
+        let title_lower = title.to_lowercase();
+        // Don't title-match when the title is just the id itself — every
+        // `[[id]]` already matches exactly, and fuzzy would add nothing.
+        let title_lower = if title_lower == target_id.to_lowercase() {
+            String::new()
+        } else {
+            title_lower
+        };
+
+        let mut backlinks = Vec::new();
+        let mut offset = 0usize;
+        const PAGE: usize = 500;
+        const SCAN_CAP: usize = 5000;
+        const HIT_CAP: usize = 200;
+        while offset < SCAN_CAP && backlinks.len() < HIT_CAP {
+            let (page, _) = store.list_items(ListItemsRequest {
+                source_id: None,
+                limit: Some(PAGE),
+                offset: Some(offset),
+                sort_order: SortOrder::Desc,
+                metadata_filter: HashMap::new(),
+                min_created_at: None,
+                max_created_at: None,
+                path_prefix: None,
+                type_name: None,
+                has_path: None,
+                needs_home: None,
+                dreamed: None,
+                include_external: false,
+                search: None,
+            
+        min_importance: None,
+        max_importance: None,
+    })?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for item in page {
+                if item.id == target_id || backlinks.len() >= HIT_CAP {
+                    continue;
+                }
+                if item.id.starts_with("ext:") {
+                    continue;
+                }
+                if let Some((start, len, matched_ref)) =
+                    find_wikilink_ref(&item.text, &target_id, &title_lower)
+                {
+                    backlinks.push(BacklinkHit {
+                        id: item.id.clone(),
+                        title: super::harness::display_title(&item),
+                        source_id: item.source_id.clone(),
+                        updated_at: item.updated_at,
+                        matched_ref,
+                        context: backlink_context(&item.text, start, len),
+                    });
+                }
+            }
+            if page_len < PAGE {
+                break;
+            }
+            offset += page_len;
+        }
+        backlinks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(BacklinksResponse {
+            id: target_id,
+            title,
+            backlinks,
+        })
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    Ok(Json(response))
+}
+
+/// One member of a duplicate-title group.
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct DuplicateTitleItem {
+    pub id: String,
+    pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Entries sharing one display title (case-insensitive). `all_extracted`
+/// is true when no member carries an explicit `metadata.title` — i.e. every
+/// title was derived from the body text (usually the first `#` heading),
+/// which is the collision case that looks terrible in lists.
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct DuplicateTitleGroup {
+    pub title: String,
+    pub count: usize,
+    pub all_extracted: bool,
+    pub items: Vec<DuplicateTitleItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct DuplicateTitlesResponse {
+    pub groups: Vec<DuplicateTitleGroup>,
+    pub scanned: usize,
+}
+
+fn header_junk_line(line: &str) -> bool {
+    if line.len() < 4 {
+        return true;
+    }
+    for prefix in ["```", "~~~", "<!--", "---"] {
+        if line.starts_with(prefix) {
+            return true;
+        }
+    }
+    if line.starts_with('|') || line.starts_with('%') {
+        return true;
+    }
+    for prefix in ["/", "~/", "../", "./", "http://", "https://", "www."] {
+        if line.starts_with(prefix) {
+            return true;
+        }
+    }
+    // `Key: value` header lines (`REPO: …`, `Source: …`, `Path: …`).
+    if let Some(colon) = line.find(": ") {
+        let (key, _) = line.split_at(colon);
+        if !key.is_empty()
+            && key.len() <= 25
+            && key.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " _./\\-".contains(c))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Mirror of the frontend `entryTitle` rule: explicit `metadata.title` wins;
+/// else a `#`-`####` heading (6+ chars) within the first 4 non-empty lines;
+/// else the first line that reads like a title; else the id. Returns
+/// (title, extracted) where extracted is false only for explicit titles.
+fn frontend_style_title(text: &str, metadata: &Value, id: &str) -> (String, bool) {
+    if let Some(t) = metadata.get("title").and_then(Value::as_str) {
+        let t = t.trim();
+        if !t.is_empty() {
+            return (t.to_owned(), false);
+        }
+    }
+    let non_empty: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).take(8).collect();
+    for line in non_empty.iter().take(4) {
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        if (1..=4).contains(&hashes) {
+            let rest = line[hashes..].trim_start();
+            // Require whitespace after the hashes and 6+ chars of title.
+            if line[hashes..].starts_with(' ') && rest.chars().count() >= 6 {
+                return (rest.to_owned(), true);
+            }
+        }
+    }
+    for line in &non_empty {
+        if header_junk_line(line) {
+            continue;
+        }
+        let stripped = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).unwrap_or(line);
+        return (stripped.to_owned(), true);
+    }
+    (non_empty.into_iter().next().unwrap_or(id).to_owned(), true)
+}
+
+/// Corpus-wide duplicate display titles. Pages through `list_items` (no
+/// schema change; SQLite + Postgres) and groups by case-insensitive title
+/// using the same rule the frontend renders. Bounded: 5,000 scanned items,
+/// 200 returned groups, 10 member ids per group.
+pub(crate) async fn get_duplicate_titles(
+    State(state): State<AppState>,
+) -> Result<Json<DuplicateTitlesResponse>, ApiError> {
+    let store = state.store.clone();
+    let response = tokio::task::spawn_blocking(move || -> anyhow::Result<DuplicateTitlesResponse> {
+        let mut groups: HashMap<String, (String, Vec<(DuplicateTitleItem, bool)>)> = HashMap::new();
+        let mut offset = 0usize;
+        let mut scanned = 0usize;
+        const PAGE: usize = 500;
+        const SCAN_CAP: usize = 5000;
+        loop {
+            if offset >= SCAN_CAP {
+                break;
+            }
+            let (page, _) = store.list_items(ListItemsRequest {
+                source_id: None,
+                limit: Some(PAGE),
+                offset: Some(offset),
+                sort_order: SortOrder::Desc,
+                metadata_filter: HashMap::new(),
+                min_created_at: None,
+                max_created_at: None,
+                path_prefix: None,
+                type_name: None,
+                has_path: None,
+                needs_home: None,
+                dreamed: None,
+                include_external: false,
+                search: None,
+            
+        min_importance: None,
+        max_importance: None,
+    })?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            scanned += page_len;
+            for item in page {
+                if item.id.starts_with("ext:") {
+                    continue;
+                }
+                let (title, extracted) = frontend_style_title(&item.text, &item.metadata, &item.id);
+                if title == item.id {
+                    continue;
+                }
+                let key = title.to_lowercase();
+                groups
+                    .entry(key)
+                    .or_insert_with(|| (title, Vec::new()))
+                    .1
+                    .push((
+                        DuplicateTitleItem {
+                            id: item.id,
+                            source_id: item.source_id,
+                            path: item.path,
+                            updated_at: item.updated_at,
+                        },
+                        extracted,
+                    ));
+            }
+            if page_len < PAGE {
+                break;
+            }
+            offset += page_len;
+        }
+        let mut out: Vec<DuplicateTitleGroup> = groups
+            .into_values()
+            .filter(|(_, members)| members.len() > 1)
+            .map(|(title, members)| {
+                let all_extracted = members.iter().all(|(_, e)| *e);
+                let mut items: Vec<DuplicateTitleItem> =
+                    members.into_iter().map(|(m, _)| m).collect();
+                items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                let count = items.len();
+                items.truncate(10);
+                DuplicateTitleGroup { title, count, all_extracted, items }
+            })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.title.cmp(&b.title)));
+        out.truncate(200);
+        Ok(DuplicateTitlesResponse { groups: out, scanned })
+    })
+    .await
+    .map_err(ApiError::TaskJoin)?
+    .map_err(ApiError::Internal)?;
+    Ok(Json(response))
 }
 
 /// Unauthenticated public entry view

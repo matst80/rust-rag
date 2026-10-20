@@ -1495,7 +1495,13 @@ async fn tool_list_tasks(state: &AppState, cfg: &ManagerConfig, args: &str) -> R
         path_prefix: None,
         type_name: None,
         has_path: None,
+        needs_home: None,
         dreamed: None,
+        include_external: false,
+        search: None,
+    
+        min_importance: None,
+        max_importance: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     let tasks: Vec<Value> = items
@@ -1934,7 +1940,13 @@ async fn recall_items(
         path_prefix: None,
         type_name: None,
         has_path: None,
+        needs_home: None,
         dreamed: None,
+        include_external: false,
+        search: None,
+    
+        min_importance: None,
+        max_importance: None,
     };
     let (items, _) = tokio::task::spawn_blocking(move || store.list_items(request)).await??;
     Ok(items)

@@ -3,6 +3,7 @@
 import { useMemo } from "react"
 import { Gavel } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { relIs } from "@/lib/harness"
 import type { HarnessTreeNode } from "@/lib/api"
 import type { HarnessIndex } from "@/components/insights/use-harness-index"
 
@@ -35,9 +36,7 @@ export function DecisionTimeline({
     for (const node of index.byId.values()) {
       if (node.type_name !== "decision") continue
       for (const edge of index.childrenOf.get(node.id) ?? []) {
-        // SUPERSEDES folded into canonical `supersedes`; old edges may still
-        // carry the upper-case name.
-        if (edge.relation === "SUPERSEDES" || edge.relation === "supersedes") {
+        if (relIs(edge.relation, "supersedes")) {
           const old = index.byId.get(edge.to_item_id)
           if (old) supersededBy.set(old.id, node)
         }
@@ -52,7 +51,7 @@ export function DecisionTimeline({
       const decisions = (index.childrenOf.get(poc.id) ?? [])
         .filter(
           (e) =>
-            e.relation === "RAISED" &&
+            relIs(e.relation, "RAISED") &&
             index.byId.get(e.to_item_id)?.type_name === "decision"
         )
         .map((e) => index.byId.get(e.to_item_id)!)
@@ -140,6 +139,10 @@ export function DecisionTimeline({
 }
 
 function repoOfPoc(index: HarnessIndex, pocId: string): string | null {
-  const link = (index.parentsOf.get(pocId) ?? []).find((p) => p.relation === "HAD_POC")
+  // HAD_POC folded into `contains` for new edges; only accept a contains
+  // edge whose parent is actually a repo node.
+  const link = (index.parentsOf.get(pocId) ?? []).find(
+    (p) => relIs(p.relation, "contains") && index.byId.get(p.from)?.type_name === "harness_repo"
+  )
   return link?.from ?? null
 }

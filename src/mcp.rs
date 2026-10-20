@@ -586,7 +586,7 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
     }
 
     #[tool(
-        description = "List items, optionally filtered by `source_id` and/or `path_prefix` for wiki-style hierarchical browsing."
+        description = "List items, optionally filtered by `source_id`, `path_prefix`, and/or a case-insensitive substring `search` over text, id, source_id and path."
     )]
     async fn list_items(
         &self,
@@ -610,8 +610,14 @@ PATH: optional slash-separated wiki path (`team/handbook`) groups the entry in t
             path_prefix,
             type_name: query.type_name,
             has_path: query.has_path,
+            needs_home: None,
             dreamed: None,
-        };
+            include_external: query.include_external,
+            search: query.search,
+        
+        min_importance: None,
+        max_importance: None,
+    };
         let (items, total) = tokio::task::spawn_blocking(move || store.list_items(request))
             .await
             .map_err(|error| error.to_string())?

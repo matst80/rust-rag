@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo } from "react"
+import { relIs } from "@/lib/harness"
 import type { HarnessTreeEdge, HarnessTreeMemory, HarnessTreeNode, HarnessTreeResponse } from "@/lib/api"
 
 /** Reverse-edge lookup: which node + relation points at this node. */
@@ -29,15 +30,11 @@ export function ancestorChain(
   let current = nodeId
   for (;;) {
     const parents = index.parentsOf.get(current) ?? []
+    // Legacy aliases (HAD_POC, BREAKS_INTO, CONTAINS_TODO, …) fold into
+    // `contains` via relIs, so old and new edges walk identically.
     const next = parents.find(
       (p) =>
-        p.relation === "RAISED" ||
-        p.relation === "HAD_POC" ||
-        p.relation === "BREAKS_INTO" ||
-        // CONTAINS_TODO was folded into the canonical `contains` predicate;
-        // kept for edges stored under the old name.
-        p.relation === "CONTAINS_TODO" ||
-        p.relation === "contains"
+        relIs(p.relation, "RAISED") || relIs(p.relation, "contains")
     )
     if (!next || seen.has(next.from)) break
     const node = index.byId.get(next.from)
@@ -60,8 +57,7 @@ export function repoOf(index: HarnessIndex, nodeId: string): HarnessTreeNode | n
 /**
  * POC nodes a sprint-domain node inherits evidence from: explicit
  * depends_on / EVIDENCED_BY edges upward, so a sprint or todo resolves to
- * the sessions that motivated it. DERIVES_FROM was folded into the
- * canonical `depends_on` predicate; kept for edges stored under the old name.
+ * the sessions that motivated it.
  */
 export function evidencePocsOf(index: HarnessIndex, nodeId: string): HarnessTreeNode[] {
   const pocs: HarnessTreeNode[] = []
@@ -69,7 +65,7 @@ export function evidencePocsOf(index: HarnessIndex, nodeId: string): HarnessTree
   let current = nodeId
   for (;;) {
     const next = (index.parentsOf.get(current) ?? []).find(
-      (p) => p.relation === "DERIVES_FROM" || p.relation === "EVIDENCED_BY" || p.relation === "depends_on"
+      (p) => relIs(p.relation, "EVIDENCED_BY") || relIs(p.relation, "depends_on")
     )
     if (!next || seen.has(next.from)) break
     const node = index.byId.get(next.from)

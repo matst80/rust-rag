@@ -51,6 +51,61 @@ pub const HARNESS_RESOURCE: &str = "harness_resource";
 pub const HARNESS_SCALING: &str = "harness_scaling";
 pub const HARNESS_VALIDATION: &str = "harness_validation";
 pub const HARNESS_ROLLOUT: &str = "harness_rollout";
+/// Consolidated POC-raised concern (`assets/schemas/harness_concern.json`):
+/// one type with a `kind` discriminator (`risk` | `compliance` | `resource` |
+/// `scaling` | `validation` | `rollout`) instead of six near-identical
+/// types. New concerns should always use this type; the six legacy types
+/// above still fetch into the tree but are normalized to `harness_concern`
+/// by [`normalize_concern`] so consumers only deal with one shape.
+pub const HARNESS_CONCERN: &str = "harness_concern";
+/// `kind` values for [`HARNESS_CONCERN`], one per legacy concern type.
+pub const CONCERN_KINDS: [&str; 6] = [
+    "risk",
+    "compliance",
+    "resource",
+    "scaling",
+    "validation",
+    "rollout",
+];
+/// Legacy concern type → `harness_concern` kind. Kept so entries stored
+/// before the consolidation still render without a data migration.
+const LEGACY_CONCERN_KINDS: [(&str, &str); 6] = [
+    (HARNESS_RISK, "risk"),
+    (HARNESS_COMPLIANCE, "compliance"),
+    (HARNESS_RESOURCE, "resource"),
+    (HARNESS_SCALING, "scaling"),
+    (HARNESS_VALIDATION, "validation"),
+    (HARNESS_ROLLOUT, "rollout"),
+];
+
+/// Normalize a concern item to the consolidated shape: returns the
+/// (`type_name`, `data`) the tree should expose. New-style `harness_concern`
+/// items pass through untouched; legacy per-kind types are rewritten to
+/// `harness_concern` with `data.kind` injected. Non-concern items return
+/// their stored values unchanged.
+///
+/// Edge case: legacy `harness_resource` already has a `kind` field (the
+/// resource kind, e.g. `"database"`). It moves to `resource_kind` before
+/// `kind` is claimed by the discriminator, so no payload data is lost.
+pub fn normalize_concern(type_name: &str, data: Option<Value>) -> (String, Option<Value>) {
+    if type_name == HARNESS_CONCERN {
+        return (type_name.to_owned(), data);
+    }
+    let Some((_, kind)) = LEGACY_CONCERN_KINDS.iter().find(|(t, _)| *t == type_name) else {
+        return (type_name.to_owned(), data);
+    };
+    let mut map = match data.and_then(|v| v.as_object().cloned()) {
+        Some(map) => map,
+        None => serde_json::Map::new(),
+    };
+    if type_name == HARNESS_RESOURCE {
+        if let Some(k) = map.remove("kind") {
+            map.insert("resource_kind".to_owned(), k);
+        }
+    }
+    map.insert("kind".to_owned(), Value::String(kind.to_string()));
+    (HARNESS_CONCERN.to_owned(), Some(Value::Object(map)))
+}
 /// Free-form session-evidence statements the agents store while working
 /// (`{"statement": …}`, no schema). Not part of the POC hierarchy, but they
 /// carry session context, so the tree includes them as evidence nodes.
@@ -61,7 +116,10 @@ pub const HARNESS_ROLLOUT: &str = "harness_rollout";
 pub const HARNESS_EVIDENCE: &str = "harness_evidence";
 
 /// Every harness node type, including audit verdicts and POC-domain nodes.
-pub const HARNESS_NODE_TYPES: [&str; 17] = [
+/// The six legacy concern types stay in this fetch list so pre-consolidation
+/// entries still load; [`normalize_concern`] rewrites them to
+/// `harness_concern` at tree assembly, so consumers only see one shape.
+pub const HARNESS_NODE_TYPES: [&str; 18] = [
     HARNESS_DOC,
     HARNESS_PLAN,
     HARNESS_SPRINT,
@@ -72,6 +130,7 @@ pub const HARNESS_NODE_TYPES: [&str; 17] = [
     HARNESS_REPO,
     HARNESS_POC,
     HARNESS_DECISION,
+    HARNESS_CONCERN,
     HARNESS_RISK,
     HARNESS_COMPLIANCE,
     HARNESS_RESOURCE,
@@ -91,6 +150,8 @@ pub const HARNESS_NODE_TYPES: [&str; 17] = [
 /// graph traversal instead of being a private vocabulary. What remains here
 /// is genuinely harness-domain: audit/POC lifecycle relations with no
 /// canonical equivalent. See `docs/harness.md` ("Edge relations").
+/// Deprecated for new edges: plan → sprint nesting is now `contains`
+/// (same direction, same nesting). Kept so existing edges still nest.
 pub const REL_BREAKS_INTO: &str = "BREAKS_INTO";
 pub const REL_ENFORCES_DOC: &str = "ENFORCES_DOC";
 pub const REL_DELEGATES_TO: &str = "DELEGATES_TO";
@@ -100,6 +161,8 @@ pub const REL_AUDITED: &str = "AUDITED";
 
 /// POC-domain relations: repo → poc session, session → promoted memory,
 /// rollout plan → resource, decision → superseded decision.
+/// Deprecated for new edges: repo → session nesting is now `contains`
+/// (same direction, same nesting). Kept so existing edges still nest.
 pub const REL_HAD_POC: &str = "HAD_POC";
 pub const REL_RAISED: &str = "RAISED";
 pub const REL_ADDRESSED_BY: &str = "ADDRESSED_BY";
@@ -391,7 +454,10 @@ pub fn assemble_tree(
 
     let mut nodes = Vec::with_capacity(items.len());
     for item in &items {
-        let type_name = item.type_name.clone().unwrap_or_default();
+        let stored_type = item.type_name.clone().unwrap_or_default();
+        // Legacy per-kind concerns (harness_risk, …) surface as the
+        // consolidated harness_concern shape — one type for all consumers.
+        let (type_name, data) = normalize_concern(&stored_type, item.data.clone());
         let verdict = latest_audit.get(&item.id).and_then(|(audit, audited_at)| {
             parse_audit(audit).map(|(a, _)| AuditVerdict {
                 audit_id: audit.id.clone(),
@@ -432,7 +498,7 @@ pub fn assemble_tree(
             type_name,
             title: display_title(item),
             state: data_state(item),
-            data: item.data.clone(),
+            data,
             source_id: item.source_id.clone(),
             created_at: item.created_at,
             updated_at: item.updated_at,
@@ -1482,6 +1548,41 @@ mod tests {
         let tree = assemble_tree(items, Vec::new(), memories);
         assert_eq!(tree.memories.len(), 1);
         assert_eq!(tree.memories[0].poc_id, "poc-1");
+    }
+
+    #[test]
+    fn legacy_concerns_normalize_to_harness_concern() {
+        let items = vec![
+            item(
+                "risk-1",
+                HARNESS_RISK,
+                json!({"title": "Embedding latency", "severity": "high"}),
+            ),
+            item(
+                "res-1",
+                HARNESS_RESOURCE,
+                json!({"title": "GPU pool", "kind": "k8s"}),
+            ),
+            item(
+                "c-1",
+                HARNESS_CONCERN,
+                json!({"title": "New style", "kind": "validation", "status": "needed"}),
+            ),
+        ];
+        let tree = assemble_tree(items, Vec::new(), Vec::new());
+        let risk = tree.nodes.iter().find(|n| n.id == "risk-1").unwrap();
+        assert_eq!(risk.type_name, HARNESS_CONCERN);
+        assert_eq!(risk.data.as_ref().unwrap()["kind"], json!("risk"));
+        assert_eq!(risk.data.as_ref().unwrap()["severity"], json!("high"));
+        // Legacy resource `kind` moves aside so the discriminator can claim it.
+        let res = tree.nodes.iter().find(|n| n.id == "res-1").unwrap();
+        assert_eq!(res.type_name, HARNESS_CONCERN);
+        assert_eq!(res.data.as_ref().unwrap()["kind"], json!("resource"));
+        assert_eq!(res.data.as_ref().unwrap()["resource_kind"], json!("k8s"));
+        // New-style concerns pass through untouched.
+        let concern = tree.nodes.iter().find(|n| n.id == "c-1").unwrap();
+        assert_eq!(concern.type_name, HARNESS_CONCERN);
+        assert_eq!(concern.data.as_ref().unwrap()["status"], json!("needed"));
     }
 
     #[test]

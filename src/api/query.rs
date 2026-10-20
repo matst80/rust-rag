@@ -324,11 +324,13 @@ async fn run_search(
 
     let results =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
-            let (embedding, sparse) = embedder.embed_both(&query_owned)?;
-            let hits = store.search_hybrid(
-                &query_owned,
+            // Dense-only: hybrid RRF (unweighted dense+sparse sum + strong
+            // recency decay) currently ranks worse than pure dense on
+            // keyword-heavy queries, so assisted sticks to the dense path
+            // until hybrid is fixed.
+            let embedding = embedder.embed(&query_owned)?;
+            let hits = store.search(
                 &embedding,
-                &sparse,
                 top_k,
                 source_owned.as_deref(),
                 type_name_owned.as_deref(),
@@ -336,6 +338,11 @@ async fn run_search(
             Ok(hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
+                .filter(|hit| {
+                    !(hit.id.starts_with("ext:")
+                        || hit.source_id == "external"
+                        || hit.metadata.get("external").and_then(|v| v.as_bool()) == Some(true))
+                })
                 .map(SearchResultPayload::from)
                 .collect())
         })

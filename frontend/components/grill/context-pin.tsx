@@ -5,6 +5,7 @@ import useSWR from "swr"
 import { Bot, Database, FileText, Loader2, Pin } from "lucide-react"
 import { api } from "@/lib/api"
 import { useGraphNeighborhood } from "@/lib/api"
+import { normalizeRelation } from "@/lib/harness"
 import type {
   Entry,
   HarnessTreeEdge,
@@ -39,11 +40,11 @@ export function ContextPin({
     let agent: Entry | null = null
     for (const edge of neighborhood?.edges ?? []) {
       if (edge.edge_type !== "manual") continue
-      const relation = edge.relationship?.toUpperCase()
+      const relation = normalizeRelation(edge.relationship).toUpperCase()
       const from = nodesById.get(edge.source_id)
       const to = nodesById.get(edge.target_id)
       if (!from || !to) continue
-      if (relation === "ENFORCES_DOC" || relation === "GOVERNED_BY") {
+      if (relation === "ENFORCES_DOC") {
         const doc = to.type === "harness_doc" ? to : from
         if (!docs.some((d) => d.id === doc.id)) docs.push(doc)
       } else if (relation === "DELEGATES_TO" && to.type === "harness_agent") {

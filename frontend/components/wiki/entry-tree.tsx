@@ -1,13 +1,19 @@
 "use client"
 
+import { ListSkeleton } from "@/components/ui/list-skeleton"
+
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type Ref } from "react"
 import {
   ArrowUpRight,
   ChevronDown,
   ChevronRight,
+  Copy,
+  Check,
   Database,
+  Eye,
+  EyeOff,
   FileText,
   Folder,
   FolderOpen,
@@ -16,6 +22,7 @@ import {
   GripVertical,
   Inbox,
   Menu,
+  Search,
   X,
 } from "lucide-react"
 import { MarkdownView } from "@/components/entries/markdown-view"
@@ -30,7 +37,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
-import { useEntriesPaths, useEntriesTree } from "@/lib/api"
+import { useEntriesPaths, useEntriesTree, type Entry } from "@/lib/api"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useSessionState } from "@/hooks/use-session-state"
 import { useWikiMoveEntry } from "@/hooks/use-wiki-move"
@@ -40,7 +47,13 @@ import {
   readEntryDragData,
   setEntryDragData,
 } from "@/lib/drag-entry"
-import { cn, entryTitle } from "@/lib/utils"
+import { cn, entryTitle, formatRelativeTime } from "@/lib/utils"
+import {
+  getShowHiddenSources,
+  isHiddenByDefault,
+  setShowHiddenSources,
+} from "@/lib/sources"
+import { EntryTagList } from "@/components/ui/entry-tag"
 import {
   ancestorChain,
   buildSourceTrees,
@@ -62,7 +75,17 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
   const isMobile = useIsMobile()
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [mobileInboxOpen, setMobileInboxOpen] = useState(false)
-  const [inboxOpen, setInboxOpen] = useSessionState("wiki-inbox-open", true)
+  const [inboxOpen, setInboxOpen] = useSessionState("wiki-inbox-open-v2", false)
+  const [sourceFilter, setSourceFilter] = useState("")
+  const [showHidden, setShowHidden] = useState(false)
+  useEffect(() => {
+    setShowHidden(getShowHiddenSources())
+  }, [])
+  const toggleShowHidden = () => {
+    const next = !showHidden
+    setShowHidden(next)
+    setShowHiddenSources(next)
+  }
   const { data: pathsResp } = useEntriesPaths()
   const { data: tree, isLoading: treeLoading } = useEntriesTree(sourceId, prefix)
   const [activeDropTarget, setActiveDropTarget] = useState<string | null>(null)
@@ -75,6 +98,23 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
     () => (pathsResp ? buildSourceTrees(pathsResp.paths) : []),
     [pathsResp]
   )
+  const { visibleSources, hiddenSources } = useMemo(() => {
+    const q = sourceFilter.trim().toLowerCase()
+    const matches = (s: SourceTree) => {
+      if (!q) return true
+      if (s.sourceId.toLowerCase().includes(q)) return true
+      return s.roots.some((r) => r.path.toLowerCase().includes(q))
+    }
+    const visible: SourceTree[] = []
+    const hidden: SourceTree[] = []
+    for (const s of sourceTrees) {
+      if (!matches(s)) continue
+      if (isHiddenByDefault(s.sourceId)) hidden.push(s)
+      else visible.push(s)
+    }
+    return { visibleSources: visible, hiddenSources: hidden }
+  }, [sourceTrees, sourceFilter])
+  const listedSources = showHidden ? [...visibleSources, ...hiddenSources] : visibleSources
   const activeChain = useMemo(() => ancestorChain(prefix), [prefix])
   const segments = prefix ? prefix.split("/") : []
 
@@ -115,6 +155,30 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
           </Button>
         )}
       </div>
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={sourceFilter}
+            onChange={(e) => setSourceFilter(e.target.value)}
+            placeholder="Filter collections / folders…"
+            className="h-8 w-full rounded border border-border bg-background pl-7 pr-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        </div>
+        {hiddenSources.length > 0 && (
+          <button
+            type="button"
+            onClick={toggleShowHidden}
+            className="mt-1.5 flex w-full items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-colors hover:text-primary"
+            title={showHidden ? "Hide agent memories & todos" : `Show ${hiddenSources.length} hidden (memories, todos)`}
+          >
+            {showHidden ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
+            <span className="flex-1 text-left">
+              {showHidden ? "Hide memories" : `Hidden · ${hiddenSources.length}`}
+            </span>
+          </button>
+        )}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-2">
         {!pathsResp && (
           <p className="font-mono text-xs text-muted-foreground px-3">Loading…</p>
@@ -124,7 +188,14 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
             No entries with paths yet. Drag entries here or set a `path` on an entry to populate the wiki.
           </p>
         )}
-        {sourceTrees.map((s) => (
+        {pathsResp && sourceTrees.length > 0 && listedSources.length === 0 && (
+          <p className="font-mono text-xs text-muted-foreground px-3">
+            {sourceFilter.trim()
+              ? `No collections match “${sourceFilter.trim()}”.`
+              : `${hiddenSources.length} hidden collections (memories, todos). Toggle “Hidden” above to show them.`}
+          </p>
+        )}
+        {listedSources.map((s) => (
           <SourceRoot
             key={s.sourceId}
             tree={s}
@@ -261,7 +332,7 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
         }}
       >
         {treeLoading && (
-          <p className="font-mono text-xs text-muted-foreground">Loading…</p>
+          <ListSkeleton compact />
         )}
 
         {tree && tree.children.length === 0 && tree.entries.length === 0 && (
@@ -340,59 +411,12 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
             </h2>
             <div className="flex flex-col gap-6">
               {tree.entries.map((e) => (
-                <article
+                <WikiEntryCard
                   key={e.id}
-                  id={`entry-${e.id}`}
-                  ref={e.id === selectedEntryId ? selectedEntryRef : undefined}
-                  className={cn(
-                    "border bg-card transition-colors",
-                    e.id === selectedEntryId
-                      ? "border-primary ring-2 ring-primary/20"
-                      : "border-border hover:border-primary/30"
-                  )}
-                >
-                  <header className="flex items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-2.5">
-                    <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <div
-                        draggable
-                        onDragStart={(evt) => {
-                          setEntryDragData(evt.dataTransfer, {
-                            id: e.id,
-                            source_id: e.source_id,
-                            path: e.path,
-                            title: entryTitle(e, 80),
-                          })
-                        }}
-                        onDragEnd={() => clearEntryDrag()}
-                        className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-primary transition-colors p-0.5"
-                        title="Drag entry to re-organize into another Wiki folder"
-                      >
-                        <GripVertical className="size-3.5" />
-                      </div>
-                      <FileText className="size-3.5 text-muted-foreground shrink-0" />
-                      <Link
-                        href={`/entries/${encodeURIComponent(e.id)}`}
-                        className="text-sm font-semibold truncate hover:text-primary transition-colors"
-                        title={e.id}
-                      >
-                        {entryTitle(e)}
-                      </Link>
-                      <span className="font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground shrink-0">
-                        {e.source_id}
-                      </span>
-                    </div>
-                    <Link
-                      href={`/entries/${encodeURIComponent(e.id)}`}
-                      className="flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground hover:text-primary transition-colors shrink-0"
-                      title="Open in detail view"
-                    >
-                      Open <ArrowUpRight className="size-3" />
-                    </Link>
-                  </header>
-                  <div className="px-5 py-4">
-                    <MarkdownView content={e.text} />
-                  </div>
-                </article>
+                  entry={e}
+                  selected={e.id === selectedEntryId}
+                  selectedRef={e.id === selectedEntryId ? selectedEntryRef : undefined}
+                />
               ))}
             </div>
           </div>
@@ -464,6 +488,146 @@ export function EntryTree({ sourceId, prefix, selectedEntryId }: EntryTreeProps)
   )
 }
 
+/** Plain-text excerpt for collapsed wiki cards: markdown stripped, whitespace collapsed. */
+function cardExcerpt(text: string, max = 420): string {
+  const joined = (text ?? "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/[*_>]+/g, "")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return joined.length > max ? `${joined.slice(0, max)}…` : joined
+}
+
+function WikiEntryCard({
+  entry,
+  selected,
+  selectedRef,
+}: {
+  entry: Entry
+  selected: boolean
+  selectedRef: Ref<HTMLElement> | undefined
+}) {
+  const [copied, setCopied] = useState(false)
+  // Long entries render collapsed (fast folders) unless deep-linked.
+  const [expanded, setExpanded] = useState(selected)
+  useEffect(() => {
+    if (selected) setExpanded(true)
+  }, [selected])
+  const tags = entry.analysis?.tags ?? []
+  const excerpt = cardExcerpt(entry.text)
+  const isLong = entry.text.length > 600
+  const copyLink = async () => {
+    try {
+      const url = `${window.location.origin}/entries/${encodeURIComponent(entry.id)}`
+      await navigator.clipboard.writeText(url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard unavailable
+    }
+  }
+  return (
+    <article
+      id={`entry-${entry.id}`}
+      ref={selectedRef}
+      className={cn(
+        "border bg-card transition-colors",
+        selected ? "border-primary ring-2 ring-primary/20" : "border-border hover:border-primary/30"
+      )}
+    >
+      <header className="flex items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-2.5">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <div
+            draggable
+            onDragStart={(evt) => {
+              setEntryDragData(evt.dataTransfer, {
+                id: entry.id,
+                source_id: entry.source_id,
+                path: entry.path,
+                title: entryTitle(entry, 80),
+              })
+            }}
+            onDragEnd={() => clearEntryDrag()}
+            className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-primary transition-colors p-0.5"
+            title="Drag entry to re-organize into another Wiki folder"
+          >
+            <GripVertical className="size-3.5" />
+          </div>
+          <FileText className="size-3.5 text-muted-foreground shrink-0" />
+          <Link
+            href={`/entries/${encodeURIComponent(entry.id)}`}
+            className="text-sm font-semibold truncate hover:text-primary transition-colors"
+            title={entry.id}
+          >
+            {entryTitle(entry)}
+          </Link>
+          <span className="font-mono text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 border border-border text-muted-foreground shrink-0">
+            {entry.source_id}
+          </span>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={copyLink}
+            title="Copy link to this entry"
+            className="flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-primary"
+          >
+            {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+          </button>
+          <Link
+            href={`/entries/${encodeURIComponent(entry.id)}?tab=graph`}
+            className="hidden sm:flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground hover:text-primary transition-colors px-1.5"
+            title="Open links / graph for this entry"
+          >
+            Links
+          </Link>
+          <Link
+            href={`/entries/${encodeURIComponent(entry.id)}`}
+            className="flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground hover:text-primary transition-colors"
+            title="Open in detail view"
+          >
+            Open <ArrowUpRight className="size-3" />
+          </Link>
+        </div>
+      </header>
+      {(tags.length > 0 || entry.path) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-4 py-1.5">
+          {entry.path && (
+            <span className="font-mono text-[10px] text-muted-foreground" title="Wiki path">
+              {entry.path}
+            </span>
+          )}
+          {tags.length > 0 && <EntryTagList tags={tags.slice(0, 6)} />}
+          <span className="ml-auto font-mono text-[10px] text-muted-foreground/70" title={`Updated ${new Date(entry.updated_at).toLocaleString()}`}>
+            {formatRelativeTime(entry.updated_at)}
+          </span>
+        </div>
+      )}
+      <div className="px-5 py-4">
+        {expanded || !isLong ? (
+          <MarkdownView content={entry.text} />
+        ) : (
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/80">{excerpt}</p>
+        )}
+        {isLong && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-3 font-mono text-[10px] font-bold uppercase tracking-[1px] text-muted-foreground transition-colors hover:text-primary"
+          >
+            {expanded ? "Show less" : "Read full entry"}
+          </button>
+        )}
+      </div>
+    </article>
+  )
+}
+
 interface SourceRootProps {
   tree: SourceTree
   selectedSourceId: string
@@ -508,9 +672,11 @@ function SourceRoot({
     <div className="flex flex-col">
       <div
         className={cn(
-          "flex items-center transition-colors rounded-sm",
+          "flex items-center transition-colors rounded-sm border-l-2",
+          isSelected ? "bg-primary/10 border-primary" : "border-transparent",
           isDragOver && "bg-primary/10 ring-2 ring-primary"
         )}
+        style={{ paddingLeft: "0.25rem" }}
         onDragOver={(e) => {
           if (!onDropEntry || !hasEntryDragData(e.dataTransfer)) return
           e.preventDefault()
@@ -538,7 +704,7 @@ function SourceRoot({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="shrink-0 flex items-center justify-center size-5 ml-1 text-muted-foreground hover:text-foreground transition-colors"
+          className="shrink-0 flex items-center justify-center size-5 text-muted-foreground hover:text-foreground transition-colors"
           aria-label={open ? "Collapse" : "Expand"}
         >
           {open ? (
@@ -550,10 +716,8 @@ function SourceRoot({
         <Link
           href={wikiHref(tree.sourceId)}
           className={cn(
-            "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs font-bold uppercase tracking-wider transition-colors hover:bg-card",
-            isSelected
-              ? "bg-primary/10 text-primary border-l-2 border-primary"
-              : "text-foreground border-l-2 border-transparent"
+            "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs font-bold uppercase tracking-wider transition-colors rounded-sm hover:bg-card",
+            isSelected ? "text-primary" : "text-foreground"
           )}
         >
           {open ? (

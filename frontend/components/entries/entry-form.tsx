@@ -219,6 +219,9 @@ export function EntryForm({
           <div className="flex items-center justify-between">
             <Label htmlFor="text" className="flex items-center gap-1.5">
               Content
+              <span className="font-mono text-[10px] font-normal normal-case tracking-normal text-muted-foreground/70">
+                Markdown · [[entry-id]] links to entries
+              </span>
             </Label>
             <div className="flex items-center gap-2">
               <WhisperTranscribe

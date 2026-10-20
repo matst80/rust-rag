@@ -20,6 +20,7 @@ import type {
   LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
+  BulkDeleteResult,
   ChatCompletionChunk,
   ChatCompletionToolResult,
   ChatCompletionsRequest,
@@ -60,6 +61,10 @@ import type {
   CodeUploadResult,
   HarnessTreeResponse,
   TokenCountResponse,
+  BacklinksResponse,
+  DuplicateTitlesResponse,
+  MetadataFacetsRequest,
+  MetadataFacetsResponse,
 } from "./types"
 import { rumTraceHeaders } from "@/lib/rum"
 
@@ -454,7 +459,15 @@ export async function getItems(
   if (options.sort_order) params.append("sort_order", options.sort_order)
   if (options.path_prefix) params.append("path_prefix", options.path_prefix)
   if (options.type) params.append("type", options.type)
+  if (options.needs_home !== undefined) params.append("needs_home", String(options.needs_home))
+  if (options.search) params.append("search", options.search)
+  if (options.min_created_at !== undefined)
+    params.append("min_created_at", options.min_created_at.toString())
+  if (options.max_created_at !== undefined)
+    params.append("max_created_at", options.max_created_at.toString())
   if (options.has_path !== undefined) params.append("has_path", String(options.has_path))
+  if (options.include_external !== undefined)
+    params.append("include_external", String(options.include_external))
   if (options.metadata) {
     for (const [key, value] of Object.entries(options.metadata)) {
       if (key && value) params.append(key, value)
@@ -660,6 +673,13 @@ export async function deleteItem(id: string): Promise<void> {
   })
 }
 
+export async function bulkDeleteItems(ids: string[]): Promise<BulkDeleteResult> {
+  return request<BulkDeleteResult>(`/admin/items/delete`, {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  })
+}
+
 export async function createItemShare(
   id: string,
   data?: CreateShareRequest
@@ -714,6 +734,47 @@ export async function getGraphStatus(): Promise<GraphStatus> {
 export async function getEdges(): Promise<Edge[]> {
   const response = await request<GraphEdgesResponse>("/api/graph/edges")
   return ensureArray(response.edges, "graph edges").map(toEdge)
+}
+
+export async function getBacklinks(itemId: string): Promise<BacklinksResponse> {
+  const response = await request<BacklinksResponse>(
+    `/api/items/${encodeURIComponent(itemId)}/backlinks`
+  )
+  return {
+    id: response.id,
+    title: response.title,
+    backlinks: Array.isArray(response.backlinks) ? response.backlinks : [],
+  }
+}
+
+export async function getMetadataFacets(
+  options: MetadataFacetsRequest = {}
+): Promise<MetadataFacetsResponse> {
+  const params = new URLSearchParams()
+  if (options.source_id) params.append("source_id", options.source_id)
+  if (options.path_prefix) params.append("path_prefix", options.path_prefix)
+  if (options.type) params.append("type", options.type)
+  if (options.needs_home !== undefined)
+    params.append("needs_home", String(options.needs_home))
+  if (options.search) params.append("search", options.search)
+  if (options.sample !== undefined) params.append("sample", String(options.sample))
+  const queryString = params.toString() ? `?${params.toString()}` : ""
+  const response = await request<MetadataFacetsResponse>(
+    `/admin/items/metadata-facets${queryString}`
+  )
+  return {
+    facets: Array.isArray(response.facets) ? response.facets : [],
+    scanned: response.scanned ?? 0,
+    truncated: response.truncated ?? false,
+  }
+}
+
+export async function getDuplicateTitles(): Promise<DuplicateTitlesResponse> {
+  const response = await request<DuplicateTitlesResponse>("/api/items/duplicates/titles")
+  return {
+    scanned: response.scanned,
+    groups: Array.isArray(response.groups) ? response.groups : [],
+  }
 }
 
 export async function getEdgesForItem(itemId: string): Promise<Edge[]> {
@@ -965,6 +1026,7 @@ export const api = {
     create: createItem,
     update: updateItem,
     delete: deleteItem,
+    bulkDelete: bulkDeleteItems,
     rechunk: rechunkItem,
     llmRechunk: llmRechunkItem,
     reanalyze: reanalyzeItem,
@@ -999,6 +1061,15 @@ export const api = {
     memory: listManagerMemory,
     deleteMemory: deleteManagerMemory,
     clearMemory: clearManagerMemory,
+  },
+  backlinks: {
+    get: getBacklinks,
+  },
+  facets: {
+    metadata: getMetadataFacets,
+  },
+  duplicates: {
+    titles: getDuplicateTitles,
   },
   edges: {
     list: getEdges,

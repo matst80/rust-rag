@@ -11,6 +11,7 @@ data:
   RAG_MODEL_PATH: "/app/assets/bge-small-en-v1.5/model.onnx"
   RAG_TOKENIZER_PATH: "/app/assets/bge-small-en-v1.5/tokenizer.json"
   RAG_EMBEDDING_DIMENSION: "384"
+  RAG_EMBEDDING_POOLING: "cls"
   RAG_INTRA_THREADS: "2"
   RAG_GRAPH_ENABLED: "false"
   RAG_GRAPH_BUILD_ON_STARTUP: "false"

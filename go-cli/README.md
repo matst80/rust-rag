@@ -31,7 +31,9 @@ rag entry smart [text]            # LLM splits text + assigns source_id/metadata
 rag entry get <id>
 rag entry update <id>             # --text/--metadata/--source/--path/--type/--data
 rag entry delete <id>
-rag entry list                    # -s source, --path-prefix, --type, -n limit
+rag entry delete-many <id> [...]  # bulk delete up to 200 (dedup passes)
+rag entry list                    # -s source, --path-prefix, --type, --search, --meta k=v, --min/max-importance, -n limit
+rag entry dups                    # near-dup scan: shingles + sub-shingle token fallback (--meta, --min-importance, --threshold, --shingle)
 rag entry browse                  # -s source, --prefix
 rag entry related <id>            # graph neighborhood (--depth, --limit, --edge-type)
 rag entry analyze <id|->          # LLM analysis (id, or `-` for stdin text)
@@ -51,7 +53,10 @@ rag attach add <entry_id> <url>
 rag attach list <entry_id>
 rag attach rm <attachment_id>
 
-rag dream
+rag dream                         # POST /api/dream (202 + summary; --source, --apply, --limit)
+rag dream clusters                # persisted dream clusters (--source, --round, -n)
+rag dream actions                 # dream audit rows: proposals + applied (--proposals/--applied, --item, -n)
+rag dream apply                   # merge near-duplicate pairs: plan by default, --apply deletes (never looser than server threshold)
 rag health
 ```
 
@@ -67,6 +72,8 @@ Global flags:
 rag entry store "fact about caching" -s knowledge --tags rag,caching
 cat doc.md | rag entry store -s documents --path docs/intro --title "Intro"
 rag entry list -s project:rust-rag:todos -n 5
+rag entry list -s memory --meta importance=4 -n 5
+rag entry dups -s memory --max-pairs 20   # manual dreaming: full-source dup scan
 rag search "vector store sqlite" -k 3 --rerank --show-related
 rag ingest https://example.com/article -s web --llm-clean
 rag entry image ./screenshot.png -s screenshots

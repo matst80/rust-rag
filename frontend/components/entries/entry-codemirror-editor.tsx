@@ -2,6 +2,9 @@
 
 import React, { useMemo, useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
+import { autocompletion, type CompletionContext, type Completion } from "@codemirror/autocomplete";
+import { api } from "@/lib/api";
+import { entryTitle } from "@/lib/utils";
 import { markdown } from "@codemirror/lang-markdown";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, keymap } from "@codemirror/view";
@@ -18,6 +21,7 @@ import {
   Code,
   Quote,
   CheckSquare,
+  Hash,
   Link as LinkIcon,
   Users,
   Wifi,
@@ -27,6 +31,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { InlineCommentPopover } from "./inline-comment-popover";
+
+function insertBlock(text: string, placeholder: string): NonNullable<Completion["apply"]> {
+  return (view, _completion, from, to) => {
+    const start = from + text.indexOf(placeholder);
+    view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: start, head: start + placeholder.length } });
+  };
+}
 
 // Preset colors for peer cursors
 const USER_COLORS = [
@@ -164,14 +175,41 @@ export function EntryCodeMirrorEditor({
     yjsSetup.ytext.observe(observer);
     return () => {
       yjsSetup.ytext.unobserve(observer);
-      yjsSetup.doc.destroy();
+
     };
   }, [yjsSetup, onChange]);
+
+  useEffect(() => () => { yjsSetup?.doc.destroy(); }, [yjsSetup]);
 
   // Extensions
   const extensions = useMemo(() => {
     const extList = [
       markdown(),
+      autocompletion({ override: [async (context: CompletionContext) => {
+        const slash = context.matchBefore(/^\s*\/\w*$/);
+        if (slash) {
+          const from = slash.from + slash.text.indexOf("/");
+          return { from, options: [
+            { label: "/table", detail: "Table", apply: insertBlock("| Column | Column |\n| --- | --- |\n| Value | Value |\n", "Column") },
+            { label: "/callout", detail: "Callout", apply: insertBlock("> [!NOTE] Note\n> Write here\n", "Write here") },
+            { label: "/code", detail: "Code block", apply: insertBlock("```text\ncode\n```\n", "code") },
+            { label: "/toggle", detail: "Collapsible section", apply: insertBlock("> [!TOGGLE] Details\n> Write here\n", "Write here") },
+          ], validFor: /\/\w*/ };
+        }
+        const mention = context.matchBefore(/(?:^|\s)@[^@\n]*$/);
+        if (!mention) return null;
+        const from = mention.from + mention.text.indexOf("@");
+        const query = context.state.sliceDoc(from + 1, context.pos).trim();
+        if (!query) return null;
+        try {
+          const results = await api.search({ query, top_k: 8, hybrid: true });
+          if (context.aborted) return null;
+          return { from, filter: false, options: results.results.map(entry => ({
+            label: entryTitle(entry), detail: entry.id,
+            apply: `[[${entry.id}|${entryTitle(entry).replace(/[\]\n|]/g, " ")}]]`,
+          })) };
+        } catch { return null; }
+      }] }),
       EditorView.lineWrapping,
       keymap.of([
         {
@@ -359,6 +397,16 @@ export function EntryCodeMirrorEditor({
           >
             <LinkIcon className="size-3.5" />
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-7 text-xs hover:text-foreground"
+            onClick={() => applyFormat("[[", "]]", "entry-id")}
+            title="Wikilink [[entry-id]] or [[Title|Label]]"
+          >
+            <Hash className="size-3.5" />
+          </Button>
 
           {onAddComment && (
             <>
@@ -416,7 +464,7 @@ export function EntryCodeMirrorEditor({
             editorRef.current = view;
           }}
           onChange={(val) => {
-            if (!enableCollab) {
+            if (!yjsSetup) {
               onChange(val);
             }
           }}
@@ -442,7 +490,7 @@ export function EntryCodeMirrorEditor({
         </div>
 
         <div className="flex items-center gap-2 text-[10px] opacity-70">
-          <span>Markdown</span>
+          <span>/ commands · @ entry</span>
           <span>•</span>
           <span>⌘S to save</span>
         </div>

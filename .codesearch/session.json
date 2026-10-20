@@ -1,0 +1,74 @@
+{
+  "root": "/home/mats/github.com/matst80/rust-rag",
+  "recent_files": [
+    "src/api/dream.rs",
+    "src/api/dreaming.rs",
+    "eval/mine_queries.py"
+  ],
+  "queries": [
+    {
+      "query": "main",
+      "command": "tree",
+      "at": "2026-10-19T11:36:14.693659791Z",
+      "focus_path": "eval/mine_queries.py"
+    },
+    {
+      "query": "dreaming consolidation",
+      "command": "query",
+      "at": "2026-10-20T10:09:55.167741641Z",
+      "focus_path": "src/api/dreaming.rs"
+    },
+    {
+      "query": "src/api/dream.rs#apply_dreaming_round",
+      "command": "tree",
+      "at": "2026-10-20T10:10:05.22925173Z",
+      "focus_path": "src/api/dream.rs"
+    },
+    {
+      "query": "src/cluster.rs#near_duplicates",
+      "command": "related",
+      "at": "2026-10-20T10:10:05.355649634Z"
+    },
+    {
+      "query": "src/api/dream.rs",
+      "command": "outline",
+      "at": "2026-10-20T10:10:21.598109031Z",
+      "focus_path": "src/api/dream.rs"
+    },
+    {
+      "query": "pick_merge_keeper",
+      "command": "grep",
+      "at": "2026-10-20T10:10:35.304473678Z",
+      "focus_path": "src/api/dream.rs"
+    }
+  ],
+  "cards": [
+    {
+      "id": "card-ec8e26af",
+      "action": "move",
+      "at": "2026-10-20T10:03:58.640721647Z"
+    },
+    {
+      "id": "card-e9d8243d",
+      "action": "move",
+      "at": "2026-10-20T10:03:58.70792364Z"
+    },
+    {
+      "id": "card-e55cdaa0",
+      "action": "move",
+      "at": "2026-10-20T10:03:58.768271579Z"
+    },
+    {
+      "id": "card-8051120d",
+      "action": "move",
+      "at": "2026-10-20T10:04:11.394010859Z"
+    },
+    {
+      "id": "card-0569a53e",
+      "action": "move",
+      "at": "2026-10-20T10:04:11.46435356Z"
+    }
+  ],
+  "ast_pins": [],
+  "updated_at": "2026-10-20T10:10:35.304479168Z"
+}

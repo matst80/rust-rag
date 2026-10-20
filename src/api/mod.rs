@@ -42,6 +42,7 @@ pub use tombstones::{Tombstone, TombstoneTracker};
 
 pub use error::ApiError;
 pub(crate) use error::{current_timestamp_millis, metadata_schema};
+use serde_json::Value;
 pub use map::build_map_points;
 pub use router::router;
 pub use state::{AppState, EmbedderHandle};
@@ -88,7 +89,8 @@ mod tests {
         AuthStore, CategorySummary, ChannelSummary, DuplicateEdgeGroup, GraphEdgeRecord,
         GraphEdgeType, GraphNeighborhood, GraphStatus, ItemRecord, ListItemsRequest,
         ManualEdgeInput, MessageQuery, MessageRecord, MessageSenderKind, MessageStore,
-        MessageUpdate, NewMessage, SearchHit, SortOrder, VectorStore,
+        MessageUpdate, NewMessage, SearchHit, SortOrder, VectorStore, parse_external_ref_id,
+        synthetic_external_item,
     };
     use crate::embedding::EmbeddingService;
 
@@ -321,11 +323,37 @@ mod tests {
                         }
                     }
                     for (key, val) in &request.metadata_filter {
-                        if let Some(meta_val) = item.metadata.get(key) {
-                            if meta_val.as_str() != Some(val) {
-                                return false;
-                            }
-                        } else {
+                        let wanted: Vec<&str> = val
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .collect();
+                        if wanted.is_empty() {
+                            continue;
+                        }
+                        let matched = match item.metadata.get(key) {
+                            Some(Value::Array(items)) => items.iter().any(|v| {
+                                v.as_str().map(|s| wanted.contains(&s)).unwrap_or(false)
+                            }),
+                            Some(scalar) => scalar
+                                .as_str()
+                                .map(|s| wanted.contains(&s))
+                                .unwrap_or(false),
+                            None => false,
+                        };
+                        if !matched {
+                            return false;
+                        }
+                    }
+                    if let Some(search) = request.search.as_deref().filter(|s| !s.trim().is_empty()) {
+                        let needle = search.to_lowercase();
+                        let haystacks = [
+                            item.text.to_lowercase(),
+                            item.id.to_lowercase(),
+                            item.source_id.to_lowercase(),
+                            item.path.clone().unwrap_or_default().to_lowercase(),
+                        ];
+                        if !haystacks.iter().any(|h| h.contains(&needle)) {
                             return false;
                         }
                     }
@@ -366,7 +394,13 @@ mod tests {
             let mut stored = self.stored.lock().expect("store mutex poisoned");
             let before = stored.len();
             stored.retain(|(item, _)| item.id != id);
-            Ok(stored.len() != before)
+            let deleted = stored.len() != before;
+            // No foreign keys: incident edges are removed explicitly.
+            self.graph_edges
+                .lock()
+                .expect("store mutex poisoned")
+                .retain(|edge| edge.from_item_id != id && edge.to_item_id != id);
+            Ok(deleted)
         }
 
         fn graph_status(&self) -> Result<GraphStatus> {
@@ -416,7 +450,11 @@ mod tests {
                 .iter()
                 .map(|item| (item.id.clone(), item.clone()))
                 .collect::<HashMap<_, _>>();
-            if !item_index.contains_key(center_id) {
+            // A dangling `ext:` hub is a valid center (resolved synthetically
+            // below); anything else missing is a caller error.
+            if !item_index.contains_key(center_id)
+                && synthetic_external_item(center_id).is_none()
+            {
                 anyhow::bail!("item {center_id} not found");
             }
 
@@ -449,7 +487,12 @@ mod tests {
 
             let nodes = order
                 .into_iter()
-                .filter_map(|id| item_index.get(&id).cloned())
+                .filter_map(|id| {
+                    item_index
+                        .get(&id)
+                        .cloned()
+                        .or_else(|| synthetic_external_item(&id))
+                })
                 .collect::<Vec<_>>();
             let mut edges = neighborhood_edges
                 .into_values()
@@ -518,11 +561,14 @@ mod tests {
             }
 
             let items = self.stored.lock().expect("store mutex poisoned");
-            if !items.iter().any(|(item, _)| item.id == input.from_item_id) {
-                anyhow::bail!("item {} not found", input.from_item_id);
-            }
-            if !items.iter().any(|(item, _)| item.id == input.to_item_id) {
-                anyhow::bail!("item {} not found", input.to_item_id);
+            // No foreign keys: `ext:` endpoints dangle by design, but any
+            // other missing endpoint is a caller error.
+            for endpoint in [&input.from_item_id, &input.to_item_id] {
+                if !items.iter().any(|(item, _)| &item.id == endpoint)
+                    && parse_external_ref_id(endpoint).is_none()
+                {
+                    anyhow::bail!("item {endpoint} not found");
+                }
             }
             drop(items);
 
@@ -1997,6 +2043,69 @@ mod tests {
                 .expect("store mutex poisoned")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_route_deletes_many_and_reports_missing() {
+        let store = Arc::new(MockStore::seed(vec![
+            ItemRecord {
+                id: "doc-1".to_owned(),
+                text: "old".to_owned(),
+                metadata: json!({"kind":"old"}),
+                source_id: "knowledge".to_owned(),
+                created_at: 123,
+                updated_at: 123,
+                path: None,
+                type_name: None,
+                data: None,
+                analysis: None,
+                dreamed_at: None,
+            },
+            ItemRecord {
+                id: "doc-2".to_owned(),
+                text: "older".to_owned(),
+                metadata: json!({"kind":"old"}),
+                source_id: "knowledge".to_owned(),
+                created_at: 124,
+                updated_at: 124,
+                path: None,
+                type_name: None,
+                data: None,
+                analysis: None,
+                dreamed_at: None,
+            },
+        ]));
+        let embedder = Arc::new(MockEmbedder::new(vec![0.9, 0.1]));
+        let server = TestServer::new(router(AppState::new_ready(
+            embedder,
+            store.clone(),
+            store.clone(),
+        )));
+
+        let response = server
+            .post("/admin/items/delete")
+            .json(&json!({ "ids": ["doc-1", "doc-2", "doc-1", "missing"] }))
+            .await;
+
+        response.assert_status_ok();
+        response.assert_json(&json!({
+            "deleted": ["doc-1", "doc-2"],
+            "not_found": ["missing"]
+        }));
+        assert!(
+            store
+                .stored
+                .lock()
+                .expect("store mutex poisoned")
+                .is_empty()
+        );
+
+        // Empty and oversized batches are rejected.
+        server
+            .post("/admin/items/delete")
+            .json(&json!({ "ids": [] }))
+            .await
+            .assert_status_bad_request();
     }
 
     #[tokio::test]

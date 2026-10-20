@@ -287,11 +287,13 @@ func entryCmd() *cobra.Command {
 		entryGetCmd(),
 		entryUpdateCmd(),
 		entryDeleteCmd(),
+		entryDeleteManyCmd(),
 		entryListCmd(),
 		entryBrowseCmd(),
 		entryRelatedCmd(),
 		entryAnalyzeCmd(),
 		entryImageCmd(),
+		entryDupsCmd(),
 	)
 	return cmd
 }
@@ -442,9 +444,16 @@ func entryUpdateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
+			// Internal read-modify-write: never emit the intermediate GET
+			// in --json mode (it would corrupt the output stream and leave
+			// `current` empty).
+			oldJSON := jsonOut
+			jsonOut = false
 			var current map[string]any
-			if err := client().do("GET", "/admin/items/"+url.PathEscape(id), nil, &current); err != nil {
-				return err
+			getErr := client().do("GET", "/admin/items/"+url.PathEscape(id), nil, &current)
+			jsonOut = oldJSON
+			if getErr != nil {
+				return getErr
 			}
 			body := map[string]any{
 				"text":      current["text"],
@@ -523,9 +532,254 @@ func entryDeleteCmd() *cobra.Command {
 	}
 }
 
+func entryDeleteManyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete-many <id> [<id>...]",
+		Short: "Delete up to 200 entries in one call (for dedup passes)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 200 {
+				return fmt.Errorf("bulk delete is limited to 200 ids per request (got %d)", len(args))
+			}
+			body := map[string]any{"ids": args}
+			var resp struct {
+				Deleted  []string `json:"deleted"`
+				NotFound []string `json:"not_found"`
+			}
+			if err := client().do("POST", "/admin/items/delete", body, &resp); err != nil {
+				return err
+			}
+			if !jsonOut {
+				fmt.Printf("deleted: %d", len(resp.Deleted))
+				if len(resp.NotFound) > 0 {
+					fmt.Printf("  not_found: %d", len(resp.NotFound))
+				}
+				fmt.Println()
+				for _, id := range resp.NotFound {
+					fmt.Printf("  missing: %s\n", id)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// wordTokens mirrors the server's sub-shingle fallback (src/cluster.rs):
+// the same normalization as wordShingles, unjoined.
+func wordTokens(text string) map[string]struct{} {
+	clean := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return ' '
+	}, text)
+	out := map[string]struct{}{}
+	for _, w := range strings.Fields(clean) {
+		out[w] = struct{}{}
+	}
+	return out
+}
+
+// wordShingles mirrors the server's near-duplicate pre-pass (src/cluster.rs):
+// lowercase alphanumeric tokens joined into n-grams. Containment of the
+// smaller set >= threshold means the shorter text sits (near-)verbatim
+// inside the longer one — a merge candidate, never proof.
+func wordShingles(text string, n int) map[string]struct{} {
+	clean := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return ' '
+	}, text)
+	words := strings.Fields(clean)
+	if len(words) == 0 {
+		return map[string]struct{}{}
+	}
+	if len(words) < n {
+		return map[string]struct{}{strings.Join(words, " "): {}}
+	}
+	out := make(map[string]struct{}, len(words)-n+1)
+	for i := 0; i+n <= len(words); i++ {
+		out[strings.Join(words[i:i+n], " ")] = struct{}{}
+	}
+	return out
+}
+
+func entryDupsCmd() *cobra.Command {
+	var sourceID string
+	var threshold float64
+	var shingleLen, maxPairs, scanCap, minImportance, maxImportance int
+	var metaFilters []string
+
+	cmd := &cobra.Command{
+		Use:   "dups",
+		Short: "Find near-duplicate entries by word-shingle containment (manual dreaming helper)",		RunE: func(cmd *cobra.Command, args []string) error {
+			// Internal paging: suppress per-page raw output in --json mode;
+			// only the final pairs object is printed.
+			oldJSON := jsonOut
+			jsonOut = false
+			defer func() { jsonOut = oldJSON }()
+			type item struct {
+				ID   string `json:"id"`
+				Text string `json:"text"`
+			}
+			var docs []item
+			var total int64
+			offset := 0
+			for {
+				if scanCap > 0 && len(docs) >= scanCap {
+					break
+				}
+				q := url.Values{}
+				if sourceID != "" {
+					q.Set("source_id", sourceID)
+				}
+				if minImportance > 0 {
+					q.Set("min_importance", fmt.Sprintf("%d", minImportance))
+				}
+				if maxImportance > 0 {
+					q.Set("max_importance", fmt.Sprintf("%d", maxImportance))
+				}
+				for _, kv := range metaFilters {
+					k, v, ok := strings.Cut(kv, "=")
+					if !ok || k == "" {
+						return fmt.Errorf("invalid --meta %q (want key=value)", kv)
+					}
+					q.Set(k, v)
+				}
+				q.Set("limit", "500")
+				q.Set("offset", fmt.Sprintf("%d", offset))
+				var resp struct {
+					Items []item `json:"items"`
+					TotalCount int64 `json:"total_count"`
+				}
+				if err := client().do("GET", "/admin/items?"+q.Encode(), nil, &resp); err != nil {
+					return err
+				}
+				total = resp.TotalCount
+				if len(resp.Items) == 0 {
+					break
+				}
+				docs = append(docs, resp.Items...)
+				if len(resp.Items) < 500 {
+					break
+				}
+				offset += len(resp.Items)
+			}
+			if scanCap > 0 && len(docs) > scanCap {
+				docs = docs[:scanCap]
+			}
+			shingles := make([]map[string]struct{}, len(docs))
+			tokSets := make([]map[string]struct{}, len(docs))
+			for i, d := range docs {
+				shingles[i] = wordShingles(d.Text, shingleLen)
+				tokSets[i] = wordTokens(d.Text)
+			}
+			type pair struct {
+				cont     float64
+				a, b     string
+				aLen, bLen int
+			}
+			contain := func(a, b map[string]struct{}) (float64, int) {
+				if len(a) == 0 {
+					return 0, 0
+				}
+				small, big := a, b
+				if len(b) < len(a) {
+					small, big = b, a
+				}
+				inter := 0
+				for s := range small {
+					if _, ok := big[s]; ok {
+						inter++
+					}
+				}
+				return float64(inter) / float64(len(small)), inter
+			}
+			var pairs []pair
+			for i := 0; i < len(docs); i++ {
+				for j := i + 1; j < len(docs); j++ {
+					// Shingle path first; fall back to word-token
+				// containment when either side is too short for
+				// shingles, so terse notes subsumed by longer
+				// entries are still proposed. Either way 3 shared
+				// units are required so trivial overlaps never fire.
+					cont, inter := contain(shingles[i], shingles[j])
+					if inter < 3 {
+						cont, inter = contain(tokSets[i], tokSets[j])
+						if inter < 3 {
+							continue
+						}
+					}
+					if cont >= threshold {
+						pairs = append(pairs, pair{cont, docs[i].ID, docs[j].ID, len(docs[i].Text), len(docs[j].Text)})
+					}
+				}
+			}
+			sortPairs := func() {
+				for i := 0; i < len(pairs); i++ {
+					for j := i + 1; j < len(pairs); j++ {
+						if pairs[j].cont > pairs[i].cont {
+							pairs[i], pairs[j] = pairs[j], pairs[i]
+						}
+					}
+				}
+			}
+			sortPairs()
+			if maxPairs > 0 && len(pairs) > maxPairs {
+				pairs = pairs[:maxPairs]
+			}
+			if oldJSON {
+				b, _ := json.Marshal(map[string]any{
+					"scanned":   len(docs),
+					"total":     total,
+					"threshold": threshold,
+					"pairs": func() []map[string]any {
+						out := make([]map[string]any, 0, len(pairs))
+						for _, p := range pairs {
+							out = append(out, map[string]any{
+								"containment": p.cont,
+								"a":           p.a,
+								"b":           p.b,
+							})
+						}
+						return out
+					}(),
+				})
+				fmt.Println(string(b))
+				return nil
+			}
+			fmt.Printf("scanned %d of %d (threshold %.2f, shingle %d): %d pairs\n", len(docs), total, threshold, shingleLen, len(pairs))
+			for _, p := range pairs {
+				fmt.Printf("  %.0f%%  %s (%d chars)  <->  %s (%d chars)\n", p.cont*100, p.a, p.aLen, p.b, p.bLen)
+			}
+			if len(pairs) > 0 {
+				fmt.Println("\nmerge with: rag entry update <keep-id> --text \"<combined>\" && rag entry delete <dup-id>")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&sourceID, "source", "s", "", "filter by source_id")
+	cmd.Flags().StringArrayVar(&metaFilters, "meta", nil, "metadata filter key=value (repeatable, e.g. --meta importance=4)")
+	cmd.Flags().Float64Var(&threshold, "threshold", 0.8, "containment threshold (0-1)")
+	cmd.Flags().IntVar(&shingleLen, "shingle", 5, "word-shingle length")
+	cmd.Flags().IntVar(&maxPairs, "max-pairs", 50, "max pairs to print (0 = all)")
+	cmd.Flags().IntVar(&scanCap, "scan-cap", 3000, "max entries to scan (0 = all)")
+	cmd.Flags().IntVar(&minImportance, "min-importance", 0, "only entries with metadata.importance >= this")
+	cmd.Flags().IntVar(&maxImportance, "max-importance", 0, "only entries with metadata.importance <= this")
+	return cmd
+}
+
 func entryListCmd() *cobra.Command {
-	var sourceID, pathPrefix, typeName string
-	var limit, offset int
+	var sourceID, pathPrefix, typeName, search string
+	var limit, offset, minImportance, maxImportance int
+	var metaFilters []string
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -540,6 +794,22 @@ func entryListCmd() *cobra.Command {
 			}
 			if typeName != "" {
 				q.Set("type", typeName)
+			}
+			if search != "" {
+				q.Set("search", search)
+			}
+			for _, kv := range metaFilters {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok || k == "" {
+					return fmt.Errorf("invalid --meta %q (want key=value)", kv)
+				}
+				q.Set(k, v)
+			}
+			if minImportance > 0 {
+				q.Set("min_importance", fmt.Sprintf("%d", minImportance))
+			}
+			if maxImportance > 0 {
+				q.Set("max_importance", fmt.Sprintf("%d", maxImportance))
 			}
 			q.Set("limit", fmt.Sprintf("%d", limit))
 			if offset > 0 {
@@ -564,6 +834,10 @@ func entryListCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&sourceID, "source", "s", "", "filter by source_id")
 	cmd.Flags().StringVar(&pathPrefix, "path-prefix", "", "filter by path prefix")
 	cmd.Flags().StringVar(&typeName, "type", "", "filter by typed-entry schema")
+	cmd.Flags().StringVar(&search, "search", "", "substring search across text/id/source/path")
+	cmd.Flags().IntVar(&minImportance, "min-importance", 0, "only entries with metadata.importance >= this")
+	cmd.Flags().IntVar(&maxImportance, "max-importance", 0, "only entries with metadata.importance <= this")
+	cmd.Flags().StringArrayVar(&metaFilters, "meta", nil, "metadata filter key=value (repeatable, e.g. --meta importance=4)")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "result limit")
 	cmd.Flags().IntVar(&offset, "offset", 0, "result offset (for paging)")
 	return cmd
@@ -623,16 +897,36 @@ func entryRelatedCmd() *cobra.Command {
 				path += "?" + e
 			}
 			var resp struct {
-				Nodes []map[string]any `json:"nodes"`
-				Edges []map[string]any `json:"edges"`
+				CenterID string           `json:"center_id"`
+				Nodes    []map[string]any `json:"nodes"`
+				Edges    []map[string]any `json:"edges"`
+				Pairwise []map[string]any `json:"pairwise_distances"`
 			}
 			if err := client().do("GET", path, nil, &resp); err != nil {
 				return err
 			}
 			if !jsonOut {
-				fmt.Printf("nodes: %d  edges: %d\n\n", len(resp.Nodes), len(resp.Edges))
+				center := resp.CenterID
+				if center == "" {
+					center = args[0]
+				}
+				fmt.Printf("center: %s  nodes: %d  edges: %d\n\n", center, len(resp.Nodes), len(resp.Edges))
 				for _, n := range resp.Nodes {
+					marker := " "
+					if strVal(n, "id") == center {
+						marker = "*"
+					}
+					fmt.Printf("%s ", marker)
 					printItemRow(n)
+				}
+				if len(resp.Edges) > 0 {
+					fmt.Println("\nedges:")
+					for _, e := range resp.Edges {
+						printEdgeRow(e)
+					}
+				}
+				if len(resp.Nodes) == 0 {
+					fmt.Println("(no neighbors — isolated node or missing id)")
 				}
 			}
 			return nil
@@ -931,9 +1225,11 @@ func edgeCmd() *cobra.Command {
 				return err
 			}
 			if !jsonOut {
+				if len(resp.Edges) == 0 {
+					fmt.Println("(no edges)")
+				}
 				for _, e := range resp.Edges {
-					fmt.Printf("%v -[%v/%v]-> %v\n",
-						e["from_item_id"], e["edge_type"], e["relation"], e["to_item_id"])
+					printEdgeRow(e)
 				}
 			}
 			return nil
@@ -1038,19 +1334,215 @@ func attachCmd() *cobra.Command {
 // ----- dream -----
 
 func dreamCmd() *cobra.Command {
-	return &cobra.Command{
+	var sourceID string
+	var apply bool
+	var limit int
+
+	cmd := &cobra.Command{
 		Use:   "dream",
 		Short: "Trigger a dreaming round (consolidation / linking)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := client().do("POST", "/api/dream", nil, nil); err != nil {
+			body := map[string]any{}
+			if sourceID != "" {
+				body["source_id"] = sourceID
+			}
+			if apply {
+				body["apply"] = true
+			}
+			if limit > 0 {
+				body["limit"] = limit
+			}
+			var resp struct {
+				Accepted bool   `json:"accepted"`
+				SourceID string `json:"source_id"`
+				DryRun   bool   `json:"dry_run"`
+				Limit    int    `json:"limit"`
+			}
+			var rawBody map[string]any
+			if len(body) == 0 {
+				rawBody = nil
+			} else {
+				rawBody = body
+			}
+			if err := client().do("POST", "/api/dream", rawBody, &resp); err != nil {
 				return err
 			}
 			if !jsonOut {
-				fmt.Println("dreaming round triggered")
+				if resp.SourceID == "" {
+					// Pre-report servers return a bare 202 with no body.
+					fmt.Println("dreaming round triggered")
+				} else {
+					fmt.Printf("dreaming round triggered (source=%s, dry_run=%v, limit=%d)\n",
+						resp.SourceID, resp.DryRun, resp.Limit)
+				}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&sourceID, "source", "s", "", "namespace to dream over (default: server config)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "persist dream clusters (server dry-run guard still wins)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max entries this round (default: server config)")
+	cmd.AddCommand(dreamClustersCmd(), dreamActionsCmd(), dreamApplyCmd())
+	return cmd
+}
+
+func dreamApplyCmd() *cobra.Command {
+	var sourceID string
+	var minContainment float64
+	var limit int
+	var apply bool
+
+	cmd := &cobra.Command{
+		Use:   "apply",
+		Short: "Merge deterministic near-duplicate pairs (plan by default)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body := map[string]any{}
+			if sourceID != "" {
+				body["source_id"] = sourceID
+			}
+			if minContainment > 0 {
+				body["min_containment"] = minContainment
+			}
+			if limit > 0 {
+				body["limit"] = limit
+			}
+			if apply {
+				body["apply"] = true
+			}
+			var resp struct {
+				DryRun         bool    `json:"dry_run"`
+				SourceID       string  `json:"source_id"`
+				MinContainment float32 `json:"min_containment"`
+				Applied        int     `json:"applied"`
+				Skipped        int     `json:"skipped"`
+				Deleted        []string `json:"deleted"`
+				Pairs          []struct {
+					KeeperID    string  `json:"keeper_id"`
+					DupID       string  `json:"dup_id"`
+					Containment float32 `json:"containment"`
+				} `json:"pairs"`
+			}
+			if err := client().do("POST", "/api/dream/apply", body, &resp); err != nil {
+				return err
+			}
+			if !jsonOut {
+				mode := "PLAN"
+				if !resp.DryRun {
+					mode = "APPLIED"
+				}
+				fmt.Printf("%s source=%s containment>=%.2f: %d pairs, %d applied, %d skipped\n",
+					mode, resp.SourceID, resp.MinContainment, len(resp.Pairs), resp.Applied, resp.Skipped)
+				for _, p := range resp.Pairs {
+					fmt.Printf("  %.0f%%  keep %s  <-  del %s\n", p.Containment*100, p.KeeperID, p.DupID)
+				}
+				if resp.DryRun && len(resp.Pairs) > 0 {
+					fmt.Println("\nre-run with --apply to merge keepers and delete dups")
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&sourceID, "source", "s", "", "namespace to declutter (default: server config)")
+	cmd.Flags().Float64Var(&minContainment, "min-containment", 0, "only pairs at/above this (never looser than server default)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max pairs (default 50, max 200)")
+	cmd.Flags().BoolVar(&apply, "apply", false, "actually merge + delete (default is plan-only)")
+	return cmd
+}
+
+func dreamClustersCmd() *cobra.Command {
+	var sourceID, roundID string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "clusters",
+		Short: "List clusters persisted by corpus dreaming rounds",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := url.Values{}
+			if sourceID != "" {
+				q.Set("source_id", sourceID)
+			}
+			if roundID != "" {
+				q.Set("round_id", roundID)
+			}
+			q.Set("limit", fmt.Sprintf("%d", limit))
+			var resp []struct {
+				ID          string   `json:"id"`
+				RoundID     string   `json:"round_id"`
+				SourceID    string   `json:"source_id"`
+				Label       string   `json:"label"`
+				MemberCount int      `json:"member_count"`
+				Vocabulary  []string `json:"vocabulary"`
+				Cohesion    float32  `json:"cohesion"`
+			}
+			if err := client().do("GET", "/api/dream/clusters?"+q.Encode(), nil, &resp); err != nil {
+				return err
+			}
+			if !jsonOut {
+				fmt.Printf("%d clusters:\n", len(resp))
+				for _, c := range resp {
+					fmt.Printf("  %s  src=%s members=%d cohesion=%.2f\n    %s\n",
+						c.ID, c.SourceID, c.MemberCount, c.Cohesion, c.Label)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&sourceID, "source", "s", "", "filter by namespace")
+	cmd.Flags().StringVar(&roundID, "round", "", "filter by round id")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "max clusters")
+	return cmd
+}
+
+func dreamActionsCmd() *cobra.Command {
+	var itemID string
+	var limit int
+	var dryRun, noDryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "actions",
+		Short: "List dream audit rows (near-duplicate proposals + applied)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := url.Values{}
+			if itemID != "" {
+				q.Set("item_id", itemID)
+			}
+			switch {
+				case dryRun:
+					q.Set("dry_run", "true")
+				case noDryRun:
+					q.Set("dry_run", "false")
+				}
+			q.Set("limit", fmt.Sprintf("%d", limit))
+			var resp []struct {
+				RoundID  string  `json:"round_id"`
+				ItemID   string  `json:"item_id"`
+				Action   string  `json:"action"`
+				TargetID *string `json:"target_id"`
+				Reason   string  `json:"reason"`
+				Outcome  string  `json:"outcome"`
+				DryRun   bool    `json:"dry_run"`
+			}
+			if err := client().do("GET", "/api/dream/actions?"+q.Encode(), nil, &resp); err != nil {
+				return err
+			}
+			if !jsonOut {
+				fmt.Printf("%d actions:\n", len(resp))
+				for _, a := range resp {
+					target := ""
+					if a.TargetID != nil {
+						target = " -> " + *a.TargetID
+					}
+					fmt.Printf("  [%s] %s %s%s: %s\n", a.Outcome, a.Action, a.ItemID, target, truncate(a.Reason, 120))
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&itemID, "item", "", "only rows about this entry")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "max rows")
+	cmd.Flags().BoolVar(&dryRun, "proposals", false, "only proposal rows (dry_run=true)")
+	cmd.Flags().BoolVar(&noDryRun, "applied", false, "only applied rows (dry_run=false)")
+	return cmd
 }
 
 // ----- health -----
@@ -1083,15 +1575,44 @@ func truncate(s string, n int) string {
 	return s
 }
 
+func strVal(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
 func printItemRow(it map[string]any) {
-	id, _ := it["id"].(string)
-	text, _ := it["text"].(string)
-	src, _ := it["source_id"].(string)
+	id := strVal(it, "id")
+	text := strVal(it, "text")
+	src := strVal(it, "source_id")
 	created := ""
 	if v, ok := it["created_at"].(float64); ok {
 		created = time.Unix(int64(v)/1000, 0).Format("2006-01-02 15:04")
 	}
 	fmt.Printf("[%s] %s (%s): %s\n", created, id, src, truncate(text, 100))
+}
+
+func printEdgeRow(e map[string]any) {
+	from := strVal(e, "from_item_id")
+	to := strVal(e, "to_item_id")
+	tet := strVal(e, "edge_type")
+	rel := strVal(e, "relation")
+	kind := tet
+	if rel != "" {
+		kind = tet + "/" + rel
+	}
+	extra := ""
+	if w, ok := e["weight"].(float64); ok && w != 0 {
+		extra = fmt.Sprintf(" w=%.2f", w)
+	}
+	if d, ok := e["directed"].(bool); ok && d {
+		extra += " directed"
+	}
+	titles := ""
+	ft, tt := strVal(e, "from_title"), strVal(e, "to_title")
+	if ft != "" || tt != "" {
+		titles = fmt.Sprintf("  (%q -> %q)", truncate(ft, 60), truncate(tt, 60))
+	}
+	fmt.Printf("  %s -[%s]-> %s%s%s\n", from, kind, to, extra, titles)
 }
 
 func printItem(it map[string]any) {

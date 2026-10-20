@@ -89,9 +89,11 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
     <div className="flex flex-col">
       <div
         className={cn(
-          "flex items-center transition-colors rounded-sm",
+          "flex items-center transition-colors rounded-sm border-l-2",
+          isSelected ? "bg-primary/10 border-primary" : "border-transparent",
           isDragOver && "bg-primary/10 ring-2 ring-primary"
         )}
+        style={{ paddingLeft: padding }}
         onDragOver={(e) => {
           if (!onDropEntry || !hasEntryDragData(e.dataTransfer)) return
           e.preventDefault()
@@ -125,7 +127,6 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
             !expandable && "opacity-30 pointer-events-none"
           )}
           aria-label={open ? "Collapse" : "Expand"}
-          style={{ marginLeft: padding }}
         >
           {open ? (
             <ChevronDown className="size-3.5" />
@@ -136,10 +137,8 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
         <Link
           href={buildHref(sourceId, node.path)}
           className={cn(
-            "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs transition-colors hover:bg-card",
-            isSelected
-              ? "bg-primary/10 text-primary border-l-2 border-primary"
-              : "text-foreground border-l-2 border-transparent"
+            "flex items-center gap-2 flex-1 min-w-0 px-2 py-1.5 font-mono text-xs transition-colors rounded-sm hover:bg-card",
+            isSelected ? "text-primary" : "text-foreground"
           )}
         >
           {open && expandable ? (
@@ -165,31 +164,39 @@ export function WikiTreeNode(props: WikiTreeNodeProps) {
           {pages.map((page) => {
             const pageSelected = selectedEntryId === page.id
             return (
-              <Link
+              <div
                 key={page.id}
-                href={buildHref(sourceId, node.path, page.id)}
-                draggable
-                onDragStart={(evt) => {
-                  setEntryDragData(evt.dataTransfer, {
-                    id: page.id,
-                    source_id: page.source_id,
-                    path: page.path,
-                    title: entryTitle(page, 80),
-                  })
-                }}
-                onDragEnd={() => clearEntryDrag()}
                 className={cn(
-                  "flex items-center gap-2 min-w-0 px-2 py-1 font-mono text-xs transition-colors hover:bg-card border-l-2",
-                  pageSelected
-                    ? "bg-primary/10 text-primary border-primary"
-                    : "text-muted-foreground hover:text-foreground border-transparent"
+                  "flex items-center transition-colors rounded-sm border-l-2",
+                  pageSelected ? "bg-primary/10 border-primary" : "border-transparent"
                 )}
-                style={{ marginLeft: `calc(${depth + 1} * 0.75rem + 0.5rem)` }}
-                title={page.id}
+                style={{ paddingLeft: `calc(${depth + 1} * 0.75rem + 0.5rem)` }}
               >
-                <FileText className="size-3 shrink-0" />
-                <span className="truncate">{entryTitle(page)}</span>
-              </Link>
+                <span aria-hidden className="shrink-0 size-5" />
+                <Link
+                  href={buildHref(sourceId, node.path, page.id)}
+                  draggable
+                  onDragStart={(evt) => {
+                    setEntryDragData(evt.dataTransfer, {
+                      id: page.id,
+                      source_id: page.source_id,
+                      path: page.path,
+                      title: entryTitle(page, 80),
+                    })
+                  }}
+                  onDragEnd={() => clearEntryDrag()}
+                  className={cn(
+                    "flex items-center gap-2 flex-1 min-w-0 px-2 py-1 font-mono text-xs transition-colors rounded-sm hover:bg-card",
+                    pageSelected
+                      ? "text-primary"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                  title={page.id}
+                >
+                  <FileText className="size-3 shrink-0" />
+                  <span className="truncate">{entryTitle(page)}</span>
+                </Link>
+              </div>
             )
           })}
           {node.children.map((child) => (

@@ -1,5 +1,7 @@
 "use client"
 
+import { ListSkeleton } from "@/components/ui/list-skeleton"
+
 import Link from "next/link"
 import { useCallback, useMemo, useRef, useState } from "react"
 import {
@@ -243,7 +245,7 @@ export function UnorganizedInbox({ sourceId, className, onCollapse }: Unorganize
   if (isLoading) {
     return (
       <div className={cn("flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground", className)}>
-        <Loader2 className="size-4 animate-spin" /> Loading…
+        <ListSkeleton compact count={3} />
       </div>
     )
   }

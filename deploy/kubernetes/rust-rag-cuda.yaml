@@ -227,12 +227,20 @@ spec:
       ## (idempotent: no-op if model.onnx_data is already present at full
       ## size). Verify URLs against the HF repo if upstream layout shifts.
       ## ~2 GB transfer; pulls take a few minutes on first boot.
+      ## tokenizer.json is pinned to HF_TOKENIZER_REV (not `main`): the
+      ## tokenizer defines the embedding input space, so silent upstream
+      ## drift would skew every query vector. Pinned rev verified
+      ## byte-identical (md5 21a8630d4a83316f2d19e6f8f8426d3c) to the file
+      ## already on the models PVC. To move to a newer tokenizer, update
+      ## the rev AND re-verify bytes against the PVC before rolling out.
       initContainers:
         - name: fetch-bge-m3
           image: curlimages/curl:8.10.1
           env:
             - name: HF_REPO
               value: "https://huggingface.co/BAAI/bge-m3/resolve/main"
+            - name: HF_TOKENIZER_REV
+              value: "5617a9f61b028005a4858fdac845db406aefb181"
           command:
             - /bin/sh
             - -ec
@@ -254,7 +262,7 @@ spec:
               }
               fetch model.onnx        "$HF_REPO/onnx/model.onnx"        100000
               fetch model.onnx_data   "$HF_REPO/onnx/model.onnx_data"   1500000000
-              fetch tokenizer.json    "$HF_REPO/tokenizer.json"         5000000
+              fetch tokenizer.json    "https://huggingface.co/BAAI/bge-m3/resolve/$HF_TOKENIZER_REV/tokenizer.json" 5000000
               fetch sentencepiece.bpe.model "$HF_REPO/sentencepiece.bpe.model" 1000000
               echo "model cache ready:"
               ls -lh
@@ -281,6 +289,11 @@ spec:
             ## consumer Turing without tensor cores.
             - name: HF_REPO
               value: "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main"
+            ## Pinned like the bge-m3 tokenizer: verified byte-identical
+            ## (md5 7e0c59f9cd25f3ae41da145d82c5e6ea) to the file on the
+            ## models PVC, so this only guards fresh-PVC boots against drift.
+            - name: HF_TOKENIZER_REV
+              value: "f131ae72114cb18333648a2ee6b0942849e8ab95"
           command:
             - /bin/sh
             - -ec
@@ -305,7 +318,7 @@ spec:
               # actually run slower than fp16 here. TensorRT EP would change
               # that calculus.
               fetch model_fp16.onnx "$HF_REPO/onnx/model_fp16.onnx" 100000000
-              fetch tokenizer.json  "$HF_REPO/tokenizer.json"        1000000
+              fetch tokenizer.json  "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/$HF_TOKENIZER_REV/tokenizer.json" 1000000
               echo "reranker cache ready:"
               ls -lh
           volumeMounts:
@@ -329,6 +342,13 @@ spec:
           env:
             - name: HF_REPO
               value: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+            ## Pinned like the bge-m3 tokenizer: verified byte-identical
+            ## (md5 f540215c85aa2a5d5d5ea440093397a8) to the file on the
+            ## code-models PVC. Code-search query embeddings must match the
+            ## pre-computed snapshot embeddings, so drift here would silently
+            ## break /api/code/* ranking on fresh PVCs.
+            - name: HF_TOKENIZER_REV
+              value: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
           command:
             - /bin/sh
             - -ec
@@ -349,7 +369,7 @@ spec:
                 mv "$name.tmp" "$name"
               }
               fetch model.onnx       "$HF_REPO/onnx/model.onnx"  80000000
-              fetch tokenizer.json   "$HF_REPO/tokenizer.json"   100000
+              fetch tokenizer.json   "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$HF_TOKENIZER_REV/tokenizer.json"   100000
               echo "code embedder cache ready:"
               ls -lh
           volumeMounts:

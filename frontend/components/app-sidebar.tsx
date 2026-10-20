@@ -2,12 +2,13 @@
 
 import Link from "next/link"
 import { usePathname, useSearchParams } from "next/navigation"
-import { Suspense, useMemo, useState } from "react"
+import { Suspense, useEffect, useMemo, useState } from "react"
 import useSWR from "swr"
 import {
   BookOpen,
   Braces,
   Brain,
+  CalendarDays,
   ChevronDown,
   ChevronRight,
   Code,
@@ -28,10 +29,14 @@ import {
   Server,
   Share2,
   Sparkles,
+  Star,
+  History,
   Terminal,
   X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { isHiddenByDefault } from "@/lib/sources"
+import { getRecents, getStarred, type PinnedEntry } from "@/lib/favorites"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { WikiTreeNode } from "@/components/wiki/wiki-tree-node"
 import { useEntriesPaths } from "@/lib/api"
@@ -43,6 +48,8 @@ const navigationGroups = [
     label: "Views",
     items: [
       { name: "Search", href: "/", icon: Search },
+      { name: "Today", href: "/today", icon: CalendarDays },
+      { name: "Journal", href: "/journal", icon: History },
       { name: "Deep Search", href: "/assisted", icon: Sparkles },
       { name: "Entries", href: "/entries", icon: FolderOpen },
       { name: "Wiki", href: "/wiki", icon: FolderTree },
@@ -54,6 +61,7 @@ const navigationGroups = [
   {
     label: "Workspace",
     items: [
+      { name: "Databases", href: "/databases", icon: Database },
       { name: "Kanban", href: "/kanban", icon: LayoutGrid },
       { name: "Chat", href: "/chat", icon: MessageSquare },
       { name: "Messages", href: "/messages", icon: Inbox },
@@ -153,6 +161,13 @@ export function AppSidebar({ mobileOpen, onClose }: AppSidebarProps) {
           </div>
         ))}
       </nav>
+
+      {/* Starred & recent */}
+      <div className="shrink-0 border-t border-sidebar-border pt-2">
+        <Suspense fallback={null}>
+          <SidebarStarred onNavigate={onClose} />
+        </Suspense>
+      </div>
 
       {/* Wiki tree */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-sidebar-border pt-2">
@@ -263,6 +278,73 @@ function SidebarSessionActions() {
   return null
 }
 
+/** Starred entries + recently visited, from localStorage. Refreshes on
+ *  every navigation so stars/recents set elsewhere show up immediately. */
+function SidebarStarred({ onNavigate }: { onNavigate: () => void }) {
+  const pathname = usePathname()
+  const [starred, setStarred] = useState<PinnedEntry[]>([])
+  const [recents, setRecents] = useState<PinnedEntry[]>([])
+
+  useEffect(() => {
+    const refresh = () => {
+      setStarred(getStarred())
+      const starredIds = new Set(getStarred().map((e) => e.id))
+      setRecents(getRecents().filter((e) => !starredIds.has(e.id)).slice(0, 5))
+    }
+    refresh()
+    window.addEventListener("favorites-changed", refresh)
+    window.addEventListener("storage", refresh)
+    return () => { window.removeEventListener("favorites-changed", refresh); window.removeEventListener("storage", refresh) }
+  }, [pathname])
+
+  if (starred.length === 0 && recents.length === 0) return null
+
+  return (
+    <div className="px-2 pb-2">
+      {starred.length > 0 && (
+        <div className="mb-1">
+          <p className="px-2 pb-1 font-mono text-[9px] font-black uppercase tracking-[0.25em] text-muted-foreground/70">
+            Starred
+          </p>
+          {starred.map((e) => (
+            <Link
+              key={e.id}
+              href={`/entries/${encodeURIComponent(e.id)}`}
+              onClick={onNavigate}
+              prefetch={false}
+              title={e.id}
+              className="flex min-w-0 items-center gap-2 px-2.5 py-1 font-mono text-[11px] transition-colors hover:bg-sidebar-accent"
+            >
+              <Star className="size-3 shrink-0 fill-amber-400 text-amber-400" aria-hidden="true" />
+              <span className="truncate">{e.title}</span>
+            </Link>
+          ))}
+        </div>
+      )}
+      {recents.length > 0 && (
+        <div>
+          <p className="px-2 pb-1 font-mono text-[9px] font-black uppercase tracking-[0.25em] text-muted-foreground/70">
+            Recent
+          </p>
+          {recents.map((e) => (
+            <Link
+              key={e.id}
+              href={`/entries/${encodeURIComponent(e.id)}`}
+              onClick={onNavigate}
+              prefetch={false}
+              title={e.id}
+              className="flex min-w-0 items-center gap-2 px-2.5 py-1 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+            >
+              <History className="size-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">{e.title}</span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Sources + folder tree shown in the app sidebar. Suspense-wrapped by the
  *  sidebar because it reads the current wiki selection from search params. */
 function SidebarWikiTree({ onNavigate }: { onNavigate: () => void }) {
@@ -272,8 +354,21 @@ function SidebarWikiTree({ onNavigate }: { onNavigate: () => void }) {
   const activeEntryId = searchParams.get("entry")
 
   const { data: pathsResp } = useEntriesPaths()
-  const sourceTrees = useMemo(
-    () => (pathsResp ? buildSourceTrees(pathsResp.paths) : []),
+  const [showHidden, setShowHidden] = useState(false)
+  const sourceTrees = useMemo(() => {
+    const all = pathsResp ? buildSourceTrees(pathsResp.paths) : []
+    if (showHidden) return all
+    const visible = all.filter((t) => !isHiddenByDefault(t.sourceId))
+    // Keep the active source visible even when it would otherwise be hidden,
+    // so deep-links into memories don't render an empty tree.
+    if (activeSourceId && !visible.some((t) => t.sourceId === activeSourceId)) {
+      const active = all.find((t) => t.sourceId === activeSourceId)
+      if (active) return [...visible, active]
+    }
+    return visible
+  }, [pathsResp, showHidden, activeSourceId])
+  const hiddenCount = useMemo(
+    () => (pathsResp ? buildSourceTrees(pathsResp.paths).filter((t) => isHiddenByDefault(t.sourceId)).length : 0),
     [pathsResp]
   )
   const activeChain = useMemo(() => ancestorChain(activePath ?? undefined), [activePath])
@@ -307,6 +402,16 @@ function SidebarWikiTree({ onNavigate }: { onNavigate: () => void }) {
           onNavigate={onNavigate}
         />
       ))}
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowHidden((v) => !v)}
+          className="mx-2 mt-1 flex items-center gap-1.5 rounded px-1.5 py-1 font-mono text-[9px] font-bold uppercase tracking-wider text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-primary"
+          title={showHidden ? "Hide agent memories & todos" : `Show ${hiddenCount} hidden (memories, todos)`}
+        >
+          {showHidden ? "Hide memories" : `Hidden · ${hiddenCount}`}
+        </button>
+      )}
     </>
   )
 }

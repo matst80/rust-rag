@@ -22,6 +22,8 @@ import { AnalysisPanel } from "./analysis-panel";
 import { AttachmentsPanel } from "./attachments-panel";
 import { CommentsPanel } from "./comments-panel";
 import { MarkdownView } from "./markdown-view";
+import { DuplicateTitleBanner } from "./duplicate-title-badge";
+import { entryTitleUnclipped } from "@/lib/utils";
 import { AiAssistPanel } from "../ai/ai-assist-panel";
 import { EntryTagList } from "../ui/entry-tag";
 import { cn, edgeEndpointTitle, entryTitle } from "@/lib/utils";
@@ -79,7 +81,7 @@ export function EntryContent({
   const [mobilePreview, setMobilePreview] = useState(false);
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto px-5 md:px-10 py-8 md:py-12">
+    <div className={cn("flex flex-col px-5 md:px-10 py-8 md:py-12", isMobile ? "min-h-0" : "h-full overflow-y-auto")}>
       <div className="mx-auto w-full max-w-3xl space-y-16">
         {isEditing ? (
           <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-300">
@@ -175,6 +177,7 @@ export function EntryContent({
             <h1 className="font-serif text-3xl md:text-4xl font-bold tracking-tight text-foreground">
               {entryTitle(entry, 200)}
             </h1>
+            <DuplicateTitleBanner title={entryTitleUnclipped(entry)} selfId={id} />
 
             {/* Image preview */}
             {entry.metadata.source_type === "image" &&

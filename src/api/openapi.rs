@@ -20,6 +20,10 @@ use super::attachments::{
 };
 use super::cms::CmsTreeResponse;
 use super::code::{CodeDeleteResponse, CodeSearchRequest};
+use super::dream::{
+    DreamApplyRequest, DreamApplyResponse, DreamClusterMembersResponse, DreamClusterPayload,
+    DreamRequest, DreamTriggerResponse,
+};
 use super::graph::{
     CreateManualEdgeRequest, GraphEdgePayload, GraphEdgesResponse,
     GraphNeighborhoodResponse, GraphRebuildResponse, GraphStatusResponse,
@@ -29,7 +33,8 @@ use super::harness::HarnessTreeResponse;
 use super::health::HealthResponse;
 use super::ingest_url::IngestUrlRequest;
 use super::items::{
-    AdminItemPayload, AdminItemsResponse, CategoriesResponse, UpdateItemRequest,
+    AdminItemPayload, AdminItemsResponse, BacklinksResponse, BulkDeleteRequest, BulkDeleteResponse,
+    CategoriesResponse, DuplicateTitlesResponse, MetadataFacetsResponse, UpdateItemRequest,
 };
 use super::messages::{
     ChannelsResponse, ClearChannelResponse, MessagePayload, MessagesResponse, SendMessageRequest,
@@ -52,7 +57,7 @@ use crate::api::{
 };
 use crate::db::{
     CodeFileDetail, CodeFileMeta, CodeRepoSummary, CodeSearchHit, CodeSymbolGraph, CodeUploadStats,
-    DuplicateEdgeGroup,
+    DreamActionRecord, DuplicateEdgeGroup,
 };
 use crate::notify::SendResult;
 use crate::ontology::OntologyRunReport;
@@ -414,9 +419,28 @@ pub fn openapi_document() -> Value {
                 q("path_prefix", "Restrict to a wiki path prefix."),
                 qnum("min_created_at", "Inclusive lower bound (epoch ms)."),
                 qnum("max_created_at", "Inclusive upper bound (epoch ms)."),
+                q("search", "Case-insensitive substring search over text, id, source_id and path."),
+                qnum("min_importance", "Only entries with metadata.importance >= this (missing counts as 0)."),
+                qnum("max_importance", "Only entries with metadata.importance <= this (missing counts as 0)."),
             ],
             response: Some(sref!(components, "AdminItemsResponse", AdminItemsResponse)),
-            ..op("list_items", "get", "List entries (paged)", "Items")
+            ..op("list_items", "get", "List entries (paged). Extra query params are exact-match metadata filters; comma-separated values match ANY alternative.", "Items")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/admin/items/metadata-facets",
+        Op {
+            params: vec![
+                q("source_id", "Restrict the scan to one namespace."),
+                q("type", "Restrict the scan to one typed-entry schema."),
+                q("path_prefix", "Restrict the scan to a wiki path prefix."),
+                q("search", "Same substring search as list_items."),
+                qnum("sample", "Max entries to scan (default 2000, max 5000)."),
+            ],
+            response: Some(sref!(components, "MetadataFacetsResponse", MetadataFacetsResponse)),
+            ..op("metadata_facets", "get", "Metadata key/value facets for filter autocomplete", "Items")
         },
         &mut components,
     );
@@ -451,6 +475,27 @@ pub fn openapi_document() -> Value {
     );
     add(
         &mut paths,
+        "/api/items/duplicates/titles",
+        Op {
+            response: Some(sref!(
+                components,
+                "DuplicateTitlesResponse",
+                DuplicateTitlesResponse
+            )),
+            description: Some(
+                "Display-title groups shared by 2+ entries (case-insensitive, frontend title rule).",
+            ),
+            ..op(
+                "get_duplicate_titles",
+                "get",
+                "List duplicate display titles",
+                "Items",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
         "/admin/items/{id}",
         Op {
             params: vec![path_param("id", "Entry id.")],
@@ -462,11 +507,39 @@ pub fn openapi_document() -> Value {
     );
     add(
         &mut paths,
+        "/api/items/{id}/backlinks",
+        Op {
+            params: vec![path_param("id", "Entry id.")],
+            response: Some(sref!(components, "BacklinksResponse", BacklinksResponse)),
+            description: Some(
+                "Every other entry whose text references this one via a wikilink or /entries/{id} link (code blocks excluded), with a context snippet per hit.",
+            ),
+            ..op(
+                "get_backlinks",
+                "get",
+                "List wikilink backlinks to an entry",
+                "Items",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
         "/admin/items/{id}",
         Op {
             params: vec![path_param("id", "Entry id.")],
             response: Some(sref!(components, "ItemDeleteResponse", ItemDeleteResponse)),
             ..op("delete_item", "delete", "Delete an entry", "Items")
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/admin/items/delete",
+        Op {
+            request: Some(sref!(components, "BulkDeleteRequest", BulkDeleteRequest)),
+            response: Some(sref!(components, "BulkDeleteResponse", BulkDeleteResponse)),
+            ..op("bulk_delete_items", "post", "Delete up to 200 entries in one call", "Items")
         },
         &mut components,
     );
@@ -1451,12 +1524,99 @@ pub fn openapi_document() -> Value {
         &mut paths,
         "/api/dream",
         Op {
-            response: None,
+            request: Some(sref!(components, "DreamRequest", DreamRequest)),
+            response: Some(sref!(
+                components,
+                "DreamTriggerResponse",
+                DreamTriggerResponse
+            )),
             response_desc: "202 Accepted (worker runs in the background).",
             ..op(
                 "dream",
                 "post",
-                "Trigger one dreaming (memory consolidation) round",
+                "Trigger one dreaming (memory consolidation) round. Empty body runs the server-configured round.",
+                "Entries",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/dream/apply",
+        Op {
+            request: Some(sref!(components, "DreamApplyRequest", DreamApplyRequest)),
+            response: Some(sref!(
+                components,
+                "DreamApplyResponse",
+                DreamApplyResponse
+            )),
+            ..op(
+                "dream_apply",
+                "post",
+                "Merge deterministic near-duplicate pairs. Plan mode by default; apply:true merges keepers and deletes dups with audit rows.",
+                "Entries",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/dream/clusters",
+        Op {
+            params: vec![
+                q("source_id", "Filter to one namespace."),
+                q("round_id", "Filter to one dreaming round."),
+                qnum("limit", "Max clusters (default 100, max 500)."),
+            ],
+            response: Some(json!({
+                "type": "array",
+                "items": sref!(components, "DreamClusterPayload", DreamClusterPayload)
+            })),
+            ..op(
+                "list_dream_clusters",
+                "get",
+                "Clusters persisted by corpus dreaming rounds, newest first",
+                "Entries",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/dream/clusters/{id}/members",
+        Op {
+            params: vec![path_param("id", "Dream cluster id.")],
+            response: Some(sref!(
+                components,
+                "DreamClusterMembersResponse",
+                DreamClusterMembersResponse
+            )),
+            ..op(
+                "dream_cluster_members",
+                "get",
+                "Member entry ids of one persisted dream cluster",
+                "Entries",
+            )
+        },
+        &mut components,
+    );
+    add(
+        &mut paths,
+        "/api/dream/actions",
+        Op {
+            params: vec![
+                qnum("limit", "Max rows (default 100, max 500)."),
+                q("item_id", "Only rows about this entry."),
+                q("dry_run", "true = proposals only, false = applied only."),
+            ],
+            response: Some(json!({
+                "type": "array",
+                "items": sref!(components, "DreamActionRecord", DreamActionRecord)
+            })),
+            ..op(
+                "list_dream_actions",
+                "get",
+                "Dream audit rows, newest first (proposals + applied)",
                 "Entries",
             )
         },

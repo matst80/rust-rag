@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCategories, useSchemas } from "@/lib/api";
+import { isHiddenByDefault } from "@/lib/sources";
 import { cn } from "@/lib/utils";
 
 interface SearchInputProps {
@@ -52,6 +53,10 @@ export function SearchInput({
 
   const { data: categories } = useCategories();
   const validCategories = categories?.filter((c) => c.id.trim().length > 0);
+  // Agent memories/todos stay out of the Focus picker unless that's all
+  // there is — searching them is opt-in via the entries browser.
+  const focusableCategories = validCategories?.filter((c) => !isHiddenByDefault(c.id));
+  const focusOptions = focusableCategories?.length ? focusableCategories : validCategories;
   const { data: schemas } = useSchemas();
   const validSchemas = schemas?.filter((s) => s.type_name.trim().length > 0);
 
@@ -201,8 +206,8 @@ export function SearchInput({
                   <ChevronDown className="size-3 opacity-50" />
                 </SelectTrigger>
                 <SelectContent className="font-mono text-[11px]">
-                  <SelectItem value="all">All Memory</SelectItem>
-                  {validCategories?.map((c) => (
+                  <SelectItem value="all">All collections</SelectItem>
+                  {focusOptions?.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
                       {c.name}
                       <span className="opacity-40 ml-1.5">({c.count})</span>

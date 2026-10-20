@@ -1,0 +1,14 @@
+{"t":"2026-10-19T11:36:14Z","verb":"tree","args":"tree main","exit":0,"ms":54,"out_bytes":7240}
+{"t":"2026-10-20T09:17:12Z","verb":"dead","args":"dead","exit":0,"ms":10,"out_bytes":5427}
+{"t":"2026-10-20T10:09:54Z","verb":"stats","args":"stats","exit":0,"ms":108,"out_bytes":2007}
+{"t":"2026-10-20T10:09:55Z","verb":"query","args":"query dreaming consolidation -max 8","exit":0,"ms":677,"out_bytes":855}
+{"t":"2026-10-20T10:09:59Z","verb":"show","args":"show src/api/dream.rs#dreaming_endpoint","exit":0,"ms":10,"out_bytes":1577}
+{"t":"2026-10-20T10:09:59Z","verb":"callers","args":"callers near_duplicates","exit":0,"ms":73,"out_bytes":531}
+{"t":"2026-10-20T10:10:05Z","verb":"tree","args":"tree src/api/dream.rs#apply_dreaming_round","exit":0,"ms":77,"out_bytes":9943}
+{"t":"2026-10-20T10:10:05Z","verb":"related","args":"related src/cluster.rs#near_duplicates","exit":0,"ms":54,"out_bytes":51}
+{"t":"2026-10-20T10:10:13Z","verb":"dead","args":"dead","exit":0,"ms":53,"out_bytes":6234}
+{"t":"2026-10-20T10:10:21Z","verb":"outline","args":"outline src/api/dream.rs","exit":0,"ms":45,"out_bytes":2351}
+{"t":"2026-10-20T10:10:21Z","verb":"def","args":"def src/api/dream.rs:329","exit":1,"ms":86,"out_bytes":0}
+{"t":"2026-10-20T10:10:35Z","verb":"map","args":"map src/api","exit":0,"ms":231,"out_bytes":344}
+{"t":"2026-10-20T10:10:35Z","verb":"grep","args":"grep pick_merge_keeper","exit":0,"ms":34,"out_bytes":492}
+{"t":"2026-10-20T10:30:42Z","verb":"agentsmd","args":"agentsmd src/api","exit":0,"ms":0,"out_bytes":765}

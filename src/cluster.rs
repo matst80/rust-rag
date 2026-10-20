@@ -266,13 +266,14 @@ fn tokenize(text: &str) -> (Vec<String>, HashSet<String>) {
     (words, identifying)
 }
 
-/// Word-shingles used for near-duplicate detection. Two entries written at
-/// different times about the same thing share long runs of words even when
-/// every heading differs — which is exactly the case shingle Jaccard misses
-/// when it is computed on headings alone.
-fn shingles(text: &str, n: usize) -> BTreeSet<String> {
-    let words: Vec<String> = text
-        .split_whitespace()
+/// Word tokens with the same normalization as [`shingles`], for the
+/// sub-shingle fallback in [`near_duplicates`].
+fn word_tokens(text: &str) -> BTreeSet<String> {
+    dup_words(text).into_iter().collect()
+}
+
+fn dup_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
         .map(|w| {
             w.chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '/' || *c == '.')
@@ -280,7 +281,15 @@ fn shingles(text: &str, n: usize) -> BTreeSet<String> {
                 .to_ascii_lowercase()
         })
         .filter(|w| !w.is_empty())
-        .collect();
+        .collect()
+}
+
+/// Word-shingles used for near-duplicate detection. Two entries written at
+/// different times about the same thing share long runs of words even when
+/// every heading differs — which is exactly the case shingle Jaccard misses
+/// when it is computed on headings alone.
+fn shingles(text: &str, n: usize) -> BTreeSet<String> {
+    let words: Vec<String> = dup_words(text);
     if words.len() < n {
         return BTreeSet::new();
     }
@@ -751,28 +760,52 @@ fn cluster_id(members: &[String]) -> String {
 pub fn near_duplicates(docs: &[Doc], params: &ClusterParams) -> Vec<DuplicatePair> {
     let capped = docs.len().min(params.max_docs);
     let mut sets: Vec<BTreeSet<String>> = Vec::with_capacity(capped);
+    let mut tokens: Vec<BTreeSet<String>> = Vec::with_capacity(capped);
     for doc in docs.iter().take(capped) {
         sets.push(shingles(&doc.text, params.shingle_len));
+        tokens.push(word_tokens(&doc.text));
     }
     let mut pairs = Vec::new();
     for i in 0..capped {
-        if sets[i].len() < 3 {
-            continue;
-        }
         for j in (i + 1)..capped {
-            if sets[j].len() < 3 {
-                continue;
-            }
-            let (small, large) = if sets[i].len() <= sets[j].len() {
-                (&sets[i], &sets[j])
+            // Shingle path: needs enough shingles on both sides. Very short
+            // notes (fewer words than `shingle_len`, e.g. "Adopt useLiveData
+            // everywhere") produce no shingles at all and used to evade the
+            // pass entirely even when quoted verbatim inside a longer entry.
+            let shingle_hit = if sets[i].len() >= 3 && sets[j].len() >= 3 {
+                let (small, large) = if sets[i].len() <= sets[j].len() {
+                    (&sets[i], &sets[j])
+                } else {
+                    (&sets[j], &sets[i])
+                };
+                let shared = small.iter().filter(|s| large.contains(*s)).count();
+                (shared >= 3).then(|| shared as f32 / small.len() as f32)
             } else {
-                (&sets[j], &sets[i])
+                None
             };
-            let shared = small.iter().filter(|s| large.contains(*s)).count();
-            if shared < 3 {
-                continue;
-            }
-            let containment = shared as f32 / small.len() as f32;
+            // Token fallback: when either side is too short for shingles,
+            // fall back to word-token containment so a terse note subsumed
+            // by a longer entry is still proposed. Still requires 3 shared
+            // tokens so single-word overlaps never fire.
+            let token_hit = if shingle_hit.is_none()
+                && !tokens[i].is_empty()
+                && !tokens[j].is_empty()
+            {
+                let (small, large) = if tokens[i].len() <= tokens[j].len() {
+                    (&tokens[i], &tokens[j])
+                } else {
+                    (&tokens[j], &tokens[i])
+                };
+                let shared = small.iter().filter(|t| large.contains(*t)).count();
+                (shared >= 3).then(|| shared as f32 / small.len() as f32)
+            } else {
+                None
+            };
+            let containment = match (shingle_hit, token_hit) {
+                (Some(c), _) => c,
+                (None, Some(c)) => c,
+                (None, None) => continue,
+            };
             if containment >= params.dup_containment {
                 pairs.push(DuplicatePair {
                     a: docs[i].id.clone(),
@@ -894,6 +927,34 @@ mod tests {
         let docs = vec![doc("short", short), doc("long", &long)];
         let dups = near_duplicates(&docs, &ClusterParams::default());
         assert!(!dups.is_empty(), "a verbatim quote inside a doc is a containment duplicate");
+    }
+
+    #[test]
+    fn sub_shingle_note_inside_longer_entry_is_flagged() {
+        // Real miss from the 2026-10-20 manual dreaming pass: a 3-word note
+        // has no 5-shingles, so the old pass never proposed it even though it
+        // sits verbatim inside the longer entry.
+        let docs = vec![
+            doc("short", "Adopt useLiveData everywhere"),
+            doc(
+                "long",
+                "Adopt useLiveData everywhere to replace hand-rolled setInterval loaders; use SWR-style visible-tab polling.",
+            ),
+            doc("u", "something completely different about gardening tools and water"),
+        ];
+        let dups = near_duplicates(&docs, &ClusterParams::default());
+        assert_eq!(dups.len(), 1, "expected the subsumed short note, got {dups:?}");
+        assert!(dups[0].containment >= 0.99);
+    }
+
+    #[test]
+    fn single_shared_word_is_not_a_duplicate() {
+        let docs = vec![
+            doc("a", "Ship dark theme"),
+            doc("b", "the theme song ships free with every garden gnome"),
+        ];
+        let dups = near_duplicates(&docs, &ClusterParams::default());
+        assert!(dups.is_empty(), "1-2 shared words must not fire: {dups:?}");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 import { useMemo } from "react"
 import { AlertTriangle, ShieldCheck, ShieldX } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { concernKindOf, relIs } from "@/lib/harness"
 import type { HarnessTreeNode, HarnessTreeResponse } from "@/lib/api"
 import {
   SEVERITY_COLOR,
@@ -60,12 +61,12 @@ export function RiskDashboard({
   const rows = useMemo<RiskRow[]>(() => {
     const rows: RiskRow[] = []
     for (const node of index.byId.values()) {
-      if (node.type_name !== "harness_risk") continue
+      if (concernKindOf(node) !== "risk") continue
       if (repoId && repoOf(index, node.id)?.id !== repoId) continue
-      const pocLink = (index.parentsOf.get(node.id) ?? []).find((p) => p.relation === "RAISED")
+      const pocLink = (index.parentsOf.get(node.id) ?? []).find((p) => relIs(p.relation, "RAISED"))
       const poc = pocLink ? index.byId.get(pocLink.from) ?? null : null
       const valEdges = (index.childrenOf.get(node.id) ?? []).filter(
-        (e) => e.relation === "ADDRESSED_BY"
+        (e) => relIs(e.relation, "ADDRESSED_BY")
       )
       let validation: RiskRow["validation"] = null
       for (const edge of valEdges) {
@@ -105,7 +106,7 @@ export function RiskDashboard({
 
       {rows.length === 0 ? (
         <p className="py-8 text-center font-mono text-xs text-muted-foreground">
-          No harness_risk nodes {repoId ? "for this repo" : "in the graph yet"}.
+          No risks {repoId ? "for this repo" : "in the graph yet"}.
         </p>
       ) : (
         <div className="overflow-hidden rounded-sm border">

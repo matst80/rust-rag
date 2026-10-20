@@ -62,10 +62,19 @@ pub(crate) async fn resolve_link_peers(
                 continue;
             };
             let hub_id = crate::db::loose_link_hub_id(&rule.metadata_key, &value);
-            // A hub placeholder only exists once a cluster has had at least two
-            // members AND the batch job has run. Its absence means "no peers",
-            // not an error — otherwise a fresh entry would fail the whole call.
-            if store.get_item(&hub_id).ok().flatten().is_none() {
+            // The hub stores no row — it dangles. Probe for worker-written
+            // edges incident to it instead: none means "no peers" (cluster
+            // too small or rebuild hasn't run), not an error — otherwise a
+            // fresh entry would fail the whole call.
+            let has_cluster = store
+                .list_graph_edges(Some(&hub_id), Some(GraphEdgeType::Manual), None)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|edge| {
+                    edge.metadata.get("source").and_then(|v| v.as_str())
+                        == Some(crate::db::LOOSE_LINK_SOURCE)
+                });
+            if !has_cluster {
                 continue;
             }
             // The BFS limit bounds *nodes visited*, and the anchor and the hub
@@ -96,8 +105,8 @@ pub(crate) async fn resolve_link_peers(
             let mut peers: Vec<LinkPeer> = neighborhood
                 .nodes
                 .iter()
-                // Skip the anchor itself and the hub placeholder; a placeholder
-                // has no body, so it isn't a useful peer.
+                // Skip the anchor itself and the virtual hub; the hub has no
+                // body, so it isn't a useful peer.
                 .filter(|node| node.id != anchor_id && node.id != hub_id)
                 .filter(|node| member_ids.contains(node.id.as_str()))
                 .map(|node| LinkPeer {
@@ -217,7 +226,7 @@ pub struct LinkPeersResponse {
 pub struct LinkPeerGroup {
     pub metadata_key: String,
     pub value: String,
-    /// The `ext:` placeholder all members of this cluster link through.
+    /// The `ext:` hub all members of this cluster link through.
     pub hub_id: String,
     pub relation: Option<String>,
     pub peers: Vec<LinkPeer>,
@@ -469,7 +478,7 @@ Peers share an `ext:{key}:{value}` hub, so this is one hop rather than a full pa
 PREDICATES: use one of the canonical predicates (`is_a`, `part_of`, `caused_by`, `works_for`, `contradicts`, `depends_on`, `contains`, `implemented_by`) so the edge composes with ontology-worker edges, graph traversal, and the analyze pipeline. See `list_memory_conventions` for direction semantics (e.g. `from is_a to` means FROM is a subtype of TO, NOT the reverse). Off-list `relation` strings are accepted but are essentially private to your caller — other agents and the ontology worker will not recognize them. \
 WEIGHT defaults to 1.0; use -1.0 (with `directed: false`) for anti-edges that should DEMOTE the target in graph-related search. \
 DIRECTED defaults to false — set to true when the predicate's direction is meaningful (it always is for the canonical set). \
-EXTERNAL ENDPOINTS: pass `from_item_id`/`to_item_id` as `ext:{kind}:{key}` (kind/key limited to `[a-zA-Z0-9_-]+`) to link to something outside the item store — a placeholder item is created automatically, flagged `external: true, embed: false`, never embedded or returned by search. \
+EXTERNAL ENDPOINTS: pass `from_item_id`/`to_item_id` as `ext:{kind}:{key}` (kind/key limited to `[a-zA-Z0-9_-]+`) to link to something outside the item store — no row is stored for it; the endpoint dangles and resolves synthetically (never embedded, never returned by search). \
 IDEMPOTENT RETRY (Postgres only): set `metadata.source` to a non-empty string OTHER than `ontology_worker` to get upsert semantics keyed on (from, to, relation, source) — retrying the same call converges to the latest weight/metadata instead of duplicating the edge. Edges with no `source` tag always insert fresh.")]
     async fn create_manual_edge(
         &self,

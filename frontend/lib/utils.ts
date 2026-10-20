@@ -51,6 +51,16 @@ export function entryTitle(entry: TitledEntry, maxLength = 60): string {
   return clipTitle(lines.find((l) => l.trim())?.trim() || entry.id, maxLength)
 }
 
+/** Full (unclipped) title for duplicate-title lookups; display still uses `entryTitle` clipping. */
+export function entryTitleUnclipped(entry: TitledEntry): string {
+  return entryTitle(entry, 10_000)
+}
+
+/** Normalization matching `GET /api/items/duplicates/titles` grouping. */
+export function normalizeTitle(title: string): string {
+  return title.trim().toLowerCase()
+}
+
 /** Label for a graph-edge endpoint we only have an id (and maybe a server-resolved title) for. */
 export function edgeEndpointTitle(id: string, title?: string | null): string {
   if (title && title.trim()) return title.trim()

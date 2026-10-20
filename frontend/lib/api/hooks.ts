@@ -17,6 +17,7 @@ import type {
   LlmRechunkRequest,
   RechunkResponse,
   PagedItems,
+  BulkDeleteResult,
   ShareResponse,
   CreateShareRequest,
   Attachment,
@@ -29,6 +30,10 @@ import type {
   MapPoint,
   DriveSearchResult,
   HarnessTreeResponse,
+  BacklinksResponse,
+  DuplicateTitlesResponse,
+  MetadataFacetsRequest,
+  MetadataFacetsResponse,
   Message,
   SendMessageRequest,
   MessagesResponse,
@@ -72,6 +77,13 @@ export function useDeleteItem() {
   return useSWRMutation<void, Error, string, string>(
     "items",
     (_, { arg }) => api.items.delete(arg)
+  )
+}
+
+export function useBulkDeleteItems() {
+  return useSWRMutation<BulkDeleteResult, Error, string, string[]>(
+    "items",
+    (_, { arg }) => api.items.bulkDelete(arg)
   )
 }
 
@@ -178,7 +190,7 @@ export function useSearch(
   query: string,
   sourceId?: string,
   typeName?: string,
-  hybrid: boolean = true,
+  hybrid: boolean = false,
   topK: number = 10,
   rerank: boolean | undefined = undefined,
 ) {
@@ -217,6 +229,32 @@ export function useMap() {
 
 export function useRebuildMap() {
   return useSWRMutation("/admin/map/rebuild", api.map.rebuild)
+}
+
+export function useBacklinks(itemId: string | null) {
+  return useSWR<BacklinksResponse>(
+    itemId ? ["backlinks", itemId] : null,
+    ([, id]) => api.backlinks.get(id as string)
+  )
+}
+
+export function useDuplicateTitles() {
+  return useSWR<DuplicateTitlesResponse>("duplicate-titles", api.duplicates.titles, {
+    revalidateOnFocus: false,
+    dedupingInterval: 60_000,
+  })
+}
+
+export function useMetadataFacets(options: MetadataFacetsRequest = {}) {
+  const { source_id, path_prefix, type, needs_home, search, sample } = options
+  return useSWR<MetadataFacetsResponse>(
+    ["metadata-facets", source_id ?? null, path_prefix ?? null, type ?? null, needs_home ?? null, search ?? null, sample ?? null],
+    () => api.facets.metadata(options),
+    {
+      revalidateOnFocus: false,
+      dedupingInterval: 30_000,
+    }
+  )
 }
 
 export function useEdges() {

@@ -19,6 +19,8 @@ export function GrillCockpit() {
   const selectedId = searchParams.get("node")
 
   const { data: tree, isLoading, error, mutate } = useHarnessTree()
+  const hasAudits =
+    tree?.nodes.some((n) => n.type_name === "harness_audit") ?? false
 
   const onSelect = useCallback(
     (id: string) => {
@@ -58,14 +60,23 @@ export function GrillCockpit() {
             </ResizablePanel>
           </ResizablePanelGroup>
         </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={22} minSize={10}>
-          <TimelineBar
-            tree={tree ?? null}
-            selectedId={selectedId}
-            onSelect={onSelect}
-          />
-        </ResizablePanel>
+        {hasAudits || isLoading ? (
+          <>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={22} minSize={10}>
+              <TimelineBar
+                tree={tree ?? null}
+                selectedId={selectedId}
+                onSelect={onSelect}
+              />
+            </ResizablePanel>
+          </>
+        ) : (
+          <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border px-4 font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
+            <span>Grill timeline</span>
+            <span className="normal-case tracking-normal">No audits posted yet — verdicts will appear here.</span>
+          </div>
+        )}
       </ResizablePanelGroup>
     </div>
   )

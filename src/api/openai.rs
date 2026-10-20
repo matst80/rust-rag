@@ -194,6 +194,7 @@ struct ListItemsArguments {
     sort_order: Option<String>,
     min_created_at: Option<i64>,
     max_created_at: Option<i64>,
+    search: Option<String>,
     #[serde(default)]
     metadata: HashMap<String, String>,
 }
@@ -1033,7 +1034,7 @@ async fn search_entries_tool(
     }
 
     let max_distance = arguments.max_distance.unwrap_or(0.8);
-    let hybrid = arguments.hybrid.unwrap_or(true);
+    let hybrid = arguments.hybrid.unwrap_or(false);
     let repo_filter = arguments
         .repo
         .as_deref()
@@ -1045,13 +1046,32 @@ async fn search_entries_tool(
     let store = state.store.clone();
     let query = arguments.query;
     let source_id = arguments.source_id;
+    // Same repo-scoped query prefix as `search_core`: stored docs carry a
+    // `[repo:…]` embed prefix, so scope the query identically for symmetry.
+    // Keyword legs below keep the raw query.
+    let query_embed_text = match arguments
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(repo) => {
+            let meta = serde_json::json!({"repo": repo});
+            match crate::api::store_search::build_contextual_embed_prefix(&meta, None, None, None)
+            {
+                Some(prefix) => format!("{prefix}{query}"),
+                None => query.clone(),
+            }
+        }
+        None => query.clone(),
+    };
 
     let results =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchResultPayload>> {
             let (embedding, sparse) = if hybrid {
-                embedder.embed_both(&query)?
+                embedder.embed_both(&query_embed_text)?
             } else {
-                (embedder.embed(&query)?, Vec::new())
+                (embedder.embed(&query_embed_text)?, Vec::new())
             };
             let hits = if hybrid {
                 store.search_hybrid(
@@ -1069,6 +1089,11 @@ async fn search_entries_tool(
             let mut filtered: Vec<SearchResultPayload> = hits
                 .into_iter()
                 .filter(|hit| hit.distance <= max_distance)
+                .filter(|hit| {
+                    !(hit.id.starts_with("ext:")
+                        || hit.source_id == "external"
+                        || hit.metadata.get("external").and_then(|v| v.as_bool()) == Some(true))
+                })
                 .map(SearchResultPayload::from)
                 .collect();
 
@@ -1157,7 +1182,13 @@ async fn list_items_tool(
         path_prefix: None,
         type_name: None,
         has_path: None,
+        needs_home: None,
         dreamed: None,
+        include_external: false,
+        search: arguments.search,
+    
+        min_importance: None,
+        max_importance: None,
     };
 
     let (items, total_count) = tokio::task::spawn_blocking(move || store.list_items(request))

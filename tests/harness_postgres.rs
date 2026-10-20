@@ -611,13 +611,21 @@ async fn loose_links_on_postgres() {
         assert_eq!(report.clusters, 1, "the `other` repo is a singleton");
         assert_eq!(report.hub_edges, 2);
 
-        // The hub is a real row, so the graph FKs hold.
-        let hub = store
+        // No row is stored for the hub — the edges dangle — but the
+        // neighborhood still resolves it synthetically.
+        assert!(store
             .get_item("ext:repo:rust-rag")
             .expect("loading hub")
-            .expect("hub placeholder exists");
+            .is_none());
+        let hub_view = store
+            .graph_neighborhood("ll-a", 1, 100, None)
+            .expect("traversal");
+        let hub = hub_view
+            .nodes
+            .iter()
+            .find(|n| n.id == "ext:repo:rust-rag")
+            .expect("synthetic hub node present");
         assert_eq!(hub.metadata["external"], serde_json::json!(true));
-        assert_eq!(hub.metadata["members"], serde_json::json!(2));
 
         // Rerunning must upsert (migration 0020's source dedup lane), not
         // duplicate. Postgres has an ON CONFLICT path here; SQLite does not.

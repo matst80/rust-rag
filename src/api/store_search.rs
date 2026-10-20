@@ -14,6 +14,17 @@ use crate::db::{
     PROFILE_REFRESH_AFTER, SearchHit, SortOrder, UserEventType, UserMemoryStore, VectorStore,
 };
 
+/// External graph-hub placeholders (`ext:{kind}:{key}`, `source_id ==
+/// "external"`, or `metadata.external == true`) back manual-edge endpoints
+/// for things outside the item store (repo board tickets, loose-link hubs).
+/// They carry empty text and no chunks — they must never surface as search
+/// hits or related items.
+fn is_external_hit(id: &str, metadata: &Value, source_id: &str) -> bool {
+    id.starts_with("ext:")
+        || source_id == "external"
+        || metadata.get("external").and_then(Value::as_bool) == Some(true)
+}
+
 use super::analysis;
 use super::auth::SessionSubject;
 use super::chunking;
@@ -98,9 +109,12 @@ pub struct SearchRequest {
     #[serde(default)]
     pub repo: Option<String>,
 
-    /// Optional toggle for hybrid search (Vector + Keyword). Defaults to false
-    /// (dense-only) — hybrid's per-doc RRF sum favors large multi-chunk
-    /// docs; enable explicitly once that's fixed for your use case.
+    /// Optional toggle for hybrid search. Defaults to false (dense-only).
+    /// Hybrid fuses three per-document RRF legs: dense vectors, bge-m3
+    /// sparse vectors, and an exact-keyword leg over the `chunks.tsv`
+    /// full-text column (`RAG_HYBRID_LEXICAL_WEIGHT` tunes the keyword leg,
+    /// default 1.0). Prefer hybrid for keyword-heavy queries (proper nouns,
+    /// error codes); dense stays the default for semantic questions.
     #[serde(default = "default_hybrid")]
     pub hybrid: bool,
     /// When `Some(true)`, run the cross-encoder reranker on the top-N
@@ -258,7 +272,10 @@ pub(crate) async fn search(
     search_core(&state, request, session.0).await.map(Json)
 }
 
-pub(crate) fn build_contextual_embed_prefix(
+/// Contextual `[repo:… path:…]` prefix prepended to stored text before
+/// embedding. Public so offline benches/probes can reproduce production
+/// vectors exactly; the store/write paths are the only production callers.
+pub fn build_contextual_embed_prefix(
     metadata: &Value,
     data: Option<&Value>,
     path: Option<&str>,
@@ -619,6 +636,21 @@ pub(crate) async fn search_core(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_lowercase);
+    // Stored docs are embedded with a `[repo:…]` contextual prefix while
+    // queries are raw — an asymmetric space. When the caller scopes to one
+    // repo, embed the query with the identical prefix so both sides match
+    // in the same subspace. Keyword legs (FTS/tsvector) keep the raw query:
+    // the template tokens must never leak into term matching.
+    let query_embed_text = match request.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(repo) => {
+            let meta = serde_json::json!({"repo": repo});
+            match build_contextual_embed_prefix(&meta, None, None, None) {
+                Some(prefix) => format!("{prefix}{}", request.query),
+                None => request.query.clone(),
+            }
+        }
+        None => request.query.clone(),
+    };
     let now_ms = current_timestamp_millis()?;
     // Reranker is **opt-in**: the cross-encoder adds noticeable latency
     // (seconds on consumer GPUs without tensor cores), so we run it only
@@ -664,6 +696,7 @@ pub(crate) async fn search_core(
                     (items, ())
                 };
                 let mut hits: Vec<SearchHit> = items.into_iter().map(SearchHit::from).collect();
+                hits.retain(|hit| !is_external_hit(&hit.id, &hit.metadata, &hit.source_id));
                 if let Some(ref target_repo) = repo_filter {
                     hits.retain(|hit| {
                         let hit_repo = hit
@@ -693,10 +726,13 @@ pub(crate) async fn search_core(
         tokio::task::spawn_blocking(
             move || -> anyhow::Result<(Vec<SearchHit>, Vec<(SearchHit, Option<String>)>, Vec<f32>)> {
                 // Hybrid path needs the bge-m3 sparse output too; embed once.
+                // NOTE: embedding input is `query_embed_text` (repo-prefixed
+                // when scoped); the store calls below keep raw `query` for
+                // the keyword legs.
                 let (raw, sparse) = if request.hybrid {
-                    embedder.embed_both(&query)?
+                    embedder.embed_both(&query_embed_text)?
                 } else {
-                    (embedder.embed(&query)?, Vec::new())
+                    (embedder.embed(&query_embed_text)?, Vec::new())
                 };
                 let embedding = if let Some(ref interest) = interest_embedding {
                     blend_embeddings(&raw, interest, 0.8)
@@ -779,6 +815,12 @@ pub(crate) async fn search_core(
                             if neighbor == seed.id {
                                 continue;
                             }
+                            // Never inject external placeholders as first-class
+                            // hits: they have empty text and would outrank
+                            // real content via the graph boost below.
+                            if neighbor.starts_with("ext:") {
+                                continue;
+                            }
                             best_edge
                                 .entry(neighbor)
                                 .and_modify(|e| {
@@ -804,6 +846,9 @@ pub(crate) async fn search_core(
                                 existing.retrievers.push("graph".to_owned());
                             }
                         } else if let Ok(Some(item)) = store.get_item(&id) {
+                            if is_external_hit(&item.id, &item.metadata, &item.source_id) {
+                                continue;
+                            }
                             let mut hit = SearchHit::from(item);
                             hit.distance = graph_distance;
                             hit.retrievers = vec!["graph".to_owned()];
@@ -824,6 +869,7 @@ pub(crate) async fn search_core(
                 let mut filtered: Vec<SearchHit> = hits
                     .into_iter()
                     .filter(|hit| hit.distance <= max_distance)
+                    .filter(|hit| !is_external_hit(&hit.id, &hit.metadata, &hit.source_id))
                     .collect();
 
                 if let Some(ref target_repo) = repo_filter {
@@ -983,6 +1029,9 @@ pub(crate) async fn search_core(
                         } else {
                             edge.from_item_id
                         };
+                        if neighbor_id.starts_with("ext:") {
+                            continue;
+                        }
                         if seed_set.contains(neighbor_id.as_str())
                             || existing.contains(neighbor_id.as_str())
                         {
@@ -1018,9 +1067,12 @@ pub(crate) async fn search_core(
                         // never let cosine re-sort a logical link downward.
                         ids.into_iter()
                             .filter_map(|id| {
-                                store.get_item(&id).ok().flatten().map(|item| {
+                                store.get_item(&id).ok().flatten().and_then(|item| {
+                                    if is_external_hit(&item.id, &item.metadata, &item.source_id) {
+                                        return None;
+                                    }
                                     let rel = rel_by_id.get(&id).and_then(Clone::clone);
-                                    (SearchHit::from(item), rel)
+                                    Some((SearchHit::from(item), rel))
                                 })
                             })
                             .collect()

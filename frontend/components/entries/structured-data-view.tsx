@@ -1384,6 +1384,42 @@ function HarnessRolloutView({ data }: { data: any }) {
 }
 
 /**
+ * Consolidated view for 'harness_concern' entries (kind: risk | compliance |
+ * resource | scaling | validation | rollout) — dispatches to the existing
+ * per-kind rendering. Legacy per-kind types route through here too.
+ */
+function HarnessConcernView({ data, legacyKind }: { data: any; legacyKind?: string }) {
+  // Normalized payloads carry a kind discriminator; legacy per-kind entries
+  // don't — fall back to the stored type for those.
+  const kind =
+    data.kind === "risk" ||
+    data.kind === "compliance" ||
+    data.kind === "resource" ||
+    data.kind === "scaling" ||
+    data.kind === "validation" ||
+    data.kind === "rollout"
+      ? data.kind
+      : legacyKind;
+  switch (kind) {
+    case "compliance":
+      return <HarnessComplianceView data={data} />
+    case "resource":
+      // Normalized payloads carry resource_kind; legacy entries used `kind`
+      // for the resource kind — accept both.
+      return <HarnessResourceView data={{ kind: data.resource_kind, ...data }} />
+    case "scaling":
+      return <HarnessScalingView data={data} />
+    case "validation":
+      return <HarnessValidationView data={data} />
+    case "rollout":
+      return <HarnessRolloutView data={data} />
+    case "risk":
+    default:
+      return <HarnessRiskView data={data} />
+  }
+}
+
+/**
  * Specialized view for 'harness_evidence' entries (free-form session evidence)
  */
 function HarnessEvidenceView({ data }: { data: any }) {
@@ -1435,7 +1471,7 @@ function RelatedNodeRow({ node }: { node: HarnessTreeNode }) {
  * Specialized view for 'harness_repo' entries (governing repository root node).
  *
  * Lists every other harness node associated with this repo — via a direct
- * graph edge (HAD_POC, etc.) or via a matching `data.repo` field (plan/sprint
+ * graph edge (contains, etc.) or via a matching `data.repo` field (plan/sprint
  * reference the repo by id or name without necessarily being edge-linked) —
  * so the repo page works as a navigation hub even for unlinked nodes.
  */
@@ -1680,18 +1716,17 @@ export function StructuredDataView({ type, data, entryId }: StructuredDataViewPr
           <HarnessAuditView data={data} />
         ) : type === "harness_poc" ? (
           <HarnessPocView data={data} />
-        ) : type === "harness_risk" ? (
-          <HarnessRiskView data={data} />
-        ) : type === "harness_compliance" ? (
-          <HarnessComplianceView data={data} />
-        ) : type === "harness_resource" ? (
-          <HarnessResourceView data={data} />
-        ) : type === "harness_scaling" ? (
-          <HarnessScalingView data={data} />
-        ) : type === "harness_validation" ? (
-          <HarnessValidationView data={data} />
-        ) : type === "harness_rollout" ? (
-          <HarnessRolloutView data={data} />
+        ) : type === "harness_concern" ||
+          type === "harness_risk" ||
+          type === "harness_compliance" ||
+          type === "harness_resource" ||
+          type === "harness_scaling" ||
+          type === "harness_validation" ||
+          type === "harness_rollout" ? (
+          <HarnessConcernView
+            data={data}
+            legacyKind={type === "harness_concern" ? undefined : type.replace("harness_", "")}
+          />
         ) : type === "harness_evidence" ? (
           <HarnessEvidenceView data={data} />
         ) : type.startsWith("cms_") ? (

@@ -189,6 +189,42 @@ export interface SearchResponse {
   top_k: number;
 }
 
+export interface BacklinkHit {
+  id: string
+  title: string
+  source_id: string
+  updated_at: number
+  /** How the reference looked in the source text (`[[...]]` or `/entries/...`). */
+  matched_ref: string
+  /** ~160-char window around the first match, for context in the UI. */
+  context: string
+}
+
+export interface BacklinksResponse {
+  id: string
+  title: string
+  backlinks: BacklinkHit[]
+}
+
+export interface DuplicateTitleItem {
+  id: string
+  source_id: string
+  path?: string | null
+  updated_at: number
+}
+
+export interface DuplicateTitleGroup {
+  title: string
+  count: number
+  all_extracted: boolean
+  items: DuplicateTitleItem[]
+}
+
+export interface DuplicateTitlesResponse {
+  groups: DuplicateTitleGroup[]
+  scanned: number
+}
+
 export interface Edge {
   id: string;
   source_id: string;
@@ -313,8 +349,49 @@ export interface ListItemsRequest {
   type?: string;
   /** true = only entries with a wiki path; false = only entries with no path (unorganized). */
   has_path?: boolean;
-  /** Exact-match filters on metadata fields (e.g. { author: "mats", repo: "rust-rag" }). */
+  needs_home?: boolean;
+  /** When true, include external graph-hub placeholders (empty text). Default false: excluded. */
+  include_external?: boolean;
+  /** Exact-match filters on metadata fields (e.g. { author: "mats" }).
+   *  A comma-separated value matches ANY alternative ({ tags: "work,home" }),
+   *  and array metadata matches when it contains the value. */
   metadata?: Record<string, string>;
+  /** Case-insensitive substring search over entry text, id, source_id and path. Server-side across the whole corpus. */
+  search?: string;
+  /** Inclusive lower bound on created_at (epoch ms). */
+  min_created_at?: number;
+  /** Inclusive upper bound on created_at (epoch ms). */
+  max_created_at?: number;
+}
+
+export interface MetadataFacetValue {
+  value: string;
+  count: number;
+}
+
+export interface MetadataFacet {
+  key: string;
+  /** Number of scanned entries carrying this key. */
+  count: number;
+  /** Most frequent values (at most 20), by descending count. */
+  values: MetadataFacetValue[];
+}
+
+export interface MetadataFacetsResponse {
+  facets: MetadataFacet[];
+  /** Number of entries actually scanned. */
+  scanned: number;
+  /** True when the corpus exceeded the scan cap and facets are partial. */
+  truncated: boolean;
+}
+
+export interface MetadataFacetsRequest {
+  source_id?: string;
+  path_prefix?: string;
+  type?: string;
+  needs_home?: boolean;
+  search?: string;
+  sample?: number;
 }
 
 export interface RechunkRequest {
@@ -337,6 +414,11 @@ export interface RechunkResponse {
 export interface PagedItems {
   items: Entry[];
   total_count: number;
+}
+
+export interface BulkDeleteResult {
+  deleted: string[];
+  not_found: string[];
 }
 
 export interface CreateEdgeRequest {
@@ -771,6 +853,10 @@ export const HARNESS_NODE_TYPES = [
   "harness_poc",
   // harness_decision folded into the generic `decision` type.
   "decision",
+  // Consolidated concern type (kind: risk|compliance|resource|scaling|
+  // validation|rollout). Legacy per-kind types below still exist on old
+  // entries — the tree endpoint normalizes them to harness_concern.
+  "harness_concern",
   "harness_risk",
   "harness_compliance",
   "harness_resource",

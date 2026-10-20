@@ -12,13 +12,24 @@ import {
 } from "@/components/insights/use-harness-index"
 import { cn } from "@/lib/utils"
 
+/** Search-scope toggle: one id, possibly several stored types behind it
+ *  (concerns span the consolidated type plus pre-consolidation legacy ones). */
 const EXPLORE_TYPES = [
-  { id: "harness_compliance", label: "Compliance" },
-  { id: "harness_risk", label: "Risks" },
-  { id: "decision", label: "Decisions" },
-  { id: "harness_scaling", label: "Scaling" },
-  { id: "harness_validation", label: "Validations" },
-  { id: "harness_poc", label: "POC sessions" },
+  {
+    id: "concerns",
+    label: "Concerns",
+    types: [
+      "harness_concern",
+      "harness_risk",
+      "harness_compliance",
+      "harness_resource",
+      "harness_scaling",
+      "harness_validation",
+      "harness_rollout",
+    ],
+  },
+  { id: "decision", label: "Decisions", types: ["decision"] },
+  { id: "harness_poc", label: "POC sessions", types: ["harness_poc"] },
 ] as const
 
 function prettyData(data: Record<string, unknown> | null | undefined): string {
@@ -37,9 +48,7 @@ export function GraphExplore({
 }) {
   const [query, setQuery] = useState("")
   const [submitted, setSubmitted] = useState<{ query: string; repoId: string | null } | null>(null)
-  const [types, setTypes] = useState<Set<string>>(
-    new Set(["harness_compliance", "harness_risk", "decision"])
-  )
+  const [types, setTypes] = useState<Set<string>>(new Set(["concerns", "decision"]))
   const [selectedHit, setSelectedHit] = useState<string | null>(null)
   const { data: full } = useItem(selectedHit)
 
@@ -49,7 +58,9 @@ export function GraphExplore({
       api.search({
         query: q as string,
         top_k: 12,
-        type_names: typeList as string[],
+        type_names: (typeList as string[]).flatMap(
+          (id) => EXPLORE_TYPES.find((t) => t.id === id)?.types ?? []
+        ),
       })
   )
 
@@ -159,7 +170,10 @@ export function GraphExplore({
                 >
                   <div className="flex items-center gap-2">
                     <span className="rounded-sm border px-1.5 py-0.5 font-mono text-[9px] uppercase text-muted-foreground">
-                      {(hit.type_name ?? "entry").replace("harness_", "")}
+                      {(hit.type_name === "harness_concern"
+                        ? "concern"
+                        : (hit.type_name ?? "entry")
+                      ).replace("harness_", "")}
                     </span>
                     {typeof severity === "string" && (
                       <span

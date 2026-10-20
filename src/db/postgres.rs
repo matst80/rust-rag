@@ -26,6 +26,14 @@ const EMBEDDING_VERSION: i32 = 2;
 /// bge-m3 sparse output is one weight per vocab token. Vocab size is fixed.
 pub const SPARSE_DIM: i32 = 250_002;
 
+/// True when the query contains at least one alphanumeric character, i.e.
+/// `plainto_tsquery('simple', …)` can form a real term. Gates the lexical
+/// CTE in `search_hybrid` so punctuation-only input skips the leg instead
+/// of risking degenerate matches.
+fn has_lexical_terms(query: &str) -> bool {
+    query.chars().any(|c| c.is_alphanumeric())
+}
+
 /// Convert our `(vocab_id, weight)` pairs into a `pgvector::SparseVector`.
 /// Returns `None` when the input is empty so the column is bound as NULL.
 fn build_sparsevec(pairs: &[(u32, f32)]) -> Option<pgvector::SparseVector> {
@@ -202,6 +210,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0020_manual_edge_source_dedup",
         include_str!("../../migrations/0020_manual_edge_source_dedup.sql"),
+    ),
+    (
+        "0022_chunks_lexical_tsv",
+        include_str!("../../migrations/0022_chunks_lexical_tsv.sql"),
+    ),
+    (
+        "0023_graph_edges_dangle_external",
+        include_str!("../../migrations/0023_graph_edges_dangle_external.sql"),
     ),
 ];
 
@@ -632,6 +648,8 @@ impl VectorStore for PostgresVectorStore {
                          WHERE c.dense_embedding IS NOT NULL \
                            AND ($2::text IS NULL OR d.source_id = $2) \
                            AND ($4::text IS NULL OR d.type = $4) \
+                           AND d.source_id <> 'external' \
+                           AND COALESCE((d.metadata->>'external')::boolean, FALSE) = FALSE \
                          ORDER BY c.document_id, c.dense_embedding <=> $1::vector \
                      ) ranked \
                      JOIN documents d ON d.id = ranked.document_id \
@@ -673,7 +691,7 @@ impl VectorStore for PostgresVectorStore {
 
     fn search_hybrid(
         &self,
-        _query_text: &str,
+        query_text: &str,
         query_embedding: &[f32],
         query_sparse: &[(u32, f32)],
         top_k: usize,
@@ -683,19 +701,19 @@ impl VectorStore for PostgresVectorStore {
         if query_embedding.is_empty() {
             anyhow::bail!("query embedding cannot be empty");
         }
-        // Empty sparse query collapses to dense-only RRF: useful when the
-        // embedder couldn't produce a sparse output (legacy export, etc.)
-        // or when callers explicitly want dense.
-        if query_sparse.is_empty() {
-            return self.search(query_embedding, top_k, source_id, type_name);
-        }
+        // No early return when the sparse leg is unavailable: each leg is
+        // gated inside the SQL ($10/$12), so a missing sparse head
+        // (dense-only ONNX export, bge-small, …) degrades to dense +
+        // lexical instead of silently dropping the lexical leg too.
+        let use_sparse = !query_sparse.is_empty();
 
         let pool = self.pool.clone();
         let dense_vec = pgvector::Vector::from(query_embedding.to_vec());
-        let sparse_vec = match build_sparsevec(query_sparse) {
-            Some(v) => v,
-            None => return self.search(query_embedding, top_k, source_id, type_name),
-        };
+        // Dummy empty vector when the leg is gated off: well-typed so the
+        // statement still binds, never evaluated because of the $12 gate.
+        let sparse_vec = build_sparsevec(query_sparse).unwrap_or_else(|| {
+            pgvector::SparseVector::from_map(std::iter::empty::<(&i32, &f32)>(), SPARSE_DIM)
+        });
         let limit = top_k as i64;
         let source = source_id.map(str::to_owned);
         let half_life_days: f64 = std::env::var("RAG_RECENCY_HALF_LIFE_DAYS")
@@ -703,18 +721,38 @@ impl VectorStore for PostgresVectorStore {
             .and_then(|v| v.parse().ok())
             .filter(|v: &f64| *v > 0.0)
             .unwrap_or(365.0);
+        // Weight of the lexical (tsvector) leg relative to dense/sparse in
+        // the RRF sum. 1.0 keeps the three legs equal; raise to favor exact
+        // keyword matches (e.g. proper nouns on short notes), lower (or 0.0
+        // to disable) if lexical noise ever outranks dense winners.
+        let lexical_weight: f64 = std::env::var("RAG_HYBRID_LEXICAL_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f64| *v >= 0.0)
+            .unwrap_or(1.0);
+        // Gate for the lexical CTE: without at least one alphanumeric char
+        // `plainto_tsquery('simple', …)` can't form a term, so skip the leg
+        // entirely instead of risking degenerate matches.
+        let use_lex = has_lexical_terms(query_text);
+        let query_owned = query_text.to_owned();
 
         // Reciprocal Rank Fusion over per-document scores.
         //
-        // For each retriever (dense, sparse) we rank all chunks by similarity
-        // and take MAX(1/(60 + rank)) per document — i.e. a doc's score is
-        // driven by its single best-matching chunk, not the sum across every
-        // matched chunk. Summing previously let large, many-chunk documents
-        // dominate results (lots of mediocre-rank chunks outscoring a single
-        // sharply relevant chunk in a small doc) — especially visible once
-        // the cross-encoder reranker, which had been masking this, is
-        // disabled. Full-outer-join the per-doc scores, then apply an
-        // exponential recency decay using `documents.updated_at`.
+        // For each retriever (dense, sparse, lexical) we rank all chunks by
+        // similarity and take MAX(1/(60 + rank)) per document — i.e. a doc's
+        // score is driven by its single best-matching chunk, not the sum
+        // across every matched chunk. Summing previously let large,
+        // many-chunk documents dominate results (lots of mediocre-rank
+        // chunks outscoring a single sharply relevant chunk in a small doc)
+        // — especially visible once the cross-encoder reranker, which had
+        // been masking this, is disabled. Full-outer-join the per-doc
+        // scores, then apply an exponential recency decay using
+        // `documents.updated_at`.
+        //
+        // The lexical leg ranks chunks by ts_rank_cd over the `chunks.tsv`
+        // generated column (`simple` dict: language-neutral tokenize +
+        // lowercase, no stop-word removal). It needs no embedder or GPU —
+        // the CPU-friendly substitute for reranking on exact-term queries.
         //
         // The 60 constant is the canonical RRF k. We pull 200 chunks per
         // retriever — enough to form a stable per-doc fusion at top_k≤50,
@@ -746,6 +784,8 @@ impl VectorStore for PostgresVectorStore {
                     WHERE c.dense_embedding IS NOT NULL
                       AND ($3::text IS NULL OR d.source_id = $3)
                       AND ($8::text IS NULL OR d.type = $8)
+                      AND d.source_id <> 'external'
+                      AND COALESCE((d.metadata->>'external')::boolean, FALSE) = FALSE
                     ORDER BY c.dense_embedding <=> $1::vector
                     LIMIT $5
                 ),
@@ -756,10 +796,29 @@ impl VectorStore for PostgresVectorStore {
                            ROW_NUMBER() OVER (ORDER BY c.sparse_embedding <=> $2::sparsevec) AS rank
                     FROM chunks c
                     JOIN documents d ON d.id = c.document_id
-                    WHERE c.sparse_embedding IS NOT NULL
+                    WHERE $12::bool
+                      AND c.sparse_embedding IS NOT NULL
                       AND ($3::text IS NULL OR d.source_id = $3)
                       AND ($8::text IS NULL OR d.type = $8)
+                      AND d.source_id <> 'external'
+                      AND COALESCE((d.metadata->>'external')::boolean, FALSE) = FALSE
                     ORDER BY c.sparse_embedding <=> $2::sparsevec
+                    LIMIT $5
+                ),
+                lex AS (
+                    SELECT c.document_id,
+                           c.section_path,
+                           c.content AS chunk_content,
+                           ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('simple', $9::text)) DESC) AS rank
+                    FROM chunks c
+                    JOIN documents d ON d.id = c.document_id
+                    WHERE $10::bool
+                      AND c.tsv @@ plainto_tsquery('simple', $9::text)
+                      AND ($3::text IS NULL OR d.source_id = $3)
+                      AND ($8::text IS NULL OR d.type = $8)
+                      AND d.source_id <> 'external'
+                      AND COALESCE((d.metadata->>'external')::boolean, FALSE) = FALSE
+                    ORDER BY ts_rank_cd(c.tsv, plainto_tsquery('simple', $9::text)) DESC
                     LIMIT $5
                 ),
                 dense_doc AS (
@@ -770,6 +829,10 @@ impl VectorStore for PostgresVectorStore {
                     SELECT document_id, MAX(1.0 / ($6::float + rank)) AS score
                     FROM sparse GROUP BY document_id
                 ),
+                lex_doc AS (
+                    SELECT document_id, MAX(1.0 / ($6::float + rank)) AS score
+                    FROM lex GROUP BY document_id
+                ),
                 dense_best AS (
                     SELECT DISTINCT ON (document_id) document_id, section_path, chunk_content
                     FROM dense ORDER BY document_id, rank ASC
@@ -778,12 +841,20 @@ impl VectorStore for PostgresVectorStore {
                     SELECT DISTINCT ON (document_id) document_id, section_path, chunk_content
                     FROM sparse ORDER BY document_id, rank ASC
                 ),
+                lex_best AS (
+                    SELECT DISTINCT ON (document_id) document_id, section_path, chunk_content
+                    FROM lex ORDER BY document_id, rank ASC
+                ),
                 fused AS (
-                    SELECT COALESCE(d.document_id, s.document_id) AS document_id,
-                           COALESCE(d.score, 0.0) + COALESCE(s.score, 0.0) AS rrf_score,
+                    SELECT COALESCE(d.document_id, s.document_id, l.document_id) AS document_id,
+                           COALESCE(d.score, 0.0) + COALESCE(s.score, 0.0)
+                             + COALESCE(l.score, 0.0) * $11::float AS rrf_score,
                            (d.score IS NOT NULL) AS matched_dense,
-                           (s.score IS NOT NULL) AS matched_sparse
-                    FROM dense_doc d FULL OUTER JOIN sparse_doc s USING (document_id)
+                           (s.score IS NOT NULL) AS matched_sparse,
+                           (l.score IS NOT NULL) AS matched_lex
+                    FROM dense_doc d
+                    FULL OUTER JOIN sparse_doc s USING (document_id)
+                    FULL OUTER JOIN lex_doc l USING (document_id)
                 )
                 SELECT d.id, d.content, d.metadata, d.source_id, d.created_at, d.updated_at,
                        d.type, d.tags, d.analysis_json, d.dreamed_at,
@@ -793,12 +864,14 @@ impl VectorStore for PostgresVectorStore {
                        )::FLOAT8 AS final_score,
                        f.matched_dense,
                        f.matched_sparse,
-                       COALESCE(db.section_path, sb.section_path) AS section_path,
-                       COALESCE(db.chunk_content, sb.chunk_content) AS chunk_content
+                       f.matched_lex,
+                       COALESCE(db.section_path, sb.section_path, lb.section_path) AS section_path,
+                       COALESCE(db.chunk_content, sb.chunk_content, lb.chunk_content) AS chunk_content
                 FROM fused f
                 JOIN documents d ON d.id = f.document_id
                 LEFT JOIN dense_best  db ON db.document_id = f.document_id
                 LEFT JOIN sparse_best sb ON sb.document_id = f.document_id
+                LEFT JOIN lex_best    lb ON lb.document_id = f.document_id
                 ORDER BY final_score DESC
                 LIMIT $4
             ";
@@ -814,6 +887,10 @@ impl VectorStore for PostgresVectorStore {
                         &RRF_K,               // $6
                         &half_life_days,      // $7
                         &type_name,           // $8
+                        &query_owned,         // $9
+                        &use_lex,             // $10
+                        &lexical_weight,      // $11
+                        &use_sparse,          // $12
                     ],
                 )
                 .await?;
@@ -835,13 +912,17 @@ impl VectorStore for PostgresVectorStore {
                     //   score=0.3  -> distance≈0.005
                     // Keeps frontend percentage bars (computed as
                     // `1 - distance`) sensible and monotonic in RRF score.
+                    let matched_lex: bool = row.try_get("matched_lex")?;
                     let pseudo = 1.0 - (final_score * 10.0).tanh();
-                    let mut retrievers = Vec::with_capacity(2);
+                    let mut retrievers = Vec::with_capacity(3);
                     if matched_dense {
                         retrievers.push("dense".to_owned());
                     }
                     if matched_sparse {
                         retrievers.push("sparse".to_owned());
+                    }
+                    if matched_lex {
+                        retrievers.push("lexical".to_owned());
                     }
                     Ok(SearchHit {
                         id: item.id.clone(),
@@ -874,6 +955,9 @@ impl VectorStore for PostgresVectorStore {
             let rows = client
                 .query(
                     "SELECT source_id, count(*)::bigint AS n FROM documents \
+                     WHERE id NOT LIKE 'ext:%' \
+                       AND source_id <> 'external' \
+                       AND COALESCE((metadata->>'external')::boolean, FALSE) = FALSE \
                      GROUP BY source_id ORDER BY n DESC, source_id ASC",
                     &[],
                 )
@@ -902,8 +986,26 @@ impl VectorStore for PostgresVectorStore {
         let path_prefix = request.path_prefix.clone().filter(|p| !p.is_empty());
         let type_filter = request.type_name.clone().filter(|t| !t.is_empty());
         let has_path = request.has_path;
+        let needs_home = request.needs_home.unwrap_or(false);
+        let metadata_filter = serde_json::to_value(&request.metadata_filter)?;
+        let search = request
+            .search
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| crate::db::escape_like_pattern(&s));
         // Dreaming cursor filter: NULL = never reviewed.
         let dreamed = request.dreamed;
+        // Importance range over metadata.importance. The regex guard keeps
+        // non-numeric values from aborting the query with a cast error;
+        // they count as 0, same as SQLite's CAST semantics.
+        let min_importance = request.min_importance;
+        let max_importance = request.max_importance;
+        // External hub placeholders carry empty text — hide them by default.
+        // An explicit `source_id == "external"` (or a metadata filter on
+        // `external`) opts back in, as does `include_external`.
+        let include_external = request.include_external
+            || request.source_id.as_deref() == Some("external")
+            || request.metadata_filter.contains_key("external");
 
         self.block(async move {
             let client = pool.get().await?;
@@ -915,9 +1017,12 @@ impl VectorStore for PostgresVectorStore {
                    AND ($4::text IS NULL OR LOWER(path) = LOWER($4) OR LOWER(path) LIKE LOWER($4) || '/%') \
                    AND ($5::text IS NULL OR type = $5) \
                    AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = ''))) \
-                   AND ($7::bool IS NULL OR ($7 AND dreamed_at IS NOT NULL) OR (NOT $7 AND dreamed_at IS NULL))";
+                   AND ($7::bool IS NULL OR ($7 AND dreamed_at IS NOT NULL) OR (NOT $7 AND dreamed_at IS NULL)) \
+                   AND ($8::bool OR (id NOT LIKE 'ext:%' AND source_id <> 'external' AND COALESCE((metadata->>'external')::boolean, FALSE) = FALSE)) AND (NOT $9::bool OR ((path IS NULL OR path = '') AND COALESCE(metadata->>'tags', '') IN ('', '[]', 'null') AND content NOT LIKE '%[[%]]%' AND NOT EXISTS (SELECT 1 FROM graph_edges e WHERE (e.from_item_id = documents.id OR e.to_item_id = documents.id) AND e.edge_type != 'similarity'))) AND NOT EXISTS (SELECT 1 FROM jsonb_each_text($10::jsonb) AS f WHERE NOT EXISTS (SELECT 1 FROM unnest(string_to_array(f.value, ',')) AS wanted(v) WHERE btrim(v) <> '' AND (documents.metadata->>f.key = btrim(v) OR (jsonb_typeof(documents.metadata->f.key) = 'array' AND documents.metadata->f.key ? btrim(v))))) AND ($11::text IS NULL OR (content ILIKE '%' || $11 || '%' ESCAPE '\' OR id ILIKE '%' || $11 || '%' ESCAPE '\' OR source_id ILIKE '%' || $11 || '%' ESCAPE '\' OR COALESCE(path, '') ILIKE '%' || $11 || '%' ESCAPE '\')) \
+                   AND ($14::int IS NULL OR COALESCE(CASE WHEN (metadata->>'importance') ~ '^-?[0-9]+$' THEN ((metadata->>'importance'))::int ELSE 0 END, 0) >= $14) \
+                   AND ($15::int IS NULL OR COALESCE(CASE WHEN (metadata->>'importance') ~ '^-?[0-9]+$' THEN ((metadata->>'importance'))::int ELSE 0 END, 0) <= $15)";
             let total: i64 = client
-                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed])
+                .query_one(count_sql, &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed, &include_external, &needs_home, &metadata_filter, &search, &min_importance, &max_importance])
                 .await?
                 .get(0);
 
@@ -930,13 +1035,19 @@ impl VectorStore for PostgresVectorStore {
                    AND ($5::text IS NULL OR type = $5) \
                    AND ($6::bool IS NULL OR ($6 AND path IS NOT NULL AND path != '') OR (NOT $6 AND (path IS NULL OR path = ''))) \
                    AND ($7::bool IS NULL OR ($7 AND dreamed_at IS NOT NULL) OR (NOT $7 AND dreamed_at IS NULL)) \
+                   AND ($8::bool OR (id NOT LIKE 'ext:%' AND source_id <> 'external' AND COALESCE((metadata->>'external')::boolean, FALSE) = FALSE)) \
+ AND (NOT $11::bool OR ((path IS NULL OR path = '') AND COALESCE(metadata->>'tags', '') IN ('', '[]', 'null') AND content NOT LIKE '%[[%]]%' AND NOT EXISTS (SELECT 1 FROM graph_edges e WHERE (e.from_item_id = documents.id OR e.to_item_id = documents.id) AND e.edge_type != 'similarity'))) \
+ AND NOT EXISTS (SELECT 1 FROM jsonb_each_text($12::jsonb) AS f WHERE NOT EXISTS (SELECT 1 FROM unnest(string_to_array(f.value, ',')) AS wanted(v) WHERE btrim(v) <> '' AND (documents.metadata->>f.key = btrim(v) OR (jsonb_typeof(documents.metadata->f.key) = 'array' AND documents.metadata->f.key ? btrim(v))))) \
+ AND ($13::text IS NULL OR (content ILIKE '%' || $13 || '%' ESCAPE '\' OR id ILIKE '%' || $13 || '%' ESCAPE '\' OR source_id ILIKE '%' || $13 || '%' ESCAPE '\' OR COALESCE(path, '') ILIKE '%' || $13 || '%' ESCAPE '\')) \
+                 AND ($14::int IS NULL OR COALESCE(CASE WHEN (metadata->>'importance') ~ '^-?[0-9]+$' THEN ((metadata->>'importance'))::int ELSE 0 END, 0) >= $14) \
+                 AND ($15::int IS NULL OR COALESCE(CASE WHEN (metadata->>'importance') ~ '^-?[0-9]+$' THEN ((metadata->>'importance'))::int ELSE 0 END, 0) <= $15) \
                  ORDER BY created_at {order} \
-                 LIMIT $8 OFFSET $9"
+                 LIMIT $9 OFFSET $10"
             );
             let rows = client
                 .query(
                     &sql,
-                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed, &limit, &offset],
+                    &[&source, &min_created, &max_created, &path_prefix, &type_filter, &has_path, &dreamed, &include_external, &limit, &offset, &needs_home, &metadata_filter, &search, &min_importance, &max_importance],
                 )
                 .await?;
             let items: Vec<ItemRecord> = rows.iter().map(row_to_item).collect::<Result<_>>()?;
@@ -1007,10 +1118,19 @@ impl VectorStore for PostgresVectorStore {
         let pool = self.pool.clone();
         let id = id.to_owned();
         self.block(async move {
-            let client = pool.get().await?;
-            let n = client
+            let mut client = pool.get().await?;
+            let tx = client.transaction().await?;
+            // graph_edges has no foreign keys, so incident edges are removed
+            // explicitly (replacing the old ON DELETE CASCADE behavior).
+            tx.execute(
+                "DELETE FROM graph_edges WHERE from_item_id = $1 OR to_item_id = $1",
+                &[&id],
+            )
+            .await?;
+            let n = tx
                 .execute("DELETE FROM documents WHERE id = $1", &[&id])
                 .await?;
+            tx.commit().await?;
             Ok(n > 0)
         })
     }
@@ -1548,7 +1668,11 @@ impl VectorStore for PostgresVectorStore {
         if limit == 0 {
             anyhow::bail!("limit must be greater than zero");
         }
-        if self.get_item(center_id)?.is_none() {
+        // A dangling `ext:` hub is a valid center (resolved synthetically
+        // below); anything else missing is a caller error.
+        if self.get_item(center_id)?.is_none()
+            && super::synthetic_external_item(center_id).is_none()
+        {
             anyhow::bail!("item {center_id} not found");
         }
 
@@ -1585,6 +1709,11 @@ impl VectorStore for PostgresVectorStore {
         for node_id in &ordered_node_ids {
             if let Some(item) = self.get_item(node_id)? {
                 nodes.push(item);
+            } else if let Some(stub) = super::synthetic_external_item(node_id) {
+                // Dangling `ext:` endpoint — render the in-memory stand-in so
+                // graph views can label the node. Other missing ids (deleted
+                // items whose edges were somehow left behind) stay skipped.
+                nodes.push(stub);
             }
         }
 
@@ -1908,8 +2037,9 @@ impl VectorStore for PostgresVectorStore {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
 
-            // `external` placeholders are hubs themselves — linking them to each
-            // other would fabricate a mesh no real entry supports.
+            // Rows flagged `external` are excluded defensively (no such rows
+            // should exist anymore — hubs dangle): linking hubs to each other
+            // would fabricate a mesh no real entry supports.
             let raw_rows = tx
                 .query(
                     "SELECT id, metadata, data
@@ -1993,28 +2123,12 @@ impl VectorStore for PostgresVectorStore {
             )
             .await?;
 
+            // Hub `ext:` endpoints dangle — no rows are stored for them. Just
+            // validate the plan produced well-formed ids.
             for hub in &plan.hubs {
-                let Some((kind, key)) = super::parse_external_ref_id(&hub.id) else {
+                if super::parse_external_ref_id(&hub.id).is_none() {
                     anyhow::bail!("generated hub id {} is not a valid external ref", hub.id);
-                };
-                tx.execute(
-                    "INSERT INTO documents (id, source_id, content, metadata)
-                     VALUES ($1, 'external', '', $2)
-                     ON CONFLICT (id) DO NOTHING",
-                    &[
-                        &hub.id,
-                        &serde_json::json!({
-                            "external": true,
-                            "embed": false,
-                            "kind": kind,
-                            "key": key,
-                            "metadata_key": hub.metadata_key,
-                            "value": hub.value,
-                            "members": hub.members,
-                        }),
-                    ],
-                )
-                .await?;
+                }
             }
 
             let timestamp = current_ms();
@@ -2109,10 +2223,10 @@ impl VectorStore for PostgresVectorStore {
         let record = self.block(async move {
             let mut client = pool.get().await.context("acquiring postgres connection")?;
             let tx = client.transaction().await?;
-            // FK in the schema enforces both endpoints exist; surface a
-            // friendlier error if the lookup fails, unless the endpoint is
-            // an external ref (`ext:{kind}:{key}`), in which case we create
-            // a placeholder `documents` row for it instead of erroring.
+            // graph_edges has no foreign keys: `ext:{kind}:{key}` endpoints
+            // dangle by design and need no stored row. Any other missing
+            // endpoint is a caller error — surface a friendlier message, since
+            // no FK is left to enforce it.
             for endpoint in [&input.from_item_id, &input.to_item_id] {
                 let exists = tx
                     .query_opt("SELECT 1 FROM documents WHERE id = $1", &[endpoint])
@@ -2120,16 +2234,9 @@ impl VectorStore for PostgresVectorStore {
                 if exists.is_some() {
                     continue;
                 }
-                let Some((kind, key)) = super::parse_external_ref_id(endpoint) else {
+                if super::parse_external_ref_id(endpoint).is_none() {
                     anyhow::bail!("item {endpoint} not found");
-                };
-                tx.execute(
-                    "INSERT INTO documents (id, source_id, content, metadata)
-                     VALUES ($1, 'external', '', $2)
-                     ON CONFLICT (id) DO NOTHING",
-                    &[endpoint, &super::external_ref_metadata(kind, key)],
-                )
-                .await?;
+                }
             }
             let sort_order = match explicit_sort_order.as_deref() {
                 Some(value) => super::normalize_edge_sort_order(value)?,
@@ -3841,5 +3948,27 @@ impl UserMemoryStore for PostgresVectorStore {
                 .await?;
             Ok(row.try_get(0)?)
         })
+    }
+}
+
+#[cfg(test)]
+mod lexical_tests {
+    use super::has_lexical_terms;
+
+    #[test]
+    fn lexical_gate_accepts_normal_queries() {
+        assert!(has_lexical_terms("enduro last service"));
+        assert!(has_lexical_terms("enduro"));
+        assert!(has_lexical_terms("  spaced  "));
+        assert!(has_lexical_terms("sista servicen")); // Swedish passes too
+        assert!(has_lexical_terms("8k? yes 42"));
+    }
+
+    #[test]
+    fn lexical_gate_rejects_term_less_queries() {
+        assert!(!has_lexical_terms(""));
+        assert!(!has_lexical_terms("   "));
+        assert!(!has_lexical_terms("!!! ??? ..."));
+        assert!(!has_lexical_terms("---"));
     }
 }

@@ -30,12 +30,21 @@ interface SearchResultsProps {
   isAssisted?: boolean;
 }
 
+function isExternalHit(hit: { id: string; source_id?: string; metadata?: any }): boolean {
+  if (hit.id.startsWith("ext:")) return true;
+  if ((hit as { source_id?: string }).source_id === "external") return true;
+  const meta = (hit as { metadata?: any }).metadata;
+  return meta?.external === true;
+}
+
 export function SearchResults({
   results,
   related = [],
   query,
   isAssisted,
 }: SearchResultsProps) {
+  results = results.filter((r) => !isExternalHit(r));
+  related = related.filter((r) => !isExternalHit(r));
   if (results.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center animate-in fade-in slide-in-from-bottom-4 duration-700">

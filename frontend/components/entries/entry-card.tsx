@@ -16,9 +16,11 @@ import {
   GripVertical,
 } from "lucide-react";
 import { memo, useState } from "react";
-import { cn, entryTitle, formatRelativeTime, stringToHslColor } from "@/lib/utils";
+import { cn, entryTitle, entryTitleUnclipped, formatRelativeTime, stringToHslColor } from "@/lib/utils";
+import { DuplicateTitleBadge, disambiguator, useDuplicateGroup } from "./duplicate-title-badge";
 import { setEntryDragData, clearEntryDrag } from "@/lib/drag-entry";
 import { ComboButton } from "@/components/ui/combo-button";
+import { Checkbox } from "@/components/ui/checkbox";
 import type { Entry, SearchResult } from "@/lib/api";
 import { MarkdownView } from "./markdown-view";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +33,10 @@ interface EntryCardProps {
   index?: number;
   onDelete?: (id: string) => Promise<void> | void;
   showScore?: boolean;
+  /** When true, a selection checkbox is rendered for bulk actions. */
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }
 
 function scoreColor(pct: number) {
@@ -61,6 +67,7 @@ function stripMarkdown(text: string): string {
     .replace(/#+\s+/g, "")
     .replace(/[*_`~]/g, "")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\[\[([^\]|\]]+)(?:\|([^\]]+))?\]\]/g, (_m, t, l) => l ?? t)
     .replace(/^[*-]\s+/gm, "")
     .replace(/^\d+\.\s+/gm, "")
     .replace(/\s+/g, " ")
@@ -72,6 +79,9 @@ function EntryCardInner({
   index = 0,
   onDelete,
   showScore = false,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
 }: EntryCardProps) {
   const isSearchResult = "score" in entry;
   const search = isSearchResult ? (entry as SearchResult) : null;
@@ -88,6 +98,7 @@ function EntryCardInner({
   const analysis = fullEntry.analysis;
 
   const [isExpanded, setIsExpanded] = useState(false);
+  const dupGroup = useDuplicateGroup(entryTitleUnclipped(entry));
 
   return (
     <div
@@ -106,8 +117,24 @@ function EntryCardInner({
             ? "p-4 md:p-5 bg-transparent"
             : "py-3.5 px-0 bg-transparent border-b border-border/50",
           !isExpanded && "group-hover/card:translate-x-0.5",
+          selectable && selected && "bg-primary/[0.04]",
         )}
       >
+        {selectable && (
+          <span
+            role="checkbox"
+            aria-checked={selected}
+            aria-label={selected ? "Deselect entry" : "Select entry"}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleSelect?.(entry.id);
+            }}
+            className="mt-1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-colors hover:bg-primary/10"
+          >
+            <Checkbox checked={selected} tabIndex={-1} className="pointer-events-none" />
+          </span>
+        )}
         {/* Score bar on left edge */}
         {/*{showScore && scorePercent !== null && (
           <div
@@ -279,6 +306,26 @@ function EntryCardInner({
                   <span className="truncate max-w-[12rem]">{part}</span>
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* Duplicate-title disambiguation — identical headings are otherwise indistinguishable */}
+          {dupGroup && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <Link
+                href={`/entries/${encodeURIComponent(entry.id)}`}
+                className="truncate text-sm font-semibold hover:text-primary hover:underline"
+              >
+                {entryTitle(entry, 120)}
+              </Link>
+              <DuplicateTitleBadge group={dupGroup} />
+              <span className="truncate font-mono text-[10px] text-muted-foreground/70">
+                {disambiguator({
+                  path: "path" in entry ? entry.path ?? null : null,
+                  source_id: entry.source_id,
+                  id: entry.id,
+                })}
+              </span>
             </div>
           )}
 

@@ -88,7 +88,7 @@ pub struct DreamClusterRecord {
 
 /// One row in `dream_actions`: what the dreaming worker decided about an item,
 /// what it actually did, and why. `dry_run` rows are proposals only.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct DreamActionRecord {
     pub id: String,
     pub round_id: String,
@@ -493,7 +493,7 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
         OntologyPredicateRecord {
             name: "BREAKS_INTO".to_owned(),
             source_id: None,
-            description: "from (a plan) breaks down into to (a sprint)".to_owned(),
+            description: "Legacy: from (a plan) breaks down into to (a sprint). Use `contains` for new plan→sprint edges.".to_owned(),
             direction: "from breaks down into to".to_owned(),
             example_from: Some("harness_plan".to_owned()),
             example_to: Some("harness_sprint".to_owned()),
@@ -543,7 +543,7 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
         OntologyPredicateRecord {
             name: "HAD_POC".to_owned(),
             source_id: None,
-            description: "from (a repo) had a POC/research session to run against it".to_owned(),
+            description: "Legacy: from (a repo) had a POC/research session to run against it. Use `contains` for new repo→session edges.".to_owned(),
             direction: "from had POC session to".to_owned(),
             example_from: Some("harness_repo".to_owned()),
             example_to: Some("harness_poc".to_owned()),
@@ -553,21 +553,21 @@ pub fn default_ontology_predicates() -> Vec<OntologyPredicateRecord> {
         OntologyPredicateRecord {
             name: "RAISED".to_owned(),
             source_id: None,
-            description: "from (a POC session) raised promoted memory to (decision/risk/…)"
+            description: "from (a POC session) raised promoted memory to (decision/concern/…)"
                 .to_owned(),
             direction: "from raised to".to_owned(),
             example_from: Some("harness_poc".to_owned()),
-            example_to: Some("harness_risk".to_owned()),
+            example_to: Some("harness_concern".to_owned()),
             created_at: now,
             updated_at: now,
         },
         OntologyPredicateRecord {
             name: "ADDRESSED_BY".to_owned(),
             source_id: None,
-            description: "from (a risk) is mitigated or covered by validation to".to_owned(),
+            description: "from (a risk concern) is mitigated or covered by validation concern to".to_owned(),
             direction: "from is addressed by to".to_owned(),
-            example_from: Some("harness_risk".to_owned()),
-            example_to: Some("harness_validation".to_owned()),
+            example_from: Some("harness_concern".to_owned()),
+            example_to: Some("harness_concern".to_owned()),
             created_at: now,
             updated_at: now,
         },
@@ -875,11 +875,41 @@ pub struct ListItemsRequest {
     /// `Some(true)` restricts to entries with a wiki path set; `Some(false)`
     /// restricts to entries with no path (unorganized). `None` is unfiltered.
     pub has_path: Option<bool>,
+    /// Only entries without a path, tags, or explicit links.
+    pub needs_home: Option<bool>,
     /// `Some(false)` restricts to entries never reviewed by the dreaming
     /// worker (`dreamed_at IS NULL`); `Some(true)` restricts to entries that
     /// already have a `dreamed_at`. `None` is unfiltered. This is the durable
     /// cursor complement to `max_created_at`.
     pub dreamed: Option<bool>,
+    /// When `false` (default), external graph-hub placeholders (`ext:*` ids,
+    /// `source_id == "external"`, or `metadata.external == true`) are
+    /// excluded. They carry empty text and must not surface in listings.
+    /// Pass `true` to opt back in. An explicit `source_id == "external"`
+    /// (or a `metadata_filter` on `external`) also opts in.
+    pub include_external: bool,
+    /// Case-insensitive substring match against entry text, id, `source_id`
+    /// and wiki `path`. `None` (or blank) is unfiltered. `LIKE` wildcards in
+    /// the input are escaped so they match literally.
+    pub search: Option<String>,
+    /// Importance range over `metadata.importance` (1-5 scale). Missing or
+    /// non-numeric importance counts as 0. Added for dreaming passes so an
+    /// "important memories" subset is one query instead of a full scan.
+    pub min_importance: Option<i32>,
+    pub max_importance: Option<i32>,
+}
+
+/// Escape `%`, `_` and the escape character itself so a user-supplied
+/// substring is matched literally inside a `LIKE ... ESCAPE '\'` pattern.
+pub fn escape_like_pattern(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch == '\\' || ch == '%' || ch == '_' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -919,10 +949,11 @@ pub struct LooseLinkRule {
     pub weight: f32,
 }
 
-/// A hub placeholder (`ext:` entry) standing in for one metadata cluster.
+/// A virtual hub (`ext:` id) standing in for one metadata cluster. No row is
+/// stored for it — member edges dangle and the hub resolves synthetically.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct LooseLinkHub {
-    /// Id of the `ext:` placeholder, e.g. `ext:link:repo-rust-rag`.
+    /// Id of the `ext:` hub, e.g. `ext:link:repo-rust-rag`.
     pub id: String,
     pub metadata_key: String,
     pub value: String,
@@ -936,7 +967,7 @@ pub struct LooseLinkReport {
     pub clusters: usize,
     /// Value groups that matched only one entry — no edges to draw.
     pub clusters_skipped_singleton: usize,
-    /// Edges from entries to their cluster's hub placeholder.
+    /// Edges from entries to their cluster's (virtual) hub.
     pub hub_edges: usize,
     /// Optional pairwise edges inside a cluster, capped per cluster.
     pub clique_edges: usize,
@@ -966,9 +997,11 @@ pub fn format_edge_sort_order(value: i64) -> String {
 
 /// Parses `ext:{kind}:{key}` into `(kind, key)`. Used as a manual-edge
 /// endpoint id for linking to something outside the item store (an
-/// external card, repo, ticket) without mirroring it in as a fake,
-/// searchable item. `kind`/`key` are restricted to `[a-zA-Z0-9_-]+` so the
-/// id is always safe to embed in JSON/SQL without escaping concerns.
+/// external card, repo, ticket). Such endpoints dangle by design — no row
+/// is stored for them (graph_edges has no foreign keys); read paths resolve
+/// them in memory via [`synthetic_external_item`]. `kind`/`key` are
+/// restricted to `[a-zA-Z0-9_-]+` so the id is always safe to embed in
+/// JSON/SQL without escaping concerns.
 pub fn parse_external_ref_id(id: &str) -> Option<(&str, &str)> {
     let rest = id.strip_prefix("ext:")?;
     let (kind, key) = rest.split_once(':')?;
@@ -980,10 +1013,10 @@ pub fn parse_external_ref_id(id: &str) -> Option<(&str, &str)> {
     (valid(kind) && valid(key)).then_some((kind, key))
 }
 
-/// Metadata for the placeholder `items`/`documents` row backing an external
-/// ref endpoint: `embed: false` marks it to be skipped by the embedding
-/// pipeline, `external: true` marks it for exclusion from search/listing
-/// filters that care to check.
+/// Metadata describing an external ref endpoint: `embed: false` marks it to
+/// be skipped by the embedding pipeline, `external: true` marks it for
+/// exclusion from search/listing filters that care to check. Used for the
+/// in-memory stand-ins built by [`synthetic_external_item`].
 pub fn external_ref_metadata(kind: &str, key: &str) -> Value {
     serde_json::json!({
         "external": true,
@@ -1004,7 +1037,33 @@ pub fn extract_metadata_key(
     graph::extract_metadata_key(metadata, data, key)
 }
 
-/// Id of the placeholder entry that hubs a metadata cluster, e.g.
+/// Build an in-memory stand-in for an `ext:{kind}:{key}` edge endpoint that
+/// has no stored row. Lets graph views render dangling external endpoints
+/// with a readable title instead of dropping them. Returns `None` for ids
+/// that are not valid external refs (e.g. a deleted real item).
+pub fn synthetic_external_item(id: &str) -> Option<ItemRecord> {
+    let (kind, key) = parse_external_ref_id(id)?;
+    let title = format!("External {kind}: {key}");
+    let mut metadata = external_ref_metadata(kind, key);
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("title".to_owned(), Value::String(title.clone()));
+    }
+    Some(ItemRecord {
+        id: id.to_owned(),
+        text: title,
+        metadata,
+        source_id: "external".to_owned(),
+        created_at: 0,
+        updated_at: 0,
+        path: None,
+        type_name: None,
+        data: None,
+        analysis: None,
+        dreamed_at: None,
+    })
+}
+
+/// Id of the virtual hub that anchors a metadata cluster, e.g.
 /// `ext:repo:rust-rag`. Exposed so callers can resolve the hub for a given
 /// `(metadata_key, value)` without re-deriving the sanitization rules.
 pub fn loose_link_hub_id(metadata_key: &str, value: &str) -> String {
@@ -1371,9 +1430,10 @@ pub trait VectorStore: Send + Sync {
     /// Recompute every metadata-derived "loose link" edge from scratch.
     ///
     /// Entries sharing a value under any `rules[].metadata_key` are linked with
-    /// the rule's `relation`. Each cluster gets an `ext:` hub placeholder so the
-    /// graph stays O(n) instead of O(n²) — the hub is a real (placeholder) entry,
-    /// so existing BFS reaches the whole cluster at depth 2 with no changes.
+    /// the rule's `relation`. Each cluster gets a virtual `ext:` hub so the
+    /// graph stays O(n) instead of O(n²) — the hub dangles (no stored row) and
+    /// resolves synthetically, so existing BFS reaches the whole cluster at
+    /// depth 2 with no changes.
     ///
     /// Full rebuild by design: the pass is a metadata-only table walk (no
     /// embeddings, no LLM), so redoing it from zero each time is cheap and
@@ -1681,6 +1741,8 @@ impl VectorStore for SqliteVectorStore {
                 FROM items
                 JOIN vec_items ON vec_items.id = items.id
                 WHERE items.source_id = ?1
+                  AND items.source_id != 'external'
+                  AND COALESCE(json_extract(items.metadata, '$.external'), 0) = 0
                   AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY distance ASC
                 LIMIT ?3
@@ -1730,7 +1792,9 @@ impl VectorStore for SqliteVectorStore {
                 FROM matches
                 JOIN vec_items ON vec_items.id = matches.id
                 JOIN items ON items.id = matches.id
-                WHERE (?3 IS NULL OR items.type = ?3)
+                WHERE items.source_id != 'external'
+                  AND COALESCE(json_extract(items.metadata, '$.external'), 0) = 0
+                  AND (?3 IS NULL OR items.type = ?3)
                 ORDER BY distance ASC
                 LIMIT ?4
                 ",
@@ -1805,6 +1869,8 @@ impl VectorStore for SqliteVectorStore {
                 JOIN items_fts ON items_fts.id = items.id
                 WHERE items_fts MATCH ?1
                   AND (?2 IS NULL OR items.source_id = ?2)
+                  AND items.source_id != 'external'
+                  AND COALESCE(json_extract(items.metadata, '$.external'), 0) = 0
                   AND (?4 IS NULL OR items.type = ?4)
                 ORDER BY score ASC
                 LIMIT ?3
@@ -1977,6 +2043,9 @@ impl VectorStore for SqliteVectorStore {
             "
             SELECT source_id, COUNT(*) AS item_count
             FROM items
+            WHERE id NOT LIKE 'ext:%'
+              AND source_id != 'external'
+              AND COALESCE(json_extract(metadata, '$.external'), 0) = 0
             GROUP BY source_id
             ORDER BY source_id ASC
             ",
@@ -2019,6 +2088,12 @@ impl VectorStore for SqliteVectorStore {
             .context("sqlite connection has already been closed")?;
         let transaction = connection.transaction()?;
         transaction.execute("DELETE FROM vec_items WHERE id = ?1", params![id])?;
+        // graph_edges has no foreign keys, so incident edges are removed
+        // explicitly (replacing the old ON DELETE CASCADE behavior).
+        transaction.execute(
+            "DELETE FROM graph_edges WHERE from_item_id = ?1 OR to_item_id = ?1",
+            params![id],
+        )?;
         let deleted = transaction.execute("DELETE FROM items WHERE id = ?1", params![id])?;
         transaction.commit()?;
 
@@ -2027,6 +2102,22 @@ impl VectorStore for SqliteVectorStore {
         }
 
         Ok(deleted > 0)
+    }
+
+    /// Replace an entry's metadata without touching its text, embedding or
+    /// namespace. Used by the dreaming apply pass to fold a deleted
+    /// duplicate's tags/importance into its keeper.
+    fn update_item_metadata(&self, id: &str, metadata: Value) -> Result<()> {
+        let serialized = serde_json::to_string(&metadata)?;
+        let guard = self.connection.lock().expect("sqlite mutex poisoned");
+        let connection = guard
+            .as_ref()
+            .context("sqlite connection has already been closed")?;
+        connection.execute(
+            "UPDATE items SET metadata = ?1 WHERE id = ?2",
+            params![serialized, id],
+        )?;
+        Ok(())
     }
 
     fn set_item_dreamed_at(&self, id: &str, at: Option<i64>) -> Result<bool> {
@@ -2472,7 +2563,11 @@ impl VectorStore for SqliteVectorStore {
         let connection = guard
             .as_ref()
             .context("sqlite connection has already been closed")?;
-        if get_item_internal(connection, center_id)?.is_none() {
+        // A dangling `ext:` hub is a valid center (resolved synthetically
+        // below); anything else missing is a caller error.
+        if get_item_internal(connection, center_id)?.is_none()
+            && synthetic_external_item(center_id).is_none()
+        {
             anyhow::bail!("item {center_id} not found");
         }
 
@@ -2509,6 +2604,11 @@ impl VectorStore for SqliteVectorStore {
         for node_id in &ordered_node_ids {
             if let Some(item) = get_item_internal(connection, node_id)? {
                 nodes.push(item);
+            } else if let Some(stub) = synthetic_external_item(node_id) {
+                // Dangling `ext:` endpoint — render the in-memory stand-in so
+                // graph views can label the node. Other missing ids (deleted
+                // items whose edges were somehow left behind) stay skipped.
+                nodes.push(stub);
             }
         }
 
@@ -2643,28 +2743,12 @@ impl VectorStore for SqliteVectorStore {
         )?;
 
         let timestamp = current_timestamp_millis()?;
+        // Hub `ext:` endpoints dangle — no rows are stored for them. Just
+        // validate the plan produced well-formed ids.
         for hub in &plan.hubs {
-            let Some((kind, key)) = parse_external_ref_id(&hub.id) else {
+            if parse_external_ref_id(&hub.id).is_none() {
                 anyhow::bail!("generated hub id {} is not a valid external ref", hub.id);
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO items (id, text, metadata, source_id, created_at, updated_at)
-                 VALUES (?1, '', ?2, 'external', ?3, ?3)",
-                params![
-                    hub.id,
-                    serde_json::json!({
-                        "external": true,
-                        "embed": false,
-                        "kind": kind,
-                        "key": key,
-                        "metadata_key": hub.metadata_key,
-                        "value": hub.value,
-                        "members": hub.members,
-                    })
-                    .to_string(),
-                    timestamp,
-                ],
-            )?;
+            }
         }
 
         // SQLite's `add_manual_edge` has no ON CONFLICT lane (migration 0020's
@@ -2733,18 +2817,16 @@ impl VectorStore for SqliteVectorStore {
             .context("sqlite connection has already been closed")?;
         let transaction = connection.transaction()?;
 
+        // graph_edges has no foreign keys: `ext:{kind}:{key}` endpoints dangle
+        // by design and need no stored row. Any other missing endpoint is a
+        // caller error — the existence check for real items lives here.
         for endpoint in [&input.from_item_id, &input.to_item_id] {
             if get_item_internal(&transaction, endpoint)?.is_some() {
                 continue;
             }
-            let Some((kind, key)) = parse_external_ref_id(endpoint) else {
+            if parse_external_ref_id(endpoint).is_none() {
                 anyhow::bail!("item {} not found", endpoint);
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO items (id, text, metadata, source_id, created_at, updated_at)
-                 VALUES (?1, '', ?2, 'external', ?3, ?3)",
-                params![endpoint, external_ref_metadata(kind, key).to_string(), timestamp],
-            )?;
+            }
         }
         let sort_order = match input.sort_order.as_deref() {
             Some(value) => normalize_edge_sort_order(value)?,
@@ -4111,11 +4193,50 @@ fn list_items_internal(
         sql_params.push(Box::new(max_at));
     }
 
+    // Property filters: exact match per key, with two conveniences for the
+    // entries UI. A comma-separated filter value means OR (`tags=work,home`
+    // matches either), and array metadata matches when it *contains* the
+    // value (`tags: ["work"]` matches `tags=work`). Nested objects never
+    // match — only scalars and top-level array elements do.
     for (key, value) in &request.metadata_filter {
+        let wanted: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
         let path = format!("$.{}", key);
-        where_clauses.push("json_extract(metadata, ?) = ?".to_string());
-        sql_params.push(Box::new(path));
-        sql_params.push(Box::new(value.clone()));
+        let mut ors = Vec::with_capacity(wanted.len());
+        for v in &wanted {
+            ors.push(
+                "(json_extract(metadata, ?) = ? \
+                  OR (json_type(metadata, ?) = 'array' \
+                      AND EXISTS (SELECT 1 FROM json_each(metadata, ?) WHERE value = ?)))"
+                    .to_string(),
+            );
+            sql_params.push(Box::new(path.clone()));
+            sql_params.push(Box::new((*v).to_owned()));
+            sql_params.push(Box::new(path.clone()));
+            sql_params.push(Box::new(path.clone()));
+            sql_params.push(Box::new((*v).to_owned()));
+        }
+        where_clauses.push(format!("({})", ors.join(" OR ")));
+    }
+
+    if let Some(search) = request.search.as_deref().filter(|s| !s.trim().is_empty()) {
+        let pattern = escape_like_pattern(search);
+        where_clauses.push(
+            "(LOWER(text) LIKE '%' || LOWER(?) || '%' ESCAPE '\\' \
+              OR LOWER(id) LIKE '%' || LOWER(?) || '%' ESCAPE '\\' \
+              OR LOWER(source_id) LIKE '%' || LOWER(?) || '%' ESCAPE '\\' \
+              OR LOWER(COALESCE(path, '')) LIKE '%' || LOWER(?) || '%' ESCAPE '\\')"
+                .to_string(),
+        );
+        for _ in 0..4 {
+            sql_params.push(Box::new(pattern.clone()));
+        }
     }
 
     if let Some(prefix) = request.path_prefix.as_ref().filter(|p| !p.is_empty()) {
@@ -4138,12 +4259,48 @@ fn list_items_internal(
         });
     }
 
+    if request.needs_home == Some(true) {
+        where_clauses.push("(path IS NULL OR path = '')".to_string());
+        where_clauses.push("COALESCE(CAST(json_extract(metadata, '$.tags') AS TEXT), '') IN ('', '[]', 'null')".to_string());
+        where_clauses.push("NOT EXISTS (SELECT 1 FROM graph_edges e WHERE (e.from_item_id = items.id OR e.to_item_id = items.id) AND e.edge_type != 'similarity')".to_string());
+        where_clauses.push("text NOT LIKE '%[[%]]%'".to_string());
+    }
+
     if let Some(dreamed) = request.dreamed {
         where_clauses.push(if dreamed {
             "dreamed_at IS NOT NULL".to_string()
         } else {
             "dreamed_at IS NULL".to_string()
         });
+    }
+
+    // Importance range: missing or non-numeric counts as 0, so `min` only
+    // ever excludes, never surprises.
+    if let Some(min) = request.min_importance {
+        where_clauses.push(
+            "COALESCE(CAST(json_extract(metadata, '$.importance') AS INTEGER), 0) >= ?".to_string(),
+        );
+        sql_params.push(Box::new(min));
+    }
+    if let Some(max) = request.max_importance {
+        where_clauses.push(
+            "COALESCE(CAST(json_extract(metadata, '$.importance') AS INTEGER), 0) <= ?".to_string(),
+        );
+        sql_params.push(Box::new(max));
+    }
+
+    // External graph-hub placeholders (`ext:*` ids, `source_id == "external"`,
+    // `metadata.external == true`) carry empty text — hide them unless the
+    // caller opts in via `include_external`, an explicit `source_id ==
+    // "external"`, or a metadata filter on `external`.
+    let effective_include_external = request.include_external
+        || request.source_id.as_deref() == Some("external")
+        || request.metadata_filter.contains_key("external");
+    if !effective_include_external {
+        where_clauses.push("id NOT LIKE 'ext:%'".to_string());
+        where_clauses.push("source_id != 'external'".to_string());
+        where_clauses
+            .push("COALESCE(json_extract(metadata, '$.external'), 0) = 0".to_string());
     }
 
     let where_sql = if where_clauses.is_empty() {
@@ -4188,9 +4345,10 @@ fn list_items_internal(
 
 /// Load `(id, metadata, data)` for every entry eligible to anchor a loose link.
 ///
-/// External `ext:` placeholders are excluded: they are hubs themselves, and
-/// chaining links between them would fabricate a mesh that no real entry
-/// supports. Sorted by id so the plan is byte-identical run to run.
+/// Rows flagged `external` are excluded defensively (no such rows should
+/// exist anymore — hubs dangle): chaining links between hubs would fabricate
+/// a mesh that no real entry supports. Sorted by id so the plan is
+/// byte-identical run to run.
 fn load_loose_link_rows_tx(
     connection: &Connection,
 ) -> Result<Vec<(String, Option<Value>, Option<Value>)>> {
@@ -4589,6 +4747,7 @@ mod tests {
         let (organized, total_organized) = store
             .list_items(ListItemsRequest {
                 has_path: Some(true),
+                needs_home: None,
                 ..Default::default()
             })
             .unwrap();
@@ -4598,12 +4757,144 @@ mod tests {
         let (unorganized, total_unorganized) = store
             .list_items(ListItemsRequest {
                 has_path: Some(false),
+                needs_home: None,
                 dreamed: None,
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(total_unorganized, 1);
         assert_eq!(unorganized[0].id, "loose-1");
+    }
+
+    #[test]
+    fn needs_home_excludes_organized_entries_before_pagination() {
+        let store = test_store();
+        for (id, path, metadata, text) in [
+            ("loose", None, json!({}), "Loose note"),
+            ("filed", Some("team"), json!({}), "Filed note"),
+            ("tagged", None, json!({"tags": "work"}), "Tagged note"),
+            ("linked", None, json!({}), "See [[filed]]"),
+        ] {
+            store.upsert_item(ItemRecord {
+                id: id.to_owned(), text: text.to_owned(), metadata,
+                source_id: "memory".to_owned(), created_at: 1000, updated_at: 1000,
+                path: path.map(str::to_owned), type_name: None, data: None,
+                analysis: None, dreamed_at: None,
+            }, &[1.0, 0.0, 0.0]).unwrap();
+        }
+        let (items, total) = store.list_items(ListItemsRequest {
+            needs_home: Some(true), limit: Some(1), ..Default::default()
+        }).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "loose");
+    }
+
+    #[test]
+    fn search_matches_text_id_source_and_path_case_insensitively() {
+        let store = test_store();
+        for (id, source, path, text) in [
+            ("alpha-1", "memory", None, "Buy oat MILK"),
+            ("beta-2", "journal", Some("team/handbook"), "Plain note"),
+            ("gamma-3", "memory", None, "Another plain note"),
+        ] {
+            store.upsert_item(ItemRecord {
+                id: id.to_owned(), text: text.to_owned(), metadata: json!({}),
+                source_id: source.to_owned(), created_at: 1000, updated_at: 1000,
+                path: path.map(str::to_owned), type_name: None, data: None,
+                analysis: None, dreamed_at: None,
+            }, &[1.0, 0.0, 0.0]).unwrap();
+        }
+        let ids = |search: &str| -> Vec<String> {
+            let (items, _) = store.list_items(ListItemsRequest {
+                search: Some(search.to_owned()),
+                ..Default::default()
+            }).unwrap();
+            let mut ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids("milk"), vec!["alpha-1"]);
+        assert_eq!(ids("BETA"), vec!["beta-2"]);
+        assert_eq!(ids("journal"), vec!["beta-2"]);
+        assert_eq!(ids("handbook"), vec!["beta-2"]);
+        assert_eq!(ids("plain"), vec!["beta-2", "gamma-3"]);
+        assert_eq!(ids("   "), vec!["alpha-1", "beta-2", "gamma-3"]);
+        // LIKE wildcards in the input match literally, not as wildcards.
+        assert!(ids("%plain%").is_empty());
+        assert!(ids("plain_").is_empty());
+    }
+
+    #[test]
+    fn metadata_filter_supports_comma_or_and_array_contains() {
+        let store = test_store();
+        for (id, metadata) in [
+            ("scalar-work", json!({"tags": "work"})),
+            ("array-multi", json!({"tags": ["work", "home"]})),
+            ("scalar-play", json!({"tags": "play"})),
+            ("nested", json!({"tags": {"nested": "work"}})),
+            ("untagged", json!({})),
+        ] {
+            store.upsert_item(ItemRecord {
+                id: id.to_owned(), text: "note".to_owned(), metadata,
+                source_id: "memory".to_owned(), created_at: 1000, updated_at: 1000,
+                path: None, type_name: None, data: None,
+                analysis: None, dreamed_at: None,
+            }, &[1.0, 0.0, 0.0]).unwrap();
+        }
+        let ids = |filter: &str| -> Vec<String> {
+            let mut metadata_filter = HashMap::new();
+            metadata_filter.insert("tags".to_owned(), filter.to_owned());
+            let (items, _) = store.list_items(ListItemsRequest {
+                metadata_filter,
+                ..Default::default()
+            }).unwrap();
+            let mut ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+            ids.sort();
+            ids
+        };
+        // Scalar equality still works, and arrays match on containment.
+        assert_eq!(ids("work"), vec!["array-multi", "scalar-work"]);
+        // Comma-separated values match EITHER alternative.
+        assert_eq!(ids("work,play"), vec!["array-multi", "scalar-play", "scalar-work"]);
+        assert_eq!(ids(" home , play "), vec!["array-multi", "scalar-play"]);
+        // Nested objects never match; missing keys never match.
+        assert!(ids("nested").is_empty());
+        assert!(ids("nope").is_empty());
+    }
+
+    #[test]
+    fn importance_range_filters_metadata_importance() {
+        let store = test_store();
+        for (id, metadata) in [
+            ("imp5", json!({"importance": 5})),
+            ("imp4", json!({"importance": 4})),
+            ("imp2", json!({"importance": 2})),
+            ("unrated", json!({})),
+            ("junk", json!({"importance": "high"})),
+        ] {
+            store.upsert_item(ItemRecord {
+                id: id.to_owned(), text: "note".to_owned(), metadata,
+                source_id: "memory".to_owned(), created_at: 1000, updated_at: 1000,
+                path: None, type_name: None, data: None,
+                analysis: None, dreamed_at: None,
+            }, &[1.0, 0.0, 0.0]).unwrap();
+        }
+        let ids = |min: Option<i32>, max: Option<i32>| -> Vec<String> {
+            let (items, _) = store.list_items(ListItemsRequest {
+                min_importance: min,
+                max_importance: max,
+                ..Default::default()
+            }).unwrap();
+            let mut ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+            ids.sort();
+            ids
+        };
+        // Missing and non-numeric importance count as 0.
+        assert_eq!(ids(Some(4), None), vec!["imp4", "imp5"]);
+        assert_eq!(ids(Some(1), None), vec!["imp2", "imp4", "imp5"]);
+        assert_eq!(ids(None, Some(2)), vec!["imp2", "junk", "unrated"]);
+        assert_eq!(ids(Some(2), Some(4)), vec!["imp2", "imp4"]);
+        assert_eq!(ids(None, None), vec!["imp2", "imp4", "imp5", "junk", "unrated"]);
     }
 
     #[test]
@@ -5129,7 +5420,7 @@ mod tests {
 mod loose_link_store_tests {
     use super::*;
     use serde_json::json;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn store_with_graph() -> SqliteVectorStore {
         static NEXT_DB_ID: AtomicUsize = AtomicUsize::new(0);
@@ -5202,22 +5493,115 @@ mod loose_link_store_tests {
     }
 
     #[test]
-    fn creates_the_hub_placeholder_as_a_real_entry() {
+    fn hub_edges_dangle_without_a_stored_row() {
         let store = store_with_graph();
         put(&store, "a", "rust-rag");
         put(&store, "b", "rust-rag");
 
-        store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        let report = store.rebuild_loose_links(&[repo_rule()], 0).unwrap();
+        assert_eq!(report.hub_edges, 2);
 
-        // Without this row the graph FKs would reject every edge.
-        let hub = store
-            .get_item("ext:repo:rust-rag")
-            .unwrap()
-            .expect("hub exists");
+        // No row is stored for the hub — the edges dangle.
+        assert!(store.get_item("ext:repo:rust-rag").unwrap().is_none());
+        assert_eq!(edges_of(&store, "a").len(), 1);
+        assert_eq!(edges_of(&store, "ext:repo:rust-rag").len(), 2);
+
+        // …but the neighborhood still resolves it synthetically.
+        let neighborhood = store.graph_neighborhood("a", 1, 10, None).unwrap();
+        let hub = neighborhood
+            .nodes
+            .iter()
+            .find(|n| n.id == "ext:repo:rust-rag")
+            .expect("synthetic hub node present");
         assert_eq!(hub.metadata["external"], json!(true));
-        assert_eq!(hub.metadata["embed"], json!(false));
-        assert_eq!(hub.metadata["members"], json!(2));
         assert_eq!(hub.source_id, "external");
+    }
+
+    #[test]
+    fn legacy_databases_lose_edge_fks_and_stub_rows_on_open() {
+        // Seed the pre-migration shape on a raw file connection: FK-bound
+        // graph_edges plus the empty stub row those FKs forced into existence.
+        // The seed connection is closed before the store opens the file, so
+        // the store is the only connection (sharing a database file between
+        // an open raw connection and the store is not supported).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.db");
+        let path_str = path.to_str().expect("utf8 path").to_owned();
+        {
+            let connection =
+                rusqlite::Connection::open(&path).expect("create legacy db");
+            connection
+                .execute_batch(
+                    r#"CREATE TABLE items (
+                        id TEXT PRIMARY KEY,
+                        text TEXT NOT NULL,
+                        metadata TEXT NOT NULL,
+                        source_id TEXT NOT NULL DEFAULT 'default',
+                        created_at INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE graph_edges (
+                        id TEXT PRIMARY KEY,
+                        from_item_id TEXT NOT NULL,
+                        to_item_id TEXT NOT NULL,
+                        edge_type TEXT NOT NULL,
+                        relation TEXT,
+                        sort_order TEXT NOT NULL DEFAULT '00000000000000000000',
+                        weight REAL NOT NULL,
+                        directed INTEGER NOT NULL DEFAULT 0,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY(from_item_id) REFERENCES items(id) ON DELETE CASCADE,
+                        FOREIGN KEY(to_item_id) REFERENCES items(id) ON DELETE CASCADE
+                    );
+                    -- Mirror production: the FTS index and triggers exist before
+                    -- any rows, so rows are trigger-indexed (bulk backfills leave
+                    -- the index in a state where trigger-deletes fail).
+                    CREATE VIRTUAL TABLE items_fts USING fts5(
+                        id UNINDEXED,
+                        text,
+                        content='items',
+                        content_rowid='rowid'
+                    );
+                    CREATE TRIGGER items_ai AFTER INSERT ON items BEGIN
+                        INSERT INTO items_fts(rowid, id, text) VALUES (new.rowid, new.id, new.text);
+                    END;
+                    CREATE TRIGGER items_ad AFTER DELETE ON items BEGIN
+                        INSERT INTO items_fts(items_fts, rowid, id, text) VALUES('delete', old.rowid, old.id, old.text);
+                    END;
+                    INSERT INTO items (id, text, metadata, source_id, created_at, updated_at)
+                    VALUES ('a', 'body', '{}', 'knowledge', 1, 1);
+                    INSERT INTO items (id, text, metadata, source_id, created_at, updated_at)
+                    VALUES ('ext:repo:rust-rag', '', '{"external": true}', 'external', 1, 1);
+                    INSERT INTO graph_edges
+                        (id, from_item_id, to_item_id, edge_type, relation, sort_order,
+                         weight, directed, metadata, created_at, updated_at)
+                    VALUES ('e1', 'a', 'ext:repo:rust-rag', 'manual', 'shares_repo',
+                            '00000000000000000001', 0.6, 0, '{}', 1, 1);"#,
+                )
+                .expect("seed legacy schema");
+        }
+        let store = SqliteVectorStore::connect(
+            &path_str,
+            3,
+            GraphConfig {
+                enabled: true,
+                ..GraphConfig::default()
+            },
+        )
+        .expect("open legacy db");
+        // The empty stub is gone, the real item and the edge survive.
+        assert!(store.get_item("ext:repo:rust-rag").unwrap().is_none());
+        assert!(store.get_item("a").unwrap().is_some());
+        assert_eq!(edges_of(&store, "a").len(), 1);
+        assert_eq!(edges_of(&store, "ext:repo:rust-rag").len(), 1);
+        // Deleting the item removes its incident edges (replaces CASCADE).
+        assert!(store.delete_item("a").unwrap());
+        assert!(store
+            .list_graph_edges(None, None, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
